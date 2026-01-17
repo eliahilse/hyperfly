@@ -1,6 +1,6 @@
 {
   "name": "hyperfly",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Global load balancer on Cloudflare Workers. Geo-aware routing with automatic read/write separation.",
   "type": "module",
   "license": "Elastic-2.0",
@@ -16,7 +16,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc"
   },

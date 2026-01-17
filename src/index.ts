@@ -6,12 +6,19 @@ export interface Origin {
   write?: boolean;
 }
 
-export interface LBConfig {
-  origins: (string | Origin)[];
-  strategy?: Strategy;
+export interface FailoverConfig {
+  maxRetries?: number;
+  statusCodes?: number[];
+  timeout?: number;
 }
 
-function normalizeOrigins(origins: LBConfig["origins"]): Origin[] {
+export interface HyperflyConfig {
+  origins: (string | Origin)[];
+  strategy?: Strategy;
+  failover?: FailoverConfig | boolean;
+}
+
+function normalizeOrigins(origins: HyperflyConfig["origins"]): Origin[] {
   return origins.map((o) => (typeof o === "string" ? { url: o } : o));
 }
 
@@ -28,33 +35,104 @@ function isWriteMethod(method: string): boolean {
   return ["POST", "PUT", "PATCH", "DELETE"].includes(method);
 }
 
-export function createLB(config: LBConfig) {
-  const origins = normalizeOrigins(config.origins);
-  const strategy = config.strategy ?? "geo";
+const DEFAULT_FAILOVER_CODES = [429, 500, 502, 503, 504];
 
-  const writeOrigins = origins.filter((o) => o.write);
-  const readOrigins = origins.filter((o) => !o.write);
+function shouldFailover(status: number, codes: number[]): boolean {
+  return codes.includes(status);
+}
 
-  return {
-    async fetch(request: Request): Promise<Response> {
-      const pool = isWriteMethod(request.method) ? writeOrigins : readOrigins;
-      const candidates = pool.length > 0 ? pool : origins;
+function shuffle<T>(arr: T[]): T[] {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 
-      let origin: Origin;
+function buildFailoverQueue(
+  primary: Origin,
+  candidates: Origin[],
+  maxRetries: number
+): Origin[] {
+  const others = shuffle(candidates.filter((o) => o.url !== primary.url));
+  return [primary, ...others].slice(0, maxRetries);
+}
 
-      if (strategy === "geo") {
-        const continent = (request as any).cf?.continent as string | undefined;
-        origin = pickGeo(candidates, continent) ?? pickRandom(candidates);
-      } else {
-        origin = pickRandom(candidates);
+function proxyRequest(request: Request, origin: Origin, timeout?: number): Promise<Response> {
+  const url = new URL(request.url);
+  const target = new URL(origin.url);
+  url.host = target.host;
+  url.protocol = target.protocol;
+
+  const proxied = new Request(url.toString(), request);
+
+  if (!timeout) return fetch(proxied);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  return fetch(proxied, { signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+}
+
+export class Hyperfly {
+  private origins: Origin[];
+  private strategy: Strategy;
+  private failoverEnabled: boolean;
+  private maxRetries: number;
+  private failoverCodes: number[];
+  private timeout?: number;
+  private writeOrigins: Origin[];
+  private readOrigins: Origin[];
+
+  constructor(config: HyperflyConfig) {
+    this.origins = normalizeOrigins(config.origins);
+    this.strategy = config.strategy ?? "geo";
+    this.failoverEnabled = config.failover !== undefined && config.failover !== false;
+
+    const failoverConfig = typeof config.failover === "object" ? config.failover : {};
+    this.maxRetries = failoverConfig.maxRetries ?? this.origins.length;
+    this.failoverCodes = failoverConfig.statusCodes ?? DEFAULT_FAILOVER_CODES;
+    this.timeout = failoverConfig.timeout;
+
+    this.writeOrigins = this.origins.filter((o) => o.write);
+    this.readOrigins = this.origins.filter((o) => !o.write);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const pool = isWriteMethod(request.method) ? this.writeOrigins : this.readOrigins;
+    const candidates = pool.length > 0 ? pool : this.origins;
+
+    const continent = (request as any).cf?.continent as string | undefined;
+    const primary =
+      this.strategy === "geo"
+        ? pickGeo(candidates, continent) ?? pickRandom(candidates)
+        : pickRandom(candidates);
+
+    if (!this.failoverEnabled) {
+      return proxyRequest(request, primary, this.timeout);
+    }
+
+    const failoverPool =
+      isWriteMethod(request.method) && this.writeOrigins.length > 0
+        ? this.writeOrigins
+        : candidates;
+    const queue = buildFailoverQueue(primary, failoverPool, this.maxRetries);
+
+    let lastError: unknown;
+    for (const origin of queue) {
+      try {
+        const response = await proxyRequest(request, origin, this.timeout);
+        if (!shouldFailover(response.status, this.failoverCodes)) {
+          return response;
+        }
+        lastError = response;
+      } catch (err) {
+        lastError = err;
       }
+    }
 
-      const url = new URL(request.url);
-      const target = new URL(origin.url);
-      url.host = target.host;
-      url.protocol = target.protocol;
-
-      return fetch(new Request(url.toString(), request));
-    },
-  };
+    if (lastError instanceof Response) return lastError;
+    throw lastError;
+  }
 }
