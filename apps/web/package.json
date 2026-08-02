@@ -1,0 +1,33 @@
+{
+  "name": "@hyperfly/web",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "bun scripts/generate-og.tsx && next build",
+    "start": "next start",
+    "lint": "eslint --max-warnings 0",
+    "check-types": "next typegen && tsc --noEmit",
+    "preview": "bun scripts/generate-og.tsx && opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "bun scripts/generate-og.tsx && opennextjs-cloudflare build && opennextjs-cloudflare deploy"
+  },
+  "dependencies": {
+    "@opennextjs/cloudflare": "latest",
+    "@takumi-rs/image-response": "^0.70.4",
+    "geist": "^1.7.0",
+    "next": "16.1.5",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "*",
+    "@repo/typescript-config": "*",
+    "@types/node": "^22.15.3",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2",
+    "wrangler": "^4.0.0"
+  }
+}

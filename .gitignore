@@ -1,6 +1,25 @@
 # node
 node_modules
-
-# dist
-dist
 .npmrc
+
+# build outputs
+dist
+.next/
+.open-next/
+out/
+build
+*.tsbuildinfo
+next-env.d.ts
+
+# turbo
+.turbo
+
+# env
+.env
+.env.local
+.env*.local
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
