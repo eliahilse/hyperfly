@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Legacy: global load balancer on Cloudflare Workers. Geo-aware routing with automatic read/write separation.",
   "type": "module",
-  "license": "Elastic-2.0",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/eliahilse/hyperfly"
@@ -17,7 +17,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc"

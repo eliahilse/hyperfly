@@ -337,6 +337,9 @@ export default function Home() {
           <a href={`${GITHUB}/tree/main/packages/lb`} target="_blank" rel="noopener noreferrer">
             load balancer
           </a>
+          <a href={`${GITHUB}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
+            apache-2.0
+          </a>
           <a href="https://x.com/eliahilse" target="_blank" rel="noopener noreferrer">
             elia hilse
           </a>

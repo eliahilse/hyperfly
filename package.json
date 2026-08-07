@@ -1,6 +1,7 @@
 {
   "name": "hyperfly-monorepo",
   "private": true,
+  "license": "Apache-2.0",
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
