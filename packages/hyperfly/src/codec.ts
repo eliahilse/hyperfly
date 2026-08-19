@@ -33,10 +33,19 @@ export interface Codec<T = unknown> {
   decodeBody(bytes: Uint8Array): T;
 }
 
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const inner of Object.values(value)) deepFreeze(inner);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
   validateIR(ir);
-  // isolate from later caller mutation: the fingerprint is fixed at compile time
-  ir = structuredClone(ir);
+  // isolate from later mutation, caller-side or through codec.ir: the fingerprint is
+  // fixed at compile time and the schema behind it must not drift
+  ir = deepFreeze(structuredClone(ir));
   const plan: PlanLayout = options.plan ?? "row";
   const artifact = serializeArtifact(ir, plan);
   const fingerprintBytes = fingerprintOf(artifact);

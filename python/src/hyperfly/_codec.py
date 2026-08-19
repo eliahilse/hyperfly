@@ -142,12 +142,13 @@ def _columnar_eligible(node: dict[str, Any]) -> bool:
     return node["element"].get("kind") == "struct" and _flatten_leaves(node["element"]) is not None
 
 
-def _decimal_mantissa(v: float, pow10: int) -> int:
+def _decimal_mantissa(v: float, pow10: int) -> float:
+    # returns a float so callers can reject non-finite scaling before int conversion
     if v > 0:
-        return math.floor(v * pow10 + 0.5)
+        return math.floor(v * pow10 + 0.5) if math.isfinite(v * pow10) else math.inf
     if v < 0:
-        return -math.floor(-v * pow10 + 0.5)
-    return 0
+        return -math.floor(-v * pow10 + 0.5) if math.isfinite(v * pow10) else -math.inf
+    return 0.0
 
 
 def _decimal_scale(values: list[float]) -> int | None:
@@ -156,7 +157,7 @@ def _decimal_scale(values: list[float]) -> int | None:
         ok = True
         for v in values:
             m = _decimal_mantissa(v, pow10)
-            if not (INT_MIN <= m <= INT_MAX) or m / pow10 != v:
+            if not math.isfinite(m) or not (INT_MIN <= m <= INT_MAX) or m / pow10 != v:
                 ok = False
                 break
         if ok:
@@ -295,7 +296,7 @@ def _encode_float_column(out: bytearray, values: list[Any], path: str) -> None:
     mantissas: list[int] = []
     if scale is not None:
         pow10 = _POW10[scale]
-        mantissas = [_decimal_mantissa(v, pow10) for v in canon]
+        mantissas = [int(_decimal_mantissa(v, pow10)) for v in canon]
         scaled_raw_cost = 1 + sum(uleb_len(zigzag(m)) for m in mantissas)
         scaled_delta_cost = 1 + uleb_len(zigzag(mantissas[0])) + sum(
             uleb_len(zigzag(mantissas[i] - mantissas[i - 1])) for i in range(1, len(mantissas))
@@ -747,7 +748,7 @@ class Codec:
         validate_ir(ir)
         # isolate from later caller mutation: the fingerprint is fixed at compile time
         ir = copy.deepcopy(ir)
-        self.ir = ir
+        self._ir = ir
         self.plan = plan
         self.artifact = serialize_artifact(ir, plan)
         self._fp = fingerprint_of(self.artifact)
@@ -761,14 +762,19 @@ class Codec:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
         self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate)
 
+    @property
+    def ir(self) -> dict[str, Any]:
+        """A copy: the compiled schema is fixed by the fingerprint and never mutated."""
+        return copy.deepcopy(self._ir)
+
     def encode_body(self, value: Any) -> bytes:
         out = bytearray()
-        _encode_node(out, self.ir, value, "$", 0, self._ctx)
+        _encode_node(out, self._ir, value, "$", 0, self._ctx)
         return bytes(out)
 
     def decode_body(self, data: bytes) -> Any:
         r = Reader(bytes(data), self._limits)
-        value = _decode_node(r, self.ir, "$", 0, self._ctx)
+        value = _decode_node(r, self._ir, "$", 0, self._ctx)
         r.expect_end()
         return value
 

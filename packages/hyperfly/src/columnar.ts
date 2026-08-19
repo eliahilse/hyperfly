@@ -102,7 +102,10 @@ function decodeIntColumn(r: Reader, node: IntNode, count: number, path: string):
   const mode = r.u8();
   if (mode > 1) throw new DecodeError("marker", `${path}: invalid int column mode 0x${mode.toString(16)}`);
   const out: number[] = new Array<number>(count);
-  if (count === 0) return out;
+  if (count === 0) {
+    if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
+    return out;
+  }
 
   const fromForm = (form: bigint): bigint =>
     node.min !== undefined ? form + BigInt(node.min) : unzigzag(form);
@@ -239,7 +242,10 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
   const mode = r.u8();
   if (mode > 3) throw new DecodeError("marker", `${path}: invalid float column mode 0x${mode.toString(16)}`);
   const out: number[] = new Array<number>(count);
-  if (count === 0) return out;
+  if (count === 0) {
+    if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
+    return out;
+  }
 
   if (mode >= 2) {
     const scale = r.u8();

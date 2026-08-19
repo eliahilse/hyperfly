@@ -139,3 +139,26 @@ def test_gt_bound_matches_min_two():
         n: int = Field(gt=1)
 
     assert to_ir(M)["fields"][0]["type"] == {"kind": "int", "min": 2}
+
+
+def test_extreme_float_falls_back_to_raw_mode():
+    import sys
+
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "x", "type": {"kind": "float64"}}]}}
+    codec = compile_ir(ir, plan="columnar")
+    value = [{"x": sys.float_info.max}, {"x": 1.5}]
+    assert codec.decode_body(codec.encode_body(value)) == value
+
+
+def test_codec_ir_is_isolated_from_mutation():
+    codec = compile_ir({"kind": "int", "min": 0})
+    codec.ir["min"] = 10
+    assert codec.encode_body(0) == b"\x00"
+
+
+def test_pydantic_rejects_one_sided_alias():
+    class M(BaseModel):
+        x: int = Field(validation_alias="wire_x")
+
+    with pytest.raises(HyperflyError):
+        to_ir(M)

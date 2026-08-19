@@ -242,3 +242,20 @@ describe("zod integration", () => {
     expect(codec.decode(codec.encode(payload))).toEqual(payload);
   });
 });
+
+describe("empty column canonicality", () => {
+  test("nonzero mode with no rows is rejected for every column type", () => {
+    const cases: [IRNode, string][] = [
+      [{ kind: "int" }, "01 00 01"],
+      [{ kind: "float64" }, "01 00 01"],
+      [{ kind: "string" }, "01 00 01"],
+    ];
+    for (const [type, hex] of cases) {
+      const codec = compileIR(
+        { kind: "array", element: { kind: "struct", fields: [{ name: "x", type, optional: true }] } },
+        { plan: "columnar" },
+      );
+      expect(() => codec.decodeBody(fromHex(hex.replace(/ /g, "")))).toThrow("mode 0x00");
+    }
+  });
+});

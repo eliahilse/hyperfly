@@ -149,13 +149,21 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
     for name, info in model.model_fields.items():
         field_path = f"{path}.{name}"
         node = _node_of(info.annotation, list(info.metadata), field_path)
-        # the wire name must match what model_dump(by_alias=True) emits; a split
-        # validation/serialization alias pair has no single portable name
-        ser = info.serialization_alias
-        val = info.validation_alias if isinstance(info.validation_alias, str) else None
-        if ser is not None and val is not None and ser != val:
-            _unsupported(field_path, "split validation/serialization aliases have no single wire name")
-        wire_name = ser or val or info.alias or name
+        # the wire name must be what model_dump(by_alias=True) emits AND what
+        # model_validate accepts; anything that splits those has no single wire name
+        ser_name = info.serialization_alias or info.alias or name
+        val_name = (
+            info.validation_alias
+            if isinstance(info.validation_alias, str)
+            else (info.alias if info.validation_alias is None else None)
+        ) or name
+        if ser_name != val_name:
+            _unsupported(
+                field_path,
+                f"serialization name {ser_name!r} and validation name {val_name!r} differ; "
+                "use a single alias=... so the wire has one portable field name",
+            )
+        wire_name = ser_name
         field: dict[str, Any] = {"name": wire_name, "type": node}
         if node["kind"] == "nullable":
             field["type"] = node["inner"]
