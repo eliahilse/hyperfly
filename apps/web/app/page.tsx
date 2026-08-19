@@ -164,10 +164,11 @@ export default function Home() {
           <Reveal delay={120}>
             <p className="footnote">
               Measured with the TypeScript reference implementation on deterministic synthetic
-              corpora — reproduce with `bun run bench` in the repo. Results depend entirely on the
-              payload: structure compresses, prose does not, and the feed tab above is the loss
-              case shown on purpose. Baselines: gzip −6, Brotli q11 (its offline ceiling; the
-              dynamic q4 setting is larger), Protobuf with proper enums and int64.
+              corpora — reproduce with `bun run bench` in the repo. The Brotli row is q4, the
+              level edges actually run on dynamic responses; q6 (nginx&apos;s default) and the q11
+              offline ceiling are in the harness, and columnar clears even q11 on the candles
+              corpus. Protobuf gets proper enums and int64. Results depend entirely on the
+              payload: structure compresses, prose does not, and the feed tab is the honest wash.
             </p>
           </Reveal>
         </section>
