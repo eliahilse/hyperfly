@@ -11,9 +11,9 @@ const REMOVED = [
   { gone: "field names", kept: "position is the name" },
   { gone: "type descriptors", kept: "the codec is already typed" },
   { gone: "object structure", kept: "compiled into the reader" },
-  { gone: "enum members", kept: "an index, log₂(n) bits wide" },
-  { gone: "value bounds", kept: "the bits the range requires" },
-  { gone: "optionality", kept: "one bit, packed with the rest" },
+  { gone: "enum members", kept: "an index into a set both sides hold" },
+  { gone: "value bounds", kept: "an offset from the declared minimum" },
+  { gone: "optionality", kept: "one bit in a shared bitmap" },
 ];
 
 const STAGES = [
@@ -39,16 +39,14 @@ const STAGES = [
     index: "04",
     name: "Wire",
     body: "The result is an immutable codec profile — one artifact, identical behaviour on every runtime, negotiated per request.",
-    artifact: "hf1 · 0x04 · profile:3f9c",
+    artifact: "hf · v1 · fp:8cf38e4e",
   },
 ];
 
 const BYTES = [
   { name: "MAGIC", size: "2", detail: "hf" },
-  { name: "VER", size: "1", detail: "wire version" },
-  { name: "CODEC", size: "4", detail: "plan id" },
-  { name: "PROFILE", size: "8", detail: "content hash" },
-  { name: "FLAGS", size: "1", detail: "columnar · dict · delta" },
+  { name: "VER", size: "1", detail: "wire major" },
+  { name: "FINGERPRINT", size: "16", detail: "SHA-256 of the codec artifact — schema, plan, parameters" },
   { name: "BODY", size: "…", detail: "the part that was actually said" },
 ];
 
@@ -165,10 +163,11 @@ export default function Home() {
 
           <Reveal delay={120}>
             <p className="footnote">
-              The figures above model the design. They are not measurements, and results depend
-              entirely on the payload — structure compresses, prose does not. Reproducible
-              benchmarks against JSON, gzip, Brotli, Protobuf, MessagePack, and CBOR ship with the
-              first release.
+              Measured with the TypeScript reference implementation on deterministic synthetic
+              corpora — reproduce with `bun run bench` in the repo. Results depend entirely on the
+              payload: structure compresses, prose does not, and the feed tab above is the loss
+              case shown on purpose. Baselines: gzip −6, Brotli q11 (its offline ceiling; the
+              dynamic q4 setting is larger), Protobuf with proper enums and int64.
             </p>
           </Reveal>
         </section>
@@ -204,8 +203,9 @@ export default function Home() {
               <span className="section-index">04</span>
               <h2 className="section-title">The envelope</h2>
               <p className="section-lead">
-                Sixteen bytes of header, then the payload. Small enough to read in one glance,
-                versioned so that nothing breaks when the profile moves.
+                Nineteen bytes of header, then the payload. The fingerprint names the entire
+                codec — same schema under a different plan is a different artifact, so bytes are
+                never misread, only refused.
               </p>
             </div>
           </Reveal>
@@ -221,7 +221,7 @@ export default function Home() {
                   </div>
                 ))}
               </div>
-              <span className="wire-tag">planned layout</span>
+              <span className="wire-tag">wire v0 — spec/wire-v0.md</span>
             </div>
           </Reveal>
 
