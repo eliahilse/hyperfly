@@ -32,10 +32,16 @@ def run_invalid_decode(vector, plan):
     assert err.value.code == vector["error"], vector["name"]
 
 
+def revive(value):
+    if isinstance(value, dict) and "$surrogate" in value:
+        return chr(int(value["$surrogate"], 16))
+    return value
+
+
 def run_invalid_encode(vector, plan):
     codec = compile_ir(vector["ir"], plan=plan)
     with pytest.raises(HyperflyError) as err:
-        codec.encode_body(vector["value"])
+        codec.encode_body(revive(vector["value"]))
     assert err.value.code == vector["error"], vector["name"]
 
 
