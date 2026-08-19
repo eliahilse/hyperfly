@@ -479,8 +479,8 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         length = node.get("length")
         if length is None:
             length = read_uleb(r)
-            if length > r.limits.max_items:
-                _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
+        if length > r.limits.max_items:
+            _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
         return [_decode_node(r, node["element"], f"{path}[{i}]", depth + 1, ctx) for i in range(length)]
     if kind == "struct":
         optional = [f for f in node["fields"] if f.get("optional")]
@@ -649,13 +649,16 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
     length = node.get("length")
     if length is None:
         length = read_uleb(r)
-        if length > r.limits.max_items:
-            _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
+    if length > r.limits.max_items:
+        _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
     count = length
 
     rows: list[dict[str, Any]] = [{} for _ in range(count)]
     leaves = _flatten_leaves(element)
     assert leaves is not None
+    for segs, _field in leaves:
+        if depth + 1 + len(segs) > r.limits.max_depth:
+            _dfail("depth", path, f"nesting deeper than {r.limits.max_depth}")
 
     def container(row: dict[str, Any], segs: tuple[str, ...]) -> dict[str, Any]:
         obj = row
@@ -666,6 +669,11 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
     for segs, field in leaves:
         leaf = segs[-1]
         field_path = f"{path}[].{'.'.join(segs)}"
+        # nested structs are required and non-nullable: materialize the container chain at
+        # this leaf's declared position for every row (order-preserving, empty-safe)
+        if len(segs) > 1:
+            for row in rows:
+                container(row, segs)
         presence = read_bitmap(r, count, field_path) if field.get("optional") else None
         nulls = read_bitmap(r, count, field_path) if field.get("nullable") else None
 
@@ -709,9 +717,13 @@ def _default_deflate(data: bytes) -> bytes:
 
 def _default_inflate(data: bytes, max_output_length: int) -> bytes:
     d = zlib.decompressobj(-15)
-    out = d.decompress(data, max_output_length)
+    # cap at declared size + 1 so an over-long stream is detected, never unbounded
+    out = d.decompress(data, max_output_length + 1)
     if d.unconsumed_tail:
-        raise ValueError("output exceeds declared size")
+        raise ValueError("packed blob inflates past its declared size")
+    out += d.flush()
+    if not d.eof:
+        raise ValueError("truncated deflate stream")
     return out
 
 

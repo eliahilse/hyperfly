@@ -529,7 +529,13 @@ export function decodeColumnarArray(
     let obj = row;
     for (let d = 0; d < segs.length - 1; d++) {
       const seg = segs[d]!;
-      obj = (obj[seg] ??= {}) as Record<string, unknown>;
+      // guard against a schema field literally named __proto__ polluting the prototype
+      let next = Object.prototype.hasOwnProperty.call(obj, seg) ? obj[seg] : undefined;
+      if (typeof next !== "object" || next === null) {
+        next = Object.create(null) as Record<string, unknown>;
+        Object.defineProperty(obj, seg, { value: next, enumerable: true, writable: true, configurable: true });
+      }
+      obj = next as Record<string, unknown>;
     }
     return obj;
   };
@@ -538,6 +544,15 @@ export function decodeColumnarArray(
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const fieldPath = `${path}[].${leaf.segs.join(".")}`;
+    if (depth + 1 + leaf.segs.length > r.limits.maxDepth) {
+      throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
+    }
+    // nested structs are required and non-nullable: materialize the container chain at
+    // this leaf's declared position for every row, so an all-absent nested struct still
+    // round-trips and keys stay in declared order across implementations
+    if (leaf.segs.length > 1) {
+      for (let i = 0; i < count; i++) containerOf(out[i]!, leaf.segs);
+    }
     const presence = field.optional ? readBitmap(r, count, fieldPath) : null;
     const nulls = field.nullable ? readBitmap(r, count, fieldPath) : null;
 

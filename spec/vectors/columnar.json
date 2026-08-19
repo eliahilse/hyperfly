@@ -455,6 +455,51 @@
         }
       ],
       "hex": "010102"
+    },
+    {
+      "name": "col-nested-empty-optional-leaf-roundtrips",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            },
+            {
+              "name": "p",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "q",
+                    "type": {
+                      "kind": "int"
+                    },
+                    "optional": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 1,
+          "p": {}
+        },
+        {
+          "a": 2,
+          "p": {
+            "q": 9
+          }
+        }
+      ],
+      "hex": "02000204020012"
     }
   ],
   "invalidDecode": [

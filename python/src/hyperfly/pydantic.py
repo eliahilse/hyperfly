@@ -28,15 +28,24 @@ def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]
     hi: int | None = None
     if _at is None:
         return None, None
+
+    def tighten_lo(candidate: int) -> None:
+        nonlocal lo
+        lo = candidate if lo is None else max(lo, candidate)
+
+    def tighten_hi(candidate: int) -> None:
+        nonlocal hi
+        hi = candidate if hi is None else min(hi, candidate)
+
     for m in metadata:
         if isinstance(m, _at.Ge):
-            lo = _ceil_int(m.ge, path)
+            tighten_lo(_ceil_int(m.ge, path))
         elif isinstance(m, _at.Gt):
-            lo = _ceil_int(m.gt, path) + (1 if _is_integral(m.gt) else 0)
+            tighten_lo(_floor_int(m.gt, path) + 1)
         elif isinstance(m, _at.Le):
-            hi = _floor_int(m.le, path)
+            tighten_hi(_floor_int(m.le, path))
         elif isinstance(m, _at.Lt):
-            hi = _floor_int(m.lt, path) - (1 if _is_integral(m.lt) else 0)
+            tighten_hi(_ceil_int(m.lt, path) - 1)
     return lo, hi
 
 
@@ -121,6 +130,8 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
 
 
 def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
+    if model.model_config.get("extra") == "allow":
+        _unsupported(path, "models with extra='allow' cannot be represented — the wire has no room for undeclared fields")
     fields = []
     for name, info in model.model_fields.items():
         field_path = f"{path}.{name}"
@@ -129,6 +140,8 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
         if node["kind"] == "nullable":
             field["type"] = node["inner"]
             field["nullable"] = True
+        if not info.is_required():
+            field["optional"] = True
         fields.append(field)
     return {"kind": "struct", "fields": fields}
 
@@ -136,7 +149,18 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
 def to_ir(model: type[BaseModel]) -> dict[str, Any]:
     if not (isinstance(model, type) and issubclass(model, BaseModel)):
         _unsupported("$", "expected a pydantic BaseModel subclass")
+    if "root" in getattr(model, "model_fields", {}) and type(model).__name__ == "ModelMetaclass" and _is_root_model(model):
+        _unsupported("$", "RootModel has no v0 struct encoding — wrap the value in a field")
     return _struct_of(model, "$")
+
+
+def _is_root_model(model: type) -> bool:
+    try:
+        from pydantic import RootModel
+
+        return issubclass(model, RootModel)
+    except ImportError:  # pragma: no cover
+        return False
 
 
 class _ModelCodec:
@@ -151,9 +175,11 @@ class _ModelCodec:
 
     def _to_value(self, value: Any) -> Any:
         if isinstance(value, BaseModel):
-            value = value.model_dump(mode="python")
-        if self._validate:
-            value = self._model.model_validate(value).model_dump(mode="python")
+            if self._validate:
+                value = self._model.model_validate(value)
+            value = value.model_dump(mode="python", exclude_unset=True)
+        elif self._validate:
+            value = self._model.model_validate(value).model_dump(mode="python", exclude_unset=True)
         return value
 
     def encode(self, value: Any) -> bytes:

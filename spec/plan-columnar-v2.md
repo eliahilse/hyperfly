@@ -68,7 +68,11 @@ always agree.
     followed by `svarint(m[i] - m[i-1])` for `0x02`, or `svarint(m[i])` per
     value for `0x03`. The mantissa is pinned to pure IEEE 754 operations so
     every language derives the same bytes:
-    `m = sign(v) · floor(|v| · 10^d + 0.5)`. Encoders may choose these modes
+    `m = sign(v) · floor(|v| · 10^d + 0.5)`, where `|v| · 10^d` and the
+    subsequent `+ 0.5` are two separately rounded IEEE 754 binary64
+    operations — implementations MUST NOT contract them into a fused
+    multiply-add, which would round once and can differ in the last place.
+    Encoders may choose these modes
     only when `d` is the smallest scale for which every value satisfies
     `m / 10^d == v` exactly with `m` in the integer domain;
     decoding computes `Number(m) / 10^d`, which reproduces the encoder's

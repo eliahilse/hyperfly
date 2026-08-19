@@ -17,6 +17,15 @@ def _is_safe_int(v: Any) -> bool:
     return type(v) is int and INT_MIN <= v <= INT_MAX
 
 
+def _has_lone_surrogate(s: str) -> bool:
+    return any(0xD800 <= ord(ch) <= 0xDFFF for ch in s)
+
+
+def _check_string(v: str, path: str, what: str) -> None:
+    if _has_lone_surrogate(v):
+        _fail(path, f"{what} contains a lone surrogate and has no portable encoding")
+
+
 def validate_ir(node: dict[str, Any], path: str = "$") -> None:
     kind = node.get("kind")
     if kind in ("bool", "float64", "string", "bytes"):
@@ -34,6 +43,8 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
         v = node.get("value")
         if not (v is None or type(v) is str or type(v) is bool or _is_safe_int(v)):
             _fail(path, "literal must be string, boolean, null, or a safe integer")
+        if type(v) is str:
+            _check_string(v, path, "literal string")
         return
     if kind == "enum":
         members = node.get("members") or []
@@ -43,6 +54,7 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
         for m in members:
             if type(m) is not str or not m:
                 _fail(path, "enum members must be non-empty strings")
+            _check_string(m, path, "enum member")
             if m in seen:
                 _fail(path, f'duplicate enum member "{m}"')
             seen.add(m)
@@ -65,6 +77,7 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
             name = f.get("name")
             if type(name) is not str or not name:
                 _fail(path, "field names must be non-empty strings")
+            _check_string(name, path, "field name")
             if name in seen:
                 _fail(path, f'duplicate field "{name}"')
             seen.add(name)

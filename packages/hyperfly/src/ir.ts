@@ -30,6 +30,24 @@ function isSafeInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v);
 }
 
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function checkString(v: string, path: string, what: string): void {
+  if (hasLoneSurrogate(v)) fail(path, `${what} contains a lone surrogate and has no portable encoding`);
+}
+
 export function validateIR(node: IRNode, path = "$"): void {
   switch (node.kind) {
     case "bool":
@@ -57,6 +75,7 @@ export function validateIR(node: IRNode, path = "$"): void {
         typeof v === "boolean" ||
         (isSafeInt(v) && !Object.is(v, -0));
       if (!ok) fail(path, "literal must be string, boolean, null, or a safe integer");
+      if (typeof v === "string") checkString(v, path, "literal string");
       return;
     }
     case "enum": {
@@ -64,6 +83,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       const seen = new Set<string>();
       for (const m of node.members) {
         if (typeof m !== "string" || m.length === 0) fail(path, "enum members must be non-empty strings");
+        checkString(m, path, "enum member");
         if (seen.has(m)) fail(path, `duplicate enum member "${m}"`);
         seen.add(m);
       }
@@ -85,6 +105,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       const seen = new Set<string>();
       for (const f of node.fields) {
         if (typeof f.name !== "string" || f.name.length === 0) fail(path, "field names must be non-empty strings");
+        checkString(f.name, path, "field name");
         if (seen.has(f.name)) fail(path, `duplicate field "${f.name}"`);
         seen.add(f.name);
         if (f.nullable && f.type.kind === "nullable") {

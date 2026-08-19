@@ -38,14 +38,39 @@ function internals(schema: unknown, path: string): ZodInternals {
   return z;
 }
 
-function intBound(raw: unknown, mode: "min" | "max", path: string): number | undefined {
+function boundValue(raw: unknown): number | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
-  const bound = mode === "min" ? Math.ceil(raw) : Math.floor(raw);
-  if (bound < INT_MIN || bound > INT_MAX) unsupported(path, `bound ${raw} outside the v0 integer domain`);
-  if (mode === "min" && bound === INT_MIN) return undefined;
-  if (mode === "max" && bound === INT_MAX) return undefined;
-  return bound;
+  return raw;
+}
+
+/** Intersect inclusive and exclusive bounds into one integer minimum, or undefined if only the domain default. */
+function intMin(bag: Record<string, unknown>, path: string): number | undefined {
+  let bound: number | undefined;
+  const inclusive = boundValue(bag.minimum);
+  if (inclusive !== undefined) bound = Math.ceil(inclusive);
+  const exclusive = boundValue(bag.exclusiveMinimum);
+  if (exclusive !== undefined) {
+    const fromExcl = Math.floor(exclusive) + 1;
+    bound = bound === undefined ? fromExcl : Math.max(bound, fromExcl);
+  }
+  if (bound === undefined) return undefined;
+  if (bound < INT_MIN || bound > INT_MAX) unsupported(path, `int min ${bound} outside the v0 integer domain`);
+  return bound === INT_MIN ? undefined : bound;
+}
+
+function intMax(bag: Record<string, unknown>, path: string): number | undefined {
+  let bound: number | undefined;
+  const inclusive = boundValue(bag.maximum);
+  if (inclusive !== undefined) bound = Math.floor(inclusive);
+  const exclusive = boundValue(bag.exclusiveMaximum);
+  if (exclusive !== undefined) {
+    const fromExcl = Math.ceil(exclusive) - 1;
+    bound = bound === undefined ? fromExcl : Math.min(bound, fromExcl);
+  }
+  if (bound === undefined) return undefined;
+  if (bound < INT_MIN || bound > INT_MAX) unsupported(path, `int max ${bound} outside the v0 integer domain`);
+  return bound === INT_MAX ? undefined : bound;
 }
 
 interface Unwrapped {
@@ -84,8 +109,8 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
     case "number": {
       const format = (bag.format ?? def.format) as string | undefined;
       if (format === "safeint") {
-        const min = intBound(bag.minimum, "min", path);
-        const max = intBound(bag.maximum, "max", path);
+        const min = intMin(bag, path);
+        const max = intMax(bag, path);
         return {
           kind: "int",
           ...(min !== undefined ? { min } : {}),
