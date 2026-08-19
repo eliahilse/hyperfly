@@ -22,7 +22,8 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "check-types": "tsc --noEmit"
   },
   "devDependencies": {
     "typescript": "^5.7.3"
