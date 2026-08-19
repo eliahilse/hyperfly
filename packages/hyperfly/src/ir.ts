@@ -125,6 +125,9 @@ export function validateIR(node: IRNode, path = "$"): void {
         if (f.nullable && f.type.kind === "nullable") {
           fail(`${path}.${f.name}`, "nullable flag on a nullable type is ambiguous");
         }
+        if (f.nullable && f.type.kind === "literal" && f.type.value === null) {
+          fail(`${path}.${f.name}`, "nullable flag on a null literal has two encodings for null");
+        }
         validateIR(f.type, `${path}.${f.name}`);
       }
       return;

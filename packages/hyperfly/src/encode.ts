@@ -132,8 +132,11 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         fail("type", path, "expected object");
       }
       const record = value as Record<string, unknown>;
-      // snapshot each field once so accessor properties cannot desync the bitmap from the payload
-      const snapshot = node.fields.map((field) => record[field.name]);
+      // own properties only, snapshotted once: inherited Object.prototype members are not data,
+      // and accessor properties must not desync the bitmap from the payload
+      const snapshot = node.fields.map((field) =>
+        Object.prototype.hasOwnProperty.call(record, field.name) ? record[field.name] : undefined,
+      );
       const presence: boolean[] = [];
       const nulls: boolean[] = [];
       node.fields.forEach((field, i) => {

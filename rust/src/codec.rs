@@ -408,6 +408,9 @@ impl Codec {
                 .map(|v| v.unwrap())
                 .collect();
 
+            if !rows.is_empty() && depth + leaf.segs.len() as u32 > self.limits.max_depth {
+                return err(ErrorCode::Depth, format!("{path}[].{dotted}: nesting deeper than {}", self.limits.max_depth));
+            }
             if !participating.is_empty() && depth + 1 + leaf.segs.len() as u32 > self.limits.max_depth {
                 return err(ErrorCode::Depth, format!("{path}[].{dotted}: nesting deeper than {}", self.limits.max_depth));
             }
@@ -674,6 +677,9 @@ impl Codec {
                 slots.push(i);
             }
 
+            if count > 0 && depth + leaf.segs.len() as u32 > self.limits.max_depth {
+                return err(ErrorCode::Depth, format!("{field_path}: nesting deeper than {}", self.limits.max_depth));
+            }
             if !slots.is_empty() && depth + 1 + leaf.segs.len() as u32 > self.limits.max_depth {
                 return err(ErrorCode::Depth, format!("{field_path}: nesting deeper than {}", self.limits.max_depth));
             }
@@ -739,6 +745,9 @@ fn dec_int_column(r: &mut Reader, min: Option<i64>, max: Option<i64>, count: usi
         return err(ErrorCode::Marker, format!("{path}: invalid int column mode {mode:#x}"));
     }
     if count == 0 {
+        if mode != 0 {
+            return err(ErrorCode::Marker, format!("{path}: empty column must use mode 0x00"));
+        }
         return Ok(Vec::new());
     }
     let from_form = |raw: u64| -> i64 {
@@ -834,6 +843,9 @@ fn dec_float_column(r: &mut Reader, count: usize, path: &str) -> Result<Vec<f64>
         return err(ErrorCode::Marker, format!("{path}: invalid float column mode {mode:#x}"));
     }
     if count == 0 {
+        if mode != 0 {
+            return err(ErrorCode::Marker, format!("{path}: empty column must use mode 0x00"));
+        }
         return Ok(Vec::new());
     }
     let mut out = Vec::with_capacity(count);
@@ -924,12 +936,13 @@ fn enc_string_column(out: &mut Vec<u8>, values: &[&str], pack: bool) -> Result<(
 /// Inflate a raw-DEFLATE blob, requiring it to consume the entire input and produce
 /// exactly `expected` bytes — rejects truncation, over-long output, and trailing bytes.
 fn inflate_exact(blob: &[u8], expected: usize) -> std::result::Result<Vec<u8>, ()> {
-    use miniz_oxide::inflate::core::{decompress, DecompressorOxide};
+    use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
     use miniz_oxide::inflate::TINFLStatus;
 
     let mut out = vec![0u8; expected];
     let mut dec = DecompressorOxide::new();
-    let flags = 0; // raw deflate: no zlib header, no trailing-input tolerance
+    // raw deflate (no zlib header) into a single flat buffer, with the whole input present
+    let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
     let (status, in_consumed, out_written) = decompress(&mut dec, blob, &mut out, 0, flags);
     if status != TINFLStatus::Done || out_written != expected || in_consumed != blob.len() {
         return Err(());
@@ -943,6 +956,9 @@ fn dec_string_column(r: &mut Reader, count: usize, path: &str, limits: &Limits, 
         return err(ErrorCode::Marker, format!("{path}: invalid string column mode {mode:#x}"));
     }
     if count == 0 {
+        if mode != 0 {
+            return err(ErrorCode::Marker, format!("{path}: empty column must use mode 0x00"));
+        }
         return Ok(Vec::new());
     }
     let decode_slice = |data: &[u8], i: usize| -> Result<String> {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import struct
 import zlib
@@ -406,6 +407,8 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
             if states[i][0] and not (states[i][1] and field.get("nullable"))
         ]
 
+        if rows and depth + len(segs) > ctx.max_depth:
+            _efail("depth", f"{path}[].{dotted}", f"nesting deeper than {ctx.max_depth}")
         if participating and depth + 1 + len(segs) > ctx.max_depth:
             _efail("depth", f"{path}[].{dotted}", f"nesting deeper than {ctx.max_depth}")
 
@@ -518,6 +521,8 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
     if mode > 1:
         _dfail("marker", path, f"invalid int column mode 0x{mode:x}")
     if count == 0:
+        if mode != 0:
+            _dfail("marker", path, "empty column must use mode 0x00")
         return []
     lo = node.get("min")
     if mode == 0:
@@ -548,6 +553,8 @@ def _decode_float_column(r: Reader, count: int, path: str) -> list[float]:
     if mode > 3:
         _dfail("marker", path, f"invalid float column mode 0x{mode:x}")
     if count == 0:
+        if mode != 0:
+            _dfail("marker", path, "empty column must use mode 0x00")
         return []
 
     def validate(bits: int, i: int) -> float:
@@ -599,6 +606,8 @@ def _decode_string_column(r: Reader, count: int, path: str, ctx: _Ctx) -> list[s
     if mode > 1:
         _dfail("marker", path, f"invalid string column mode 0x{mode:x}")
     if count == 0:
+        if mode != 0:
+            _dfail("marker", path, "empty column must use mode 0x00")
         return []
 
     def decode_slice(data: bytes, i: int) -> str:
@@ -689,6 +698,8 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
                 continue
             slots.append(i)
 
+        if count > 0 and depth + len(segs) > r.limits.max_depth:
+            _dfail("depth", path, f"nesting deeper than {r.limits.max_depth}")
         if slots and depth + 1 + len(segs) > r.limits.max_depth:
             _dfail("depth", path, f"nesting deeper than {r.limits.max_depth}")
 
@@ -734,6 +745,8 @@ def _default_inflate(data: bytes, max_output_length: int) -> bytes:
 class Codec:
     def __init__(self, ir: dict[str, Any], plan: str, limits: Limits, pack) -> None:
         validate_ir(ir)
+        # isolate from later caller mutation: the fingerprint is fixed at compile time
+        ir = copy.deepcopy(ir)
         self.ir = ir
         self.plan = plan
         self.artifact = serialize_artifact(ir, plan)

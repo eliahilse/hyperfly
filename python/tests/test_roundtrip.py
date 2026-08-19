@@ -54,10 +54,12 @@ def test_seeded_roundtrip(plan):
         field_count = rng.randint(1, 6)
         fields = []
         for i in range(field_count):
-            field = {"name": f"f{i}", "type": random_leaf(rng)}
+            leaf = random_leaf(rng)
+            field = {"name": f"f{i}", "type": leaf}
             if rng.random() < 0.25:
                 field["optional"] = True
-            if rng.random() < 0.25:
+            nullable_ok = not (leaf["kind"] == "literal" and leaf.get("value") is None)
+            if rng.random() < 0.25 and nullable_ok:
                 field["nullable"] = True
             fields.append(field)
         ir = {"kind": "array", "element": {"kind": "struct", "fields": fields}}

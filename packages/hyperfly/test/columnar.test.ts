@@ -186,12 +186,16 @@ describe("columnar seeded properties", () => {
     const rng = mulberry32(0xc01c01);
     for (let i = 0; i < 300; i++) {
       const fieldCount = 1 + Math.floor(rng() * 6);
-      const fields = Array.from({ length: fieldCount }, (_, f) => ({
-        name: `f${f}`,
-        type: PRIMITIVES[Math.floor(rng() * PRIMITIVES.length)]!(rng),
-        ...(rng() < 0.25 ? { optional: true } : {}),
-        ...(rng() < 0.25 ? { nullable: true } : {}),
-      }));
+      const fields = Array.from({ length: fieldCount }, (_, f) => {
+        const type = PRIMITIVES[Math.floor(rng() * PRIMITIVES.length)]!(rng);
+        const nullableOk = !(type.kind === "literal" && type.value === null);
+        return {
+          name: `f${f}`,
+          type,
+          ...(rng() < 0.25 ? { optional: true } : {}),
+          ...(rng() < 0.25 && nullableOk ? { nullable: true } : {}),
+        };
+      });
       const ir: IRNode = { kind: "array", element: { kind: "struct", fields } };
       const col = compileIR(ir, { plan: "columnar" });
       const row = compileIR(ir);

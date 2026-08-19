@@ -335,6 +335,7 @@ const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function decodeStringColumn(r: Reader, count: number, path: string, inflate?: Inflate): string[] {
   const mode = r.u8();
   if (mode > 1) throw new DecodeError("marker", `${path}: invalid string column mode 0x${mode.toString(16)}`);
+  if (count === 0 && mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
   const out: string[] = new Array<string>(count);
   if (count === 0) return out;
 
@@ -438,7 +439,8 @@ export function encodeColumnarArray(
   const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
     let obj: Record<string, unknown> = row;
     for (let d = 0; d < segs.length - 1; d++) {
-      const v = obj[segs[d]!];
+      const key = segs[d]!;
+      const v = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
       if (typeof v !== "object" || v === null || Array.isArray(v)) {
         throw new EncodeError(
           v === undefined ? "required" : "type",
@@ -455,7 +457,10 @@ export function encodeColumnarArray(
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const dotted = leaf.segs.join(".");
     const fieldPath = `${path}[].${dotted}`;
-    const values: unknown[] = rows.map((row, i) => containerOf(row, leaf.segs, i)[leafName]);
+    const values: unknown[] = rows.map((row, i) => {
+      const holder = containerOf(row, leaf.segs, i);
+      return Object.prototype.hasOwnProperty.call(holder, leafName) ? holder[leafName] : undefined;
+    });
     const states: RowState[] = values.map((v, i) => {
       const absent = v === undefined;
       if (absent && !field.optional) {
@@ -478,6 +483,11 @@ export function encodeColumnarArray(
       participating.push(values[i]);
     }
 
+    // row-equivalent depths: a nested container at chain position j sits at depth+2+j,
+    // the leaf value at depth+1+segs.length. Containers always exist; the leaf only when present.
+    if (rows.length > 0 && depth + leaf.segs.length > ctx.maxDepth) {
+      throw new EncodeError("depth", `${fieldPath}: nesting deeper than ${ctx.maxDepth}`);
+    }
     if (participating.length > 0 && depth + 1 + leaf.segs.length > ctx.maxDepth) {
       throw new EncodeError("depth", `${fieldPath}: nesting deeper than ${ctx.maxDepth}`);
     }
@@ -536,7 +546,8 @@ export function decodeColumnarArray(
     let obj = row;
     for (let d = 0; d < segs.length - 1; d++) {
       const seg = segs[d]!;
-      obj = (obj[seg] ??= {}) as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(obj, seg)) obj[seg] = {};
+      obj = obj[seg] as Record<string, unknown>;
     }
     return obj;
   };
@@ -569,6 +580,9 @@ export function decodeColumnarArray(
       slots.push(i);
     }
 
+    if (count > 0 && depth + leaf.segs.length > r.limits.maxDepth) {
+      throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
+    }
     if (slots.length > 0 && depth + 1 + leaf.segs.length > r.limits.maxDepth) {
       throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
     }

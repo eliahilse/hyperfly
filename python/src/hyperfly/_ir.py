@@ -26,11 +26,17 @@ def _check_string(v: str, path: str, what: str) -> None:
         _fail(path, f"{what} contains a lone surrogate and has no portable encoding")
 
 
+_MAX_INDEX_DIGITS = len(str(0xFFFFFFFF))
+
+
 def _check_field_name(name: str, path: str) -> None:
     if name == "__proto__":
         _fail(path, 'field name "__proto__" is not portable')
-    if name == "0" or (name.isascii() and name.isdigit() and name[0] != "0" and int(name) < 0xFFFFFFFF):
-        _fail(path, f'field name "{name}" is an array index and would reorder as an object key')
+    # length-bounded before int(): Python 3.11+ caps int() digits, and only short
+    # digit strings can be array indices anyway
+    if name.isascii() and name.isdigit() and len(name) <= _MAX_INDEX_DIGITS:
+        if name == "0" or (name[0] != "0" and int(name) < 0xFFFFFFFF):
+            _fail(path, f'field name "{name}" is an array index and would reorder as an object key')
 
 
 def validate_ir(node: dict[str, Any], path: str = "$") -> None:
@@ -93,6 +99,8 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
             seen.add(name)
             if f.get("nullable") and f["type"].get("kind") == "nullable":
                 _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
+            if f.get("nullable") and f["type"].get("kind") == "literal" and f["type"].get("value") is None:
+                _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
             validate_ir(f["type"], f"{path}.{name}")
         return
     _fail(path, f"unknown IR kind {kind}")

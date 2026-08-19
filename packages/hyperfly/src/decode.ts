@@ -117,6 +117,8 @@ export function decodeNode(
       const nulls = readBitmap(r, nullableCount, path);
       let pi = 0;
       let ni = 0;
+      // a field may legitimately be named constructor/toString/valueOf; assigning those on a
+      // prototypeful object would hit inherited accessors instead of creating own properties
       const out: Record<string, unknown> = {};
       for (const field of node.fields) {
         const present = field.optional ? presence[pi++]! : true;

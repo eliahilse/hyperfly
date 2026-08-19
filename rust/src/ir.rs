@@ -111,6 +111,12 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
                 if f.nullable && matches!(f.ty, Node::Nullable(_)) {
                     return err(ErrorCode::Ir, format!("{path}.{}: nullable flag on a nullable type", f.name));
                 }
+                if f.nullable && matches!(f.ty, Node::Literal(Literal::Null)) {
+                    return err(
+                        ErrorCode::Ir,
+                        format!("{path}.{}: nullable flag on a null literal has two encodings for null", f.name),
+                    );
+                }
                 validate(&f.ty, &format!("{path}.{}", f.name))?;
             }
             Ok(())
