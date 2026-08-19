@@ -840,8 +840,8 @@ class Codec:
         ir = copy.deepcopy(ir)
         self._ir = ir
         self.plan = plan
-        self.profile = copy.deepcopy(profile) if profile is not None else None
-        self.artifact = serialize_artifact(ir, plan, self.profile)
+        self._profile = copy.deepcopy(profile) if profile is not None else None
+        self.artifact = serialize_artifact(ir, plan, self._profile)
         self._fp = fingerprint_of(self.artifact)
         self.fingerprint = self._fp.hex()
         self._limits = limits
@@ -851,7 +851,12 @@ class Codec:
             deflate, inflate = _default_deflate, _default_inflate
         else:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
-        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self.profile)
+        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self._profile)
+
+    @property
+    def profile(self) -> dict[str, Any] | None:
+        """A copy: the compiled profile is fixed by the fingerprint and never mutated."""
+        return copy.deepcopy(self._profile) if self._profile is not None else None
 
     @property
     def ir(self) -> dict[str, Any]:

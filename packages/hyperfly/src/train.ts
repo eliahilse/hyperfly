@@ -83,9 +83,10 @@ function collect(node: IRNode, value: unknown, base: number, counts: Map<number,
  * §6.2 is a valid profile, and the artifact pins the exact bytes, so
  * implementations need not agree on how one is produced.
  *
- * A dictionary hit costs one byte and saves `len(uvarint) + len(utf8)`; a miss
- * costs one byte. Entries are capped at 127 so every code is a single byte,
- * which keeps the objective linear instead of self-referential.
+ * A dictionary hit costs its code and saves `len(uvarint) + len(utf8)`; a miss
+ * costs the escape byte plus the plain encoding. Entries are ordered by
+ * frequency so code length depends only on position, which keeps the objective
+ * linear instead of self-referential, and are capped at MAX_DICT_ENTRIES.
  */
 export function train(ir: IRNode, samples: readonly unknown[], options: TrainOptions = {}): Profile | undefined {
   const minOccurrences = options.minOccurrences ?? 2;

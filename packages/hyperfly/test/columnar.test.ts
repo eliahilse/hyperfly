@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/columnar.json" with { type: "json" };
 import { z } from "zod";
-import { compileIR, FingerprintMismatchError, toHex, type IRNode } from "../src/index.js";
+import { compileIR, FingerprintMismatchError, toHex, train, type IRNode } from "../src/index.js";
 import { HyperflyError } from "../src/errors.js";
 import { compile } from "../src/zod.js";
 
@@ -342,4 +342,51 @@ describe("profiled golden vectors", () => {
       }
     });
   }
+});
+
+describe("profiles: aliased schema nodes", () => {
+  // A golden vector cannot express this: loading IR from JSON always yields distinct
+  // objects, so only an in-memory schema that reuses one node reaches the hazard.
+  const arr: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+  const IR: IRNode = {
+    kind: "struct",
+    fields: [
+      { name: "a", type: arr },
+      { name: "b", type: arr },
+    ],
+  };
+  const profile = {
+    version: 1 as const,
+    shared: {
+      columns: [
+        { leaf: 0, dict: ["red", "green"] },
+        { leaf: 1, dict: ["green", "red"] },
+      ],
+    },
+  };
+
+  test("one node object at two positions still gets distinct ordinals", () => {
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const value = { a: [{ s: "red" }], b: [{ s: "red" }] };
+    // "red" is code 1 under leaf 0 and code 2 under leaf 1
+    expect(toHex(codec.encodeBody(value))).toBe("010101010102");
+    expect(codec.decodeBody(codec.encodeBody(value))).toEqual(value);
+  });
+
+  test("the trainer assigns the same ordinals the codec reads", () => {
+    const samples = [
+      { a: [{ s: "aa" }, { s: "aa" }], b: [{ s: "bb" }, { s: "bb" }] },
+      { a: [{ s: "aa" }], b: [{ s: "bb" }] },
+    ];
+    const trained = train(IR, samples);
+    expect(trained?.shared.columns).toEqual([
+      { leaf: 0, dict: ["aa"] },
+      { leaf: 1, dict: ["bb"] },
+    ]);
+    const codec = compileIR(IR, { plan: "columnar", profile: trained, pack: false });
+    expect(codec.decodeBody(codec.encodeBody(samples[0]!))).toEqual(samples[0]!);
+  });
 });

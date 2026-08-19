@@ -241,6 +241,10 @@ impl Codec {
         Ok(Codec { ir, plan, limits, pack, profile, dicts, codes, artifact, fp, fingerprint })
     }
 
+    pub fn profile(&self) -> Option<&Profile> {
+        self.profile.as_ref()
+    }
+
     fn dict_of(&self, ordinal: usize) -> Option<&[String]> {
         self.dicts.get(&ordinal).map(|d| d.as_slice())
     }

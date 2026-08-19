@@ -1283,6 +1283,178 @@
           }
         ],
         "hex": "030101970100046e6f7065"
+      },
+      {
+        "name": "dict-two-byte-codes-decide-the-mode",
+        "description": "Entries past index 126 take two-byte codes. Charging them as one byte would make dictionary mode look cheaper than plain and flip the chosen mode, so this vector fails for any encoder that mis-costs multi-byte codes.",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "fill0",
+                  "fill1",
+                  "fill2",
+                  "fill3",
+                  "fill4",
+                  "fill5",
+                  "fill6",
+                  "fill7",
+                  "fill8",
+                  "fill9",
+                  "fill10",
+                  "fill11",
+                  "fill12",
+                  "fill13",
+                  "fill14",
+                  "fill15",
+                  "fill16",
+                  "fill17",
+                  "fill18",
+                  "fill19",
+                  "fill20",
+                  "fill21",
+                  "fill22",
+                  "fill23",
+                  "fill24",
+                  "fill25",
+                  "fill26",
+                  "fill27",
+                  "fill28",
+                  "fill29",
+                  "fill30",
+                  "fill31",
+                  "fill32",
+                  "fill33",
+                  "fill34",
+                  "fill35",
+                  "fill36",
+                  "fill37",
+                  "fill38",
+                  "fill39",
+                  "fill40",
+                  "fill41",
+                  "fill42",
+                  "fill43",
+                  "fill44",
+                  "fill45",
+                  "fill46",
+                  "fill47",
+                  "fill48",
+                  "fill49",
+                  "fill50",
+                  "fill51",
+                  "fill52",
+                  "fill53",
+                  "fill54",
+                  "fill55",
+                  "fill56",
+                  "fill57",
+                  "fill58",
+                  "fill59",
+                  "fill60",
+                  "fill61",
+                  "fill62",
+                  "fill63",
+                  "fill64",
+                  "fill65",
+                  "fill66",
+                  "fill67",
+                  "fill68",
+                  "fill69",
+                  "fill70",
+                  "fill71",
+                  "fill72",
+                  "fill73",
+                  "fill74",
+                  "fill75",
+                  "fill76",
+                  "fill77",
+                  "fill78",
+                  "fill79",
+                  "fill80",
+                  "fill81",
+                  "fill82",
+                  "fill83",
+                  "fill84",
+                  "fill85",
+                  "fill86",
+                  "fill87",
+                  "fill88",
+                  "fill89",
+                  "fill90",
+                  "fill91",
+                  "fill92",
+                  "fill93",
+                  "fill94",
+                  "fill95",
+                  "fill96",
+                  "fill97",
+                  "fill98",
+                  "fill99",
+                  "fill100",
+                  "fill101",
+                  "fill102",
+                  "fill103",
+                  "fill104",
+                  "fill105",
+                  "fill106",
+                  "fill107",
+                  "fill108",
+                  "fill109",
+                  "fill110",
+                  "fill111",
+                  "fill112",
+                  "fill113",
+                  "fill114",
+                  "fill115",
+                  "fill116",
+                  "fill117",
+                  "fill118",
+                  "fill119",
+                  "fill120",
+                  "fill121",
+                  "fill122",
+                  "fill123",
+                  "fill124",
+                  "fill125",
+                  "fill126",
+                  "a",
+                  "b",
+                  "c"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "a"
+          },
+          {
+            "s": "b"
+          },
+          {
+            "s": "c"
+          }
+        ],
+        "hex": "0300016101620163"
       }
     ],
     "invalidDecode": [

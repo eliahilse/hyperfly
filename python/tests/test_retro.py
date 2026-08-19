@@ -191,3 +191,31 @@ def test_deflate_without_inflate_does_not_pack():
 
     codec = compile_ir(ir, plan="columnar", pack={"deflate": deflate})
     assert codec.decode_body(codec.encode_body(rows)) == rows
+
+
+def test_aliased_array_nodes_get_distinct_ordinals():
+    # A golden vector cannot express this: IR loaded from JSON always has distinct
+    # objects, so only an in-memory schema reusing one node reaches the hazard.
+    arr = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "s", "type": {"kind": "string"}}]}}
+    ir = {"kind": "struct", "fields": [{"name": "a", "type": arr}, {"name": "b", "type": arr}]}
+    profile = {
+        "version": 1,
+        "shared": {"columns": [
+            {"leaf": 0, "dict": ["red", "green"]},
+            {"leaf": 1, "dict": ["green", "red"]},
+        ]},
+    }
+    codec = compile_ir(ir, plan="columnar", profile=profile, pack=False)
+    value = {"a": [{"s": "red"}], "b": [{"s": "red"}]}
+    assert codec.encode_body(value).hex() == "010101010102"
+    assert codec.decode_body(codec.encode_body(value)) == value
+
+
+def test_codec_profile_is_isolated_from_mutation():
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "s", "type": {"kind": "string"}}]}}
+    profile = {"version": 1, "shared": {"columns": [{"leaf": 0, "dict": ["online", "offline"]}]}}
+    codec = compile_ir(ir, plan="columnar", profile=profile, pack=False)
+    body = codec.encode_body([{"s": "online"}])
+    codec.profile["shared"]["columns"][0]["dict"][0] = "HIJACKED"
+    profile["shared"]["columns"][0]["dict"][0] = "HIJACKED"
+    assert codec.decode_body(body) == [{"s": "online"}]
