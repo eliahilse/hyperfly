@@ -1,0 +1,96 @@
+{
+  "description": "Golden vectors for hyperfly wire v0, plan row@1. Hex is body bytes only (no envelope). Every implementation must pass all three sections.",
+  "valid": [
+    { "name": "bool-true", "ir": { "kind": "bool" }, "value": true, "hex": "01" },
+    { "name": "bool-false", "ir": { "kind": "bool" }, "value": false, "hex": "00" },
+    { "name": "int-zero", "ir": { "kind": "int" }, "value": 0, "hex": "00" },
+    { "name": "int-neg-one", "ir": { "kind": "int" }, "value": -1, "hex": "01" },
+    { "name": "int-one", "ir": { "kind": "int" }, "value": 1, "hex": "02" },
+    { "name": "int-max", "ir": { "kind": "int" }, "value": 9007199254740991, "hex": "feffffffffffff1f" },
+    { "name": "int-min", "ir": { "kind": "int" }, "value": -9007199254740991, "hex": "fdffffffffffff1f" },
+    { "name": "int-bounded", "ir": { "kind": "int", "min": 10, "max": 200 }, "value": 42, "hex": "20" },
+    { "name": "int-bounded-at-min", "ir": { "kind": "int", "min": -5 }, "value": -5, "hex": "00" },
+    { "name": "int-bounded-two-bytes", "ir": { "kind": "int", "min": -5 }, "value": 123, "hex": "8001" },
+    { "name": "float64-1.5", "ir": { "kind": "float64" }, "value": 1.5, "hex": "000000000000f83f" },
+    { "name": "float64-zero", "ir": { "kind": "float64" }, "value": 0, "hex": "0000000000000000" },
+    { "name": "float64-neg-2.5", "ir": { "kind": "float64" }, "value": -2.5, "hex": "00000000000004c0" },
+    { "name": "string-empty", "ir": { "kind": "string" }, "value": "", "hex": "00" },
+    { "name": "string-ascii", "ir": { "kind": "string" }, "value": "hi", "hex": "026869" },
+    { "name": "string-2byte-utf8", "ir": { "kind": "string" }, "value": "é", "hex": "02c3a9" },
+    { "name": "string-4byte-utf8", "ir": { "kind": "string" }, "value": "🚀", "hex": "04f09f9a80" },
+    { "name": "enum-index-1", "ir": { "kind": "enum", "members": ["red", "green", "blue"] }, "value": "green", "hex": "01" },
+    { "name": "literal-zero-bytes", "ir": { "kind": "literal", "value": "ok" }, "value": "ok", "hex": "" },
+    { "name": "nullable-null", "ir": { "kind": "nullable", "inner": { "kind": "int" } }, "value": null, "hex": "00" },
+    { "name": "nullable-value", "ir": { "kind": "nullable", "inner": { "kind": "int" } }, "value": 5, "hex": "010a" },
+    { "name": "array-variable", "ir": { "kind": "array", "element": { "kind": "int" } }, "value": [1, 2, 3], "hex": "03020406" },
+    { "name": "array-empty", "ir": { "kind": "array", "element": { "kind": "int" } }, "value": [], "hex": "00" },
+    { "name": "array-fixed-no-count", "ir": { "kind": "array", "element": { "kind": "bool" }, "length": 2 }, "value": [true, false], "hex": "0100" },
+    { "name": "struct-empty", "ir": { "kind": "struct", "fields": [] }, "value": {}, "hex": "" },
+    {
+      "name": "struct-absent-and-null",
+      "ir": { "kind": "struct", "fields": [
+        { "name": "a", "type": { "kind": "int" } },
+        { "name": "b", "type": { "kind": "string" }, "optional": true },
+        { "name": "c", "type": { "kind": "bool" }, "nullable": true }
+      ] },
+      "value": { "a": -1, "c": null },
+      "hex": "000101"
+    },
+    {
+      "name": "struct-all-present",
+      "ir": { "kind": "struct", "fields": [
+        { "name": "a", "type": { "kind": "int" } },
+        { "name": "b", "type": { "kind": "string" }, "optional": true },
+        { "name": "c", "type": { "kind": "bool" }, "nullable": true }
+      ] },
+      "value": { "a": 3, "b": "x", "c": true },
+      "hex": "010006017801"
+    },
+    {
+      "name": "struct-nested",
+      "ir": { "kind": "struct", "fields": [
+        { "name": "p", "type": { "kind": "struct", "fields": [ { "name": "q", "type": { "kind": "int" } } ] } }
+      ] },
+      "value": { "p": { "q": 7 } },
+      "hex": "0e"
+    }
+  ],
+  "invalidDecode": [
+    { "name": "bool-out-of-range", "ir": { "kind": "bool" }, "hex": "02", "error": "marker" },
+    { "name": "varint-overlong", "ir": { "kind": "int", "min": 0 }, "hex": "8000", "error": "varint" },
+    { "name": "varint-nine-bytes", "ir": { "kind": "int", "min": 0 }, "hex": "ffffffffffffffff7f", "error": "varint" },
+    { "name": "varint-exceeds-domain", "ir": { "kind": "int", "min": 0 }, "hex": "ffffffffffffff7f", "error": "range" },
+    { "name": "int-above-declared-max", "ir": { "kind": "int", "min": 0, "max": 5 }, "hex": "06", "error": "range" },
+    { "name": "enum-index-out-of-range", "ir": { "kind": "enum", "members": ["red", "green", "blue"] }, "hex": "03", "error": "range" },
+    { "name": "string-invalid-utf8", "ir": { "kind": "string" }, "hex": "01ff", "error": "utf8" },
+    { "name": "float64-nan", "ir": { "kind": "float64" }, "hex": "000000000000f87f", "error": "float" },
+    { "name": "float64-negative-zero", "ir": { "kind": "float64" }, "hex": "0000000000000080", "error": "float" },
+    { "name": "nullable-bad-marker", "ir": { "kind": "nullable", "inner": { "kind": "bool" } }, "hex": "02", "error": "marker" },
+    { "name": "trailing-bytes", "ir": { "kind": "bool" }, "hex": "0100", "error": "trailing" },
+    { "name": "string-truncated", "ir": { "kind": "string" }, "hex": "056a", "error": "truncated" },
+    {
+      "name": "bitmap-nonzero-padding",
+      "ir": { "kind": "struct", "fields": [ { "name": "b", "type": { "kind": "bool" }, "optional": true } ] },
+      "hex": "02",
+      "error": "bitmap"
+    },
+    {
+      "name": "null-bit-set-for-absent-field",
+      "ir": { "kind": "struct", "fields": [ { "name": "b", "type": { "kind": "bool" }, "optional": true, "nullable": true } ] },
+      "hex": "0001",
+      "error": "bitmap"
+    },
+    { "name": "array-count-over-limit", "ir": { "kind": "array", "element": { "kind": "bool" } }, "hex": "81808008", "error": "limit" }
+  ],
+  "invalidEncode": [
+    { "name": "required-field-missing", "ir": { "kind": "struct", "fields": [ { "name": "a", "type": { "kind": "int" } } ] }, "value": {}, "error": "required" },
+    { "name": "null-for-non-nullable", "ir": { "kind": "struct", "fields": [ { "name": "a", "type": { "kind": "int" } } ] }, "value": { "a": null }, "error": "type" },
+    { "name": "int-out-of-declared-bounds", "ir": { "kind": "int", "min": 0, "max": 10 }, "value": 11, "error": "range" },
+    { "name": "int-not-an-integer", "ir": { "kind": "int" }, "value": 1.5, "error": "type" },
+    { "name": "int-beyond-safe-domain", "ir": { "kind": "int" }, "value": 9007199254740992, "error": "type" },
+    { "name": "string-lone-surrogate", "ir": { "kind": "string" }, "value": "\ud800", "error": "utf8" },
+    { "name": "enum-unknown-member", "ir": { "kind": "enum", "members": ["red", "green", "blue"] }, "value": "purple", "error": "type" },
+    { "name": "fixed-array-wrong-length", "ir": { "kind": "array", "element": { "kind": "bool" }, "length": 2 }, "value": [true], "error": "type" },
+    { "name": "literal-mismatch", "ir": { "kind": "literal", "value": "ok" }, "value": "no", "error": "type" }
+  ]
+}

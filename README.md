@@ -11,8 +11,11 @@ Pre-release. Nothing here is benchmarked yet.
 ## Repository
 
 ```
+spec/             wire format spec + golden vectors (the cross-language authority)
+packages/hyperfly TypeScript reference implementation — core codec + zod adapter
 apps/web          hyperfly.dev — landing page (Next.js on OpenNext / Cloudflare Workers)
-packages/lb       legacy load balancer, previously published as `hyperfly`
+apps/bench        private benchmark harness (JSON, gzip, Brotli baselines)
+packages/lb       legacy load balancer, previously published as `hyperfly@0.1.x`
 packages/tooling  shared eslint and typescript configs
 ```
 

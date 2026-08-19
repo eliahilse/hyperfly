@@ -1,0 +1,43 @@
+{
+  "name": "hyperfly",
+  "version": "1.0.0-alpha.0",
+  "description": "Binary compression for typed APIs. Schema-compiled codecs with a fingerprinted wire format and transparent JSON fallback.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eliahilse/hyperfly",
+    "directory": "packages/hyperfly"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./zod": {
+      "types": "./dist/zod.d.ts",
+      "import": "./dist/zod.js"
+    }
+  },
+  "files": ["dist", "LICENSE", "NOTICE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": { "optional": true }
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "*",
+    "@repo/typescript-config": "*",
+    "@types/bun": "^1.2.0",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2",
+    "zod": "^4.0.0"
+  }
+}
