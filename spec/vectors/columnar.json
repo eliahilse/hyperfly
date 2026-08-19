@@ -155,7 +155,7 @@
           "name": "bc"
         }
       ],
-      "hex": "0201000161026263"
+      "hex": "020100000161026263"
     },
     {
       "name": "col-empty-array",
@@ -202,39 +202,6 @@
         }
       ],
       "hex": "01"
-    },
-    {
-      "name": "col-ineligible-falls-back-to-row",
-      "ir": {
-        "kind": "array",
-        "element": {
-          "kind": "struct",
-          "fields": [
-            {
-              "name": "p",
-              "type": {
-                "kind": "struct",
-                "fields": [
-                  {
-                    "name": "q",
-                    "type": {
-                      "kind": "int"
-                    }
-                  }
-                ]
-              }
-            }
-          ]
-        }
-      },
-      "value": [
-        {
-          "p": {
-            "q": 7
-          }
-        }
-      ],
-      "hex": "010e"
     },
     {
       "name": "col-literal-column-zero-bytes",
@@ -380,6 +347,114 @@
         }
       ],
       "hex": "0202011e4f"
+    },
+    {
+      "name": "col-string-plain-mode",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "hi"
+        },
+        {
+          "s": ""
+        }
+      ],
+      "hex": "020002686900"
+    },
+    {
+      "name": "col-nested-struct-flattens",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            },
+            {
+              "name": "p",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "q",
+                    "type": {
+                      "kind": "string"
+                    }
+                  },
+                  {
+                    "name": "r",
+                    "type": {
+                      "kind": "bool"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 1,
+          "p": {
+            "q": "x",
+            "r": true
+          }
+        },
+        {
+          "a": 2,
+          "p": {
+            "q": "y",
+            "r": false
+          }
+        }
+      ],
+      "hex": "02000204000178017901"
+    },
+    {
+      "name": "col-array-field-falls-back-to-row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "arr",
+              "type": {
+                "kind": "array",
+                "element": {
+                  "kind": "int"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "arr": [
+            1
+          ]
+        }
+      ],
+      "hex": "010102"
     }
   ],
   "invalidDecode": [
@@ -574,6 +649,44 @@
       },
       "hex": "010300ffffffffffffff7f",
       "error": "range"
+    },
+    {
+      "name": "col-string-bad-mode",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0102",
+      "error": "marker"
+    },
+    {
+      "name": "col-string-packed-length-mismatch",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0201020208010300fcff686979",
+      "error": "packed"
     }
   ],
   "invalidEncode": [
@@ -647,6 +760,35 @@
         }
       ],
       "error": "type"
+    }
+  ],
+  "packedDecode": [
+    {
+      "name": "col-string-packed-stored-block",
+      "description": "decode-only: blob is a deflate-raw stored block, valid for any inflater",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "hi"
+        },
+        {
+          "s": "yo"
+        }
+      ],
+      "hex": "0201020209010400fbff6869796f"
     }
   ]
 }

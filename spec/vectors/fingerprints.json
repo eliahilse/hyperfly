@@ -125,8 +125,8 @@
       "ir": {
         "kind": "bool"
       },
-      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":1},\"ir\":{\"kind\":\"bool\"}}",
-      "fingerprint": "0e65773a352ea24e70d440c4d2e550a7"
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":2},\"ir\":{\"kind\":\"bool\"}}",
+      "fingerprint": "96f5b1aed1b1d4a4dee316623c08acc7"
     },
     {
       "name": "bounded-int@columnar",
@@ -136,8 +136,8 @@
         "min": 0,
         "max": 100
       },
-      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":1},\"ir\":{\"kind\":\"int\",\"min\":0,\"max\":100}}",
-      "fingerprint": "73a409953164507704018d5d2433c2bf"
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":2},\"ir\":{\"kind\":\"int\",\"min\":0,\"max\":100}}",
+      "fingerprint": "6be791f84b580ee7dd78db739b143595"
     },
     {
       "name": "enum@columnar",
@@ -151,8 +151,8 @@
           "1d"
         ]
       },
-      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":1},\"ir\":{\"kind\":\"enum\",\"members\":[\"1m\",\"5m\",\"1h\",\"1d\"]}}",
-      "fingerprint": "f0d4a1f72dfda483ea06f3fd4b5e3770"
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":2},\"ir\":{\"kind\":\"enum\",\"members\":[\"1m\",\"5m\",\"1h\",\"1d\"]}}",
+      "fingerprint": "31ac340d52c50c2d65e23c1d031fede4"
     },
     {
       "name": "candles-response@columnar",
@@ -224,8 +224,8 @@
           }
         ]
       },
-      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":1},\"ir\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"route\",\"type\":{\"kind\":\"literal\",\"value\":\"candles\"}},{\"name\":\"candles\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"t\",\"type\":{\"kind\":\"int\",\"min\":0}},{\"name\":\"o\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"h\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"l\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"c\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"v\",\"type\":{\"kind\":\"float64\"}}]}}},{\"name\":\"cursor\",\"type\":{\"kind\":\"string\"},\"optional\":true}]}}",
-      "fingerprint": "3b6cffb9377bcaacc89704dd9c4fce0b"
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":2},\"ir\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"route\",\"type\":{\"kind\":\"literal\",\"value\":\"candles\"}},{\"name\":\"candles\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"t\",\"type\":{\"kind\":\"int\",\"min\":0}},{\"name\":\"o\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"h\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"l\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"c\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"v\",\"type\":{\"kind\":\"float64\"}}]}}},{\"name\":\"cursor\",\"type\":{\"kind\":\"string\"},\"optional\":true}]}}",
+      "fingerprint": "b7c09d113bd1134bdf0f0910d86996db"
     },
     {
       "name": "escaping@columnar",
@@ -234,8 +234,8 @@
         "kind": "literal",
         "value": "a\"b\\c"
       },
-      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":1},\"ir\":{\"kind\":\"literal\",\"value\":\"a\\\"b\\\\c\"}}",
-      "fingerprint": "ddd3cd318f6e0629b903629fa1603893"
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":2},\"ir\":{\"kind\":\"literal\",\"value\":\"a\\\"b\\\\c\"}}",
+      "fingerprint": "94f508736ee8b0eee4562a5b3d4eda07"
     }
   ]
 }

@@ -14,6 +14,7 @@ export type ErrorCode =
   | "header"
   | "fingerprint"
   | "ir"
+  | "packed"
   | "unsupported";
 
 export class HyperflyError extends Error {

@@ -43,7 +43,16 @@ export function readBitmap(r: Reader, count: number, path: string): boolean[] {
   return bits;
 }
 
-export function decodeNode(r: Reader, node: IRNode, path: string, depth: number, columnar: boolean): unknown {
+export type Inflate = (data: Uint8Array, maxOutputLength: number) => Uint8Array;
+
+export function decodeNode(
+  r: Reader,
+  node: IRNode,
+  path: string,
+  depth: number,
+  columnar: boolean,
+  inflate?: Inflate,
+): unknown {
   if (depth > r.limits.maxDepth) fail("depth", path, `nesting deeper than ${r.limits.maxDepth}`);
 
   switch (node.kind) {
@@ -87,15 +96,15 @@ export function decodeNode(r: Reader, node: IRNode, path: string, depth: number,
       const marker = r.u8();
       if (marker === 0) return null;
       if (marker !== 1) fail("marker", path, `invalid nullable marker 0x${marker.toString(16)}`);
-      return decodeNode(r, node.inner, path, depth + 1, columnar);
+      return decodeNode(r, node.inner, path, depth + 1, columnar, inflate);
     }
     case "array": {
       if (columnar && columnarEligible(node)) {
-        return decodeColumnarArray(r, node, path, depth);
+        return decodeColumnarArray(r, node, path, depth, inflate);
       }
       const count = node.length ?? readCount(r, r.limits.maxItems, "array count", path);
       const out = new Array<unknown>(count);
-      for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar);
+      for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate);
       return out;
     }
     case "struct": {
@@ -117,7 +126,7 @@ export function decodeNode(r: Reader, node: IRNode, path: string, depth: number,
           out[field.name] = null;
           continue;
         }
-        out[field.name] = decodeNode(r, field.type, `${path}.${field.name}`, depth + 1, columnar);
+        out[field.name] = decodeNode(r, field.type, `${path}.${field.name}`, depth + 1, columnar, inflate);
       }
       return out;
     }

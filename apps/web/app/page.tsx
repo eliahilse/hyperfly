@@ -166,9 +166,10 @@ export default function Home() {
               Measured with the TypeScript reference implementation on deterministic synthetic
               corpora — reproduce with `bun run bench` in the repo. The Brotli row is q4, the
               level edges actually run on dynamic responses; q6 (nginx&apos;s default) and the q11
-              offline ceiling are in the harness, and columnar clears even q11 on the candles
-              corpus. Protobuf gets proper enums and int64. Results depend entirely on the
-              payload: structure compresses, prose does not, and the feed tab is the honest wash.
+              offline ceiling are in the harness — and uncompressed columnar output clears even
+              q11 on all three corpora. Protobuf gets proper enums and int64. Results still
+              depend on the payload; the feed tab is where the margin is thinnest, and it says
+              why.
             </p>
           </Reveal>
         </section>

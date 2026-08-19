@@ -59,8 +59,10 @@ export function serializeNode(node: IRNode): string {
 
 export type PlanLayout = "row" | "columnar";
 
+const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 2 };
+
 export function serializeArtifact(ir: IRNode, layout: PlanLayout = "row"): string {
-  return `{"wire":1,"plan":{"layout":"${layout}","version":1},"ir":${serializeNode(ir)}}`;
+  return `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}}`;
 }
 
 export function fingerprintOf(artifact: string): Uint8Array {

@@ -14,7 +14,7 @@ cd apps/bench && bun run bench
 |---|---|---|
 | candles | numeric OHLCV rows, f64-heavy | weak under plan `row`; the flagship under plan `columnar` (delta timestamps, scaled-decimal prices) |
 | devices | enums, bounded ints, booleans | favorable for schema-only encoding under either plan |
-| feed | prose bodies, ids, names | honest loss case — Brotli eats text, schemas don't; the nested author struct keeps the posts array on the row path even under `columnar` |
+| feed | prose bodies, ids, names | thinnest margin — text columns deflate inside the codec (packed string mode), nested authors flatten into leaf columns |
 
 ## Fairness rules
 

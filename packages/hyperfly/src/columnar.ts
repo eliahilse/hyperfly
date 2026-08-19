@@ -1,7 +1,7 @@
-import { decodeNode } from "./decode.js";
-import { encodeNode, typeAcceptsNull, writeBitmap, type EncodeCtx } from "./encode.js";
+import { decodeNode, type Inflate } from "./decode.js";
+import { encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
-import type { IRNode } from "./ir.js";
+import type { IRField, IRNode } from "./ir.js";
 import { readBitmap } from "./decode.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
@@ -13,12 +13,36 @@ type IntNode = Extract<IRNode, { kind: "int" }>;
 
 const COLUMN_KINDS = new Set(["bool", "int", "float64", "string", "bytes", "enum", "literal"]);
 
+interface Leaf {
+  segs: readonly string[];
+  field: IRField;
+}
+
+/**
+ * Depth-first leaf columns in declared order. Nested structs flatten only when
+ * required and non-nullable, so every leaf inherits its row's participation.
+ */
+export function flattenLeaves(element: StructNode): Leaf[] | null {
+  const out: Leaf[] = [];
+  const walk = (node: StructNode, segs: string[]): boolean => {
+    if (node.fields.length === 0) return false;
+    for (const f of node.fields) {
+      if (f.type.kind === "struct") {
+        if (f.optional || f.nullable) return false;
+        if (!walk(f.type, [...segs, f.name])) return false;
+      } else if (COLUMN_KINDS.has(f.type.kind)) {
+        out.push({ segs: [...segs, f.name], field: f });
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+  return walk(element, []) ? out : null;
+}
+
 export function columnarEligible(node: ArrayNode): boolean {
-  return (
-    node.element.kind === "struct" &&
-    node.element.fields.length > 0 &&
-    node.element.fields.every((f) => COLUMN_KINDS.has(f.type.kind))
-  );
+  return node.element.kind === "struct" && flattenLeaves(node.element) !== null;
 }
 
 const scratch = new DataView(new ArrayBuffer(8));
@@ -260,6 +284,110 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
   return out;
 }
 
+function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: EncodeCtx): void {
+  if (values.length === 0) {
+    w.u8(0);
+    return;
+  }
+  const bytes = values.map((v, i) => utf8Bytes(v, `${path}[${i}]`));
+  const plainCost = bytes.reduce((n, b) => n + ulebLen(BigInt(b.length)) + b.length, 0);
+
+  let packed: Uint8Array | null = null;
+  let packedCost = Infinity;
+  if (ctx.deflate) {
+    const total = bytes.reduce((n, b) => n + b.length, 0);
+    const concat = new Uint8Array(total);
+    let offset = 0;
+    for (const b of bytes) {
+      concat.set(b, offset);
+      offset += b.length;
+    }
+    packed = ctx.deflate(concat);
+    packedCost =
+      bytes.reduce((n, b) => n + ulebLen(BigInt(b.length)), 0) +
+      ulebLen(BigInt(packed.length)) +
+      packed.length;
+  }
+
+  if (packed && packedCost < plainCost) {
+    w.u8(1);
+    for (const b of bytes) writeUleb(w, BigInt(b.length));
+    writeUleb(w, BigInt(packed.length));
+    w.bytes(packed);
+    return;
+  }
+  w.u8(0);
+  for (const b of bytes) {
+    writeUleb(w, BigInt(b.length));
+    w.bytes(b);
+  }
+}
+
+const utf8Strict = new TextDecoder("utf-8", { fatal: true });
+
+function decodeStringColumn(r: Reader, count: number, path: string, inflate?: Inflate): string[] {
+  const mode = r.u8();
+  if (mode > 1) throw new DecodeError("marker", `${path}: invalid string column mode 0x${mode.toString(16)}`);
+  const out: string[] = new Array<string>(count);
+  if (count === 0) return out;
+
+  const decodeSlice = (bytes: Uint8Array, i: number): string => {
+    try {
+      return utf8Strict.decode(bytes);
+    } catch {
+      throw new DecodeError("utf8", `${path}[${i}]: invalid UTF-8`);
+    }
+  };
+
+  if (mode === 0) {
+    for (let i = 0; i < count; i++) {
+      const raw = readUleb(r);
+      if (raw > BigInt(r.limits.maxByteLength)) {
+        throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
+      }
+      out[i] = decodeSlice(r.bytes(Number(raw)), i);
+    }
+    return out;
+  }
+
+  const lengths: number[] = new Array<number>(count);
+  let total = 0;
+  for (let i = 0; i < count; i++) {
+    const raw = readUleb(r);
+    if (raw > BigInt(r.limits.maxByteLength)) {
+      throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
+    }
+    lengths[i] = Number(raw);
+    total += lengths[i]!;
+    if (total > r.limits.maxByteLength) {
+      throw new DecodeError("limit", `${path}: packed column total exceeds limit`);
+    }
+  }
+  const blobLenRaw = readUleb(r);
+  if (blobLenRaw > BigInt(r.limits.maxByteLength)) {
+    throw new DecodeError("limit", `${path}: packed blob exceeds limit`);
+  }
+  const blob = r.bytes(Number(blobLenRaw));
+  if (!inflate) {
+    throw new DecodeError("unsupported", `${path}: packed string column requires an inflate hook`);
+  }
+  let inflated: Uint8Array;
+  try {
+    inflated = inflate(blob, total);
+  } catch {
+    throw new DecodeError("packed", `${path}: packed blob failed to inflate`);
+  }
+  if (inflated.length !== total) {
+    throw new DecodeError("packed", `${path}: packed blob inflates to ${inflated.length} bytes, expected ${total}`);
+  }
+  let offset = 0;
+  for (let i = 0; i < count; i++) {
+    out[i] = decodeSlice(inflated.subarray(offset, offset + lengths[i]!), i);
+    offset += lengths[i]!;
+  }
+  return out;
+}
+
 function encodeBoolColumn(w: Writer, values: unknown[], path: string): void {
   const bits = values.map((v, i) => {
     if (typeof v !== "boolean") throw new EncodeError("type", `${path}[${i}]: expected boolean`);
@@ -298,16 +426,36 @@ export function encodeColumnarArray(
     return row as Record<string, unknown>;
   });
 
-  for (const field of element.fields) {
-    const fieldPath = `${path}[].${field.name}`;
-    const states: RowState[] = rows.map((row, i) => {
-      const v = row[field.name];
+  const leaves = flattenLeaves(element)!;
+
+  const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
+    let obj: Record<string, unknown> = row;
+    for (let d = 0; d < segs.length - 1; d++) {
+      const v = obj[segs[d]!];
+      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+        throw new EncodeError(
+          v === undefined ? "required" : "type",
+          `${path}[${i}].${segs.slice(0, d + 1).join(".")}: expected object`,
+        );
+      }
+      obj = v as Record<string, unknown>;
+    }
+    return obj;
+  };
+
+  for (const leaf of leaves) {
+    const field = leaf.field;
+    const leafName = leaf.segs[leaf.segs.length - 1]!;
+    const dotted = leaf.segs.join(".");
+    const fieldPath = `${path}[].${dotted}`;
+    const values: unknown[] = rows.map((row, i) => containerOf(row, leaf.segs, i)[leafName]);
+    const states: RowState[] = values.map((v, i) => {
       const absent = v === undefined;
       if (absent && !field.optional) {
-        throw new EncodeError("required", `${path}[${i}].${field.name}: required field missing`);
+        throw new EncodeError("required", `${path}[${i}].${dotted}: required field missing`);
       }
       if (v === null && !field.nullable && !typeAcceptsNull(field.type)) {
-        throw new EncodeError("type", `${path}[${i}].${field.name}: null for non-nullable field`);
+        throw new EncodeError("type", `${path}[${i}].${dotted}: null for non-nullable field`);
       }
       return { present: !absent, isNull: !absent && v === null };
     });
@@ -320,7 +468,7 @@ export function encodeColumnarArray(
       const s = states[i]!;
       if (!s.present) continue;
       if (s.isNull && field.nullable) continue;
-      participating.push(rows[i]![field.name]);
+      participating.push(values[i]);
     }
 
     switch (field.type.kind) {
@@ -337,6 +485,9 @@ export function encodeColumnarArray(
       case "bool":
         encodeBoolColumn(w, participating, fieldPath);
         break;
+      case "string":
+        encodeStringColumn(w, participating, fieldPath, ctx);
+        break;
       default:
         for (let i = 0; i < participating.length; i++) {
           encodeNode(w, field.type, participating[i], `${fieldPath}[${i}]`, depth + 2, ctx);
@@ -350,6 +501,7 @@ export function decodeColumnarArray(
   node: ArrayNode,
   path: string,
   depth: number,
+  inflate?: Inflate,
 ): Record<string, unknown>[] {
   const element = node.element as StructNode;
   let count: number;
@@ -364,9 +516,21 @@ export function decodeColumnarArray(
   }
 
   const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
+  const leaves = flattenLeaves(element)!;
 
-  for (const field of element.fields) {
-    const fieldPath = `${path}[].${field.name}`;
+  const containerOf = (row: Record<string, unknown>, segs: readonly string[]): Record<string, unknown> => {
+    let obj = row;
+    for (let d = 0; d < segs.length - 1; d++) {
+      const seg = segs[d]!;
+      obj = (obj[seg] ??= {}) as Record<string, unknown>;
+    }
+    return obj;
+  };
+
+  for (const leaf of leaves) {
+    const field = leaf.field;
+    const leafName = leaf.segs[leaf.segs.length - 1]!;
+    const fieldPath = `${path}[].${leaf.segs.join(".")}`;
     const presence = field.optional ? readBitmap(r, count, fieldPath) : null;
     const nulls = field.nullable ? readBitmap(r, count, fieldPath) : null;
 
@@ -375,11 +539,11 @@ export function decodeColumnarArray(
       const present = presence ? presence[i]! : true;
       const isNull = nulls ? nulls[i]! : false;
       if (!present) {
-        if (isNull) throw new DecodeError("bitmap", `${path}[${i}].${field.name}: null bit set for absent field`);
+        if (isNull) throw new DecodeError("bitmap", `${path}[${i}].${leafName}: null bit set for absent field`);
         continue;
       }
       if (isNull) {
-        out[i]![field.name] = null;
+        containerOf(out[i]!, leaf.segs)[leafName] = null;
         continue;
       }
       slots.push(i);
@@ -388,22 +552,27 @@ export function decodeColumnarArray(
     switch (field.type.kind) {
       case "int": {
         const values = decodeIntColumn(r, field.type as IntNode, slots.length, fieldPath);
-        slots.forEach((row, j) => (out[row]![field.name] = values[j]!));
+        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
         break;
       }
       case "float64": {
         const values = decodeFloatColumn(r, slots.length, fieldPath);
-        slots.forEach((row, j) => (out[row]![field.name] = values[j]!));
+        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
         break;
       }
       case "bool": {
         const values = readBitmap(r, slots.length, fieldPath);
-        slots.forEach((row, j) => (out[row]![field.name] = values[j]!));
+        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
+        break;
+      }
+      case "string": {
+        const values = decodeStringColumn(r, slots.length, fieldPath, inflate);
+        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
         break;
       }
       default: {
         for (const row of slots) {
-          out[row]![field.name] = decodeNode(r, field.type, `${path}[${row}].${field.name}`, depth + 2, false);
+          containerOf(out[row]!, leaf.segs)[leafName] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false);
         }
       }
     }
