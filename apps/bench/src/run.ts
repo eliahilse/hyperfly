@@ -23,7 +23,12 @@ function brotli(bytes: Uint8Array, quality: number, mode: number): Uint8Array {
   });
 }
 
-function contenders(payload: unknown, codec: { encode(v: never): Uint8Array; decode(b: Uint8Array): unknown }): Contender[] {
+interface AnyCodec {
+  encode(v: never): Uint8Array;
+  decode(b: Uint8Array): unknown;
+}
+
+function contenders(payload: unknown, row: AnyCodec, col: AnyCodec): Contender[] {
   const p = payload as never;
   return [
     {
@@ -47,14 +52,24 @@ function contenders(payload: unknown, codec: { encode(v: never): Uint8Array; dec
       decode: (b) => JSON.parse(dec.decode(brotliDecompressSync(b))),
     },
     {
-      name: "hyperfly",
-      encode: () => codec.encode(p),
-      decode: (b) => codec.decode(b),
+      name: "hf-row",
+      encode: () => row.encode(p),
+      decode: (b) => row.decode(b),
     },
     {
-      name: "hyperfly+br4",
-      encode: () => brotli(codec.encode(p), 4, constants.BROTLI_MODE_GENERIC),
-      decode: (b) => codec.decode(new Uint8Array(brotliDecompressSync(b))),
+      name: "hf-row+br4",
+      encode: () => brotli(row.encode(p), 4, constants.BROTLI_MODE_GENERIC),
+      decode: (b) => row.decode(new Uint8Array(brotliDecompressSync(b))),
+    },
+    {
+      name: "hf-col",
+      encode: () => col.encode(p),
+      decode: (b) => col.decode(b),
+    },
+    {
+      name: "hf-col+br4",
+      encode: () => brotli(col.encode(p), 4, constants.BROTLI_MODE_GENERIC),
+      decode: (b) => col.decode(new Uint8Array(brotliDecompressSync(b))),
     },
   ];
 }
@@ -98,11 +113,12 @@ interface Row {
 
 function runCorpus(name: string, schema: unknown, payload: unknown, warmup: number, samples: number): Row[] {
   const compileStart = Bun.nanoseconds();
-  const codec = compile(schema as never);
+  const rowCodec = compile(schema as never);
+  const colCodec = compile(schema as never, { plan: "columnar" });
   const compileMs = (Bun.nanoseconds() - compileStart) / 1e6;
 
   const rows: Row[] = [];
-  const list = contenders(payload, codec as never);
+  const list = contenders(payload, rowCodec as never, colCodec as never);
   const jsonBytes = list[0]!.encode().length;
 
   for (const c of list) {

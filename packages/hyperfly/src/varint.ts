@@ -49,3 +49,13 @@ export function zigzag(v: bigint): bigint {
 export function unzigzag(u: bigint): bigint {
   return (u & 1n) === 1n ? -((u + 1n) >> 1n) : u >> 1n;
 }
+
+export function ulebLen(value: bigint): number {
+  let v = value;
+  let len = 1;
+  while (v > 0x7fn) {
+    v >>= 7n;
+    len++;
+  }
+  return len;
+}
