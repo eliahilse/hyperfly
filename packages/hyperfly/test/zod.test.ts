@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
 import { UnsupportedSchemaError } from "../src/errors.js";
+import { serializeArtifact } from "../src/index.js";
 import { compile, toIR } from "../src/zod.js";
 
 const Candle = z.object({
@@ -118,5 +119,51 @@ describe("compile round-trip", () => {
     const wire = codec.encode(payload).length;
     const json = new TextEncoder().encode(JSON.stringify(payload)).length;
     expect(wire).toBeLessThan(json);
+  });
+});
+
+describe("integer bound intersection (retro #7/#8)", () => {
+  test("exclusive gt/lt convert to inclusive integer bounds", () => {
+    expect(toIR(z.object({ n: z.number().int().gt(1).lt(10) }))).toEqual({
+      kind: "struct",
+      fields: [{ name: "n", type: { kind: "int", min: 2, max: 9 } }],
+    });
+  });
+
+  test("tightest bound wins when several are declared", () => {
+    expect(toIR(z.object({ n: z.number().int().min(0).gt(4) }))).toEqual({
+      kind: "struct",
+      fields: [{ name: "n", type: { kind: "int", min: 5 } }],
+    });
+  });
+});
+
+describe("IR rejects lone surrogates (retro #10)", () => {
+  test("enum member with a lone surrogate", () => {
+    expect(() => toIR(z.object({ e: z.enum(["ok", "\ud800"]) }))).toThrow();
+  });
+});
+
+describe("cross-adapter parity (retro)", () => {
+  test("artifact string is pinned to the pydantic adapter's output", () => {
+    const Row = z.object({
+      id: z.string(),
+      kind: z.literal("a"),
+      score: z.number().int().min(0).max(100),
+      ratio: z.number(),
+      note: z.string().nullable(),
+      tag: z.string().nullable(),
+    });
+    // identical string is asserted in python/tests/test_cross_adapter.py
+    expect(serializeArtifact(toIR(Row), "columnar")).toBe(
+      '{"wire":1,"plan":{"layout":"columnar","version":2},"ir":' +
+        '{"kind":"struct","fields":[' +
+        '{"name":"id","type":{"kind":"string"}},' +
+        '{"name":"kind","type":{"kind":"literal","value":"a"}},' +
+        '{"name":"score","type":{"kind":"int","min":0,"max":100}},' +
+        '{"name":"ratio","type":{"kind":"float64"}},' +
+        '{"name":"note","type":{"kind":"string"},"nullable":true},' +
+        '{"name":"tag","type":{"kind":"string"},"nullable":true}]}}',
+    );
   });
 });

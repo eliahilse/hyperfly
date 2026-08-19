@@ -1,0 +1,14 @@
+[package]
+name = "hyperfly-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust core for the hyperfly wire format"
+repository = "https://github.com/eliahilse/hyperfly"
+
+[dependencies]
+sha2 = "0.10"
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }

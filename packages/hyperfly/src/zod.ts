@@ -30,6 +30,33 @@ function unsupported(path: string, message: string): never {
   throw new UnsupportedSchemaError(path, message);
 }
 
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (!((s.charCodeAt(i + 1) ?? 0) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function checkPortableString(v: string, path: string, what: string): void {
+  if (hasLoneSurrogate(v)) unsupported(path, `${what} contains a lone surrogate and has no portable encoding`);
+}
+
+function checkFieldName(name: string, path: string): void {
+  checkPortableString(name, path, "field name");
+  if (name === "__proto__") unsupported(path, 'field name "__proto__" is not portable');
+  if (ARRAY_INDEX.test(name) && Number(name) < 0xffffffff) {
+    unsupported(path, `field name "${name}" is an array index and would reorder as an object key`);
+  }
+}
+
 function internals(schema: unknown, path: string): ZodInternals {
   const z = (schema as ZodSchemaLike | undefined)?._zod;
   if (!z || typeof z.def?.type !== "string") {
@@ -38,14 +65,39 @@ function internals(schema: unknown, path: string): ZodInternals {
   return z;
 }
 
-function intBound(raw: unknown, mode: "min" | "max", path: string): number | undefined {
+function boundValue(raw: unknown): number | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
-  const bound = mode === "min" ? Math.ceil(raw) : Math.floor(raw);
-  if (bound < INT_MIN || bound > INT_MAX) unsupported(path, `bound ${raw} outside the v0 integer domain`);
-  if (mode === "min" && bound === INT_MIN) return undefined;
-  if (mode === "max" && bound === INT_MAX) return undefined;
-  return bound;
+  return raw;
+}
+
+/** Intersect inclusive and exclusive bounds into one integer minimum, or undefined if only the domain default. */
+function intMin(bag: Record<string, unknown>, path: string): number | undefined {
+  let bound: number | undefined;
+  const inclusive = boundValue(bag.minimum);
+  if (inclusive !== undefined) bound = Math.ceil(inclusive);
+  const exclusive = boundValue(bag.exclusiveMinimum);
+  if (exclusive !== undefined) {
+    const fromExcl = Math.floor(exclusive) + 1;
+    bound = bound === undefined ? fromExcl : Math.max(bound, fromExcl);
+  }
+  if (bound === undefined) return undefined;
+  if (bound < INT_MIN || bound > INT_MAX) unsupported(path, `int min ${bound} outside the v0 integer domain`);
+  return bound === INT_MIN ? undefined : bound;
+}
+
+function intMax(bag: Record<string, unknown>, path: string): number | undefined {
+  let bound: number | undefined;
+  const inclusive = boundValue(bag.maximum);
+  if (inclusive !== undefined) bound = Math.floor(inclusive);
+  const exclusive = boundValue(bag.exclusiveMaximum);
+  if (exclusive !== undefined) {
+    const fromExcl = Math.ceil(exclusive) - 1;
+    bound = bound === undefined ? fromExcl : Math.min(bound, fromExcl);
+  }
+  if (bound === undefined) return undefined;
+  if (bound < INT_MIN || bound > INT_MAX) unsupported(path, `int max ${bound} outside the v0 integer domain`);
+  return bound === INT_MAX ? undefined : bound;
 }
 
 interface Unwrapped {
@@ -84,8 +136,8 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
     case "number": {
       const format = (bag.format ?? def.format) as string | undefined;
       if (format === "safeint") {
-        const min = intBound(bag.minimum, "min", path);
-        const max = intBound(bag.maximum, "max", path);
+        const min = intMin(bag, path);
+        const max = intMax(bag, path);
         return {
           kind: "int",
           ...(min !== undefined ? { min } : {}),
@@ -105,6 +157,12 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
       if (!members.every((m): m is string => typeof m === "string")) {
         unsupported(path, "only string enums are supported in v0");
       }
+      for (const m of members) {
+        checkPortableString(m, path, "enum member");
+        if (ARRAY_INDEX.test(m) && Number(m) < 0xffffffff) {
+          unsupported(path, `enum member "${m}" is an array index; zod cannot preserve its declaration order`);
+        }
+      }
       return { kind: "enum", members };
     }
     case "literal": {
@@ -119,6 +177,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
         typeof v === "boolean" ||
         (typeof v === "number" && Number.isSafeInteger(v));
       if (!ok) unsupported(path, "literal must be string, boolean, null, or a safe integer");
+      if (typeof v === "string") checkPortableString(v, path, "literal string");
       return { kind: "literal", value: v as LiteralValue };
     }
     case "array": {
@@ -137,6 +196,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
       const fields: IRField[] = [];
       for (const [name, fieldSchema] of Object.entries(shape)) {
         const fieldPath = `${path}.${name}`;
+        checkFieldName(name, fieldPath);
         const { inner, optional, nullable } = unwrap(internals(fieldSchema, fieldPath), fieldPath);
         const field: IRField = { name, type: nodeOf(inner, fieldPath) };
         if (optional) field.optional = true;

@@ -3,6 +3,13 @@ import vectors from "../../../spec/vectors/vectors.json" with { type: "json" };
 import { compileIR, toHex, type IRNode } from "../src/index.js";
 import { HyperflyError } from "../src/errors.js";
 
+function revive(value: unknown): unknown {
+  if (value && typeof value === "object" && "$surrogate" in value) {
+    return String.fromCharCode(parseInt((value as { $surrogate: string }).$surrogate, 16));
+  }
+  return value;
+}
+
 function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
@@ -39,7 +46,7 @@ describe("golden vectors: invalid encode", () => {
     test(v.name, () => {
       const codec = compileIR(v.ir as IRNode);
       try {
-        codec.encodeBody(v.value);
+        codec.encodeBody(revive(v.value));
         throw new Error("expected encode to fail");
       } catch (err) {
         expect(err).toBeInstanceOf(HyperflyError);

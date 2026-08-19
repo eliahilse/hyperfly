@@ -84,7 +84,9 @@ function randomIR(rng: () => number, depth: number): IRNode {
         name: `f${i}`,
         type,
         ...(rng() < 0.3 ? { optional: true } : {}),
-        ...(rng() < 0.3 && type.kind !== "nullable" ? { nullable: true } : {}),
+        ...(rng() < 0.3 && type.kind !== "nullable" && !(type.kind === "literal" && type.value === null)
+          ? { nullable: true }
+          : {}),
       };
     });
     return { kind: "struct", fields };
@@ -98,7 +100,9 @@ function randomIR(rng: () => number, depth: number): IRNode {
   }
   if (depth < 3 && r < 0.46) {
     let inner = randomIR(rng, depth + 1);
-    while (inner.kind === "nullable") inner = randomIR(rng, depth + 1);
+    while (inner.kind === "nullable" || (inner.kind === "literal" && inner.value === null)) {
+      inner = randomIR(rng, depth + 1);
+    }
     return { kind: "nullable", inner };
   }
   return KINDS[Math.floor(rng() * KINDS.length)]!(rng);

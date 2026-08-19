@@ -1,8 +1,7 @@
-import { decodeNode, type Inflate } from "./decode.js";
+import { boundByInput, decodeNode, readBitmap, type Inflate } from "./decode.js";
 import { encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import type { IRField, IRNode } from "./ir.js";
-import { readBitmap } from "./decode.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import type { Writer } from "./writer.js";
@@ -102,7 +101,10 @@ function decodeIntColumn(r: Reader, node: IntNode, count: number, path: string):
   const mode = r.u8();
   if (mode > 1) throw new DecodeError("marker", `${path}: invalid int column mode 0x${mode.toString(16)}`);
   const out: number[] = new Array<number>(count);
-  if (count === 0) return out;
+  if (count === 0) {
+    if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
+    return out;
+  }
 
   const fromForm = (form: bigint): bigint =>
     node.min !== undefined ? form + BigInt(node.min) : unzigzag(form);
@@ -147,13 +149,20 @@ function sigBytes(x: bigint): number {
 const POW10 = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000];
 const MAX_SCALE = POW10.length - 1;
 
+/** Spec-pinned mantissa recovery: sign(v) * floor(|v|*10^s + 0.5), pure IEEE ops. */
+function decimalMantissa(v: number, pow: number): number {
+  if (v > 0) return Math.floor(v * pow + 0.5);
+  if (v < 0) return -Math.floor(-v * pow + 0.5);
+  return 0;
+}
+
 /** Smallest s with every value exactly m/10^s for a safe integer m, or null. */
 function decimalScale(values: number[]): number | null {
   for (let s = 0; s <= MAX_SCALE; s++) {
     const pow = POW10[s]!;
     let ok = true;
     for (const v of values) {
-      const m = Math.round(v * pow);
+      const m = decimalMantissa(v, pow);
       if (!Number.isSafeInteger(m) || m / pow !== v) {
         ok = false;
         break;
@@ -190,7 +199,7 @@ function encodeFloatColumn(w: Writer, values: number[], path: string): void {
   let scaledRawCost = Infinity;
   let mantissas: bigint[] = [];
   if (scale !== null) {
-    mantissas = canon.map((v) => BigInt(Math.round(v * POW10[scale]!)));
+    mantissas = canon.map((v) => BigInt(decimalMantissa(v, POW10[scale]!)));
     scaledRawCost = 1 + mantissas.reduce((n, m) => n + ulebLen(zigzag(m)), 0);
     scaledDeltaCost = 1 + ulebLen(zigzag(mantissas[0]!));
     for (let i = 1; i < mantissas.length; i++) {
@@ -232,7 +241,10 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
   const mode = r.u8();
   if (mode > 3) throw new DecodeError("marker", `${path}: invalid float column mode 0x${mode.toString(16)}`);
   const out: number[] = new Array<number>(count);
-  if (count === 0) return out;
+  if (count === 0) {
+    if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
+    return out;
+  }
 
   if (mode >= 2) {
     const scale = r.u8();
@@ -294,7 +306,7 @@ function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: Enc
 
   let packed: Uint8Array | null = null;
   let packedCost = Infinity;
-  if (ctx.deflate) {
+  if (ctx.deflate && ctx.canInflate) {
     const total = bytes.reduce((n, b) => n + b.length, 0);
     const concat = new Uint8Array(total);
     let offset = 0;
@@ -323,11 +335,12 @@ function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: Enc
   }
 }
 
-const utf8Strict = new TextDecoder("utf-8", { fatal: true });
+const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function decodeStringColumn(r: Reader, count: number, path: string, inflate?: Inflate): string[] {
   const mode = r.u8();
   if (mode > 1) throw new DecodeError("marker", `${path}: invalid string column mode 0x${mode.toString(16)}`);
+  if (count === 0 && mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
   const out: string[] = new Array<string>(count);
   if (count === 0) return out;
 
@@ -431,7 +444,8 @@ export function encodeColumnarArray(
   const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
     let obj: Record<string, unknown> = row;
     for (let d = 0; d < segs.length - 1; d++) {
-      const v = obj[segs[d]!];
+      const key = segs[d]!;
+      const v = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
       if (typeof v !== "object" || v === null || Array.isArray(v)) {
         throw new EncodeError(
           v === undefined ? "required" : "type",
@@ -448,7 +462,10 @@ export function encodeColumnarArray(
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const dotted = leaf.segs.join(".");
     const fieldPath = `${path}[].${dotted}`;
-    const values: unknown[] = rows.map((row, i) => containerOf(row, leaf.segs, i)[leafName]);
+    const values: unknown[] = rows.map((row, i) => {
+      const holder = containerOf(row, leaf.segs, i);
+      return Object.prototype.hasOwnProperty.call(holder, leafName) ? holder[leafName] : undefined;
+    });
     const states: RowState[] = values.map((v, i) => {
       const absent = v === undefined;
       if (absent && !field.optional) {
@@ -469,6 +486,15 @@ export function encodeColumnarArray(
       if (!s.present) continue;
       if (s.isNull && field.nullable) continue;
       participating.push(values[i]);
+    }
+
+    // row-equivalent depths: a nested container at chain position j sits at depth+2+j,
+    // the leaf value at depth+1+segs.length. Containers always exist; the leaf only when present.
+    if (rows.length > 0 && depth + leaf.segs.length > ctx.maxDepth) {
+      throw new EncodeError("depth", `${fieldPath}: nesting deeper than ${ctx.maxDepth}`);
+    }
+    if (participating.length > 0 && depth + 1 + leaf.segs.length > ctx.maxDepth) {
+      throw new EncodeError("depth", `${fieldPath}: nesting deeper than ${ctx.maxDepth}`);
     }
 
     switch (field.type.kind) {
@@ -514,6 +540,10 @@ export function decodeColumnarArray(
     }
     count = Number(raw);
   }
+  if (count > r.limits.maxItems) {
+    throw new DecodeError("limit", `${path}: array count ${count} exceeds limit ${r.limits.maxItems}`);
+  }
+  boundByInput(r, count, element, path);
 
   const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
   const leaves = flattenLeaves(element)!;
@@ -522,7 +552,8 @@ export function decodeColumnarArray(
     let obj = row;
     for (let d = 0; d < segs.length - 1; d++) {
       const seg = segs[d]!;
-      obj = (obj[seg] ??= {}) as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(obj, seg)) obj[seg] = {};
+      obj = obj[seg] as Record<string, unknown>;
     }
     return obj;
   };
@@ -531,6 +562,12 @@ export function decodeColumnarArray(
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const fieldPath = `${path}[].${leaf.segs.join(".")}`;
+    // nested structs are required and non-nullable: materialize the container chain at
+    // this leaf's declared position for every row, so an all-absent nested struct still
+    // round-trips and keys stay in declared order across implementations
+    if (leaf.segs.length > 1) {
+      for (let i = 0; i < count; i++) containerOf(out[i]!, leaf.segs);
+    }
     const presence = field.optional ? readBitmap(r, count, fieldPath) : null;
     const nulls = field.nullable ? readBitmap(r, count, fieldPath) : null;
 
@@ -547,6 +584,13 @@ export function decodeColumnarArray(
         continue;
       }
       slots.push(i);
+    }
+
+    if (count > 0 && depth + leaf.segs.length > r.limits.maxDepth) {
+      throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
+    }
+    if (slots.length > 0 && depth + 1 + leaf.segs.length > r.limits.maxDepth) {
+      throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
     }
 
     switch (field.type.kind) {

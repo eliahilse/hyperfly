@@ -33,8 +33,19 @@ export interface Codec<T = unknown> {
   decodeBody(bytes: Uint8Array): T;
 }
 
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const inner of Object.values(value)) deepFreeze(inner);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
   validateIR(ir);
+  // isolate from later mutation, caller-side or through codec.ir: the fingerprint is
+  // fixed at compile time and the schema behind it must not drift
+  ir = deepFreeze(structuredClone(ir));
   const plan: PlanLayout = options.plan ?? "row";
   const artifact = serializeArtifact(ir, plan);
   const fingerprintBytes = fingerprintOf(artifact);
@@ -45,7 +56,14 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
 
   const encodeBody = (value: T): Uint8Array => {
     const w = new Writer();
-    encodeNode(w, ir, value, "$", 0, { maxDepth: limits.maxDepth, columnar, deflate: pack.deflate });
+    encodeNode(w, ir, value, "$", 0, {
+      maxDepth: limits.maxDepth,
+      maxItems: limits.maxItems,
+      maxByteLength: limits.maxByteLength,
+      columnar,
+      deflate: pack.deflate,
+      canInflate: pack.inflate !== undefined,
+    });
     return w.finish();
   };
 
@@ -56,7 +74,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     return value as T;
   };
 
-  return {
+  return Object.freeze({
     ir,
     artifact,
     fingerprint,
@@ -66,7 +84,8 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     encode(value: T): Uint8Array {
       const body = encodeBody(value);
       const out = new Uint8Array(HEADER_SIZE + body.length);
-      out.set(MAGIC, 0);
+      out[0] = 0x68;
+      out[1] = 0x66;
       out[2] = WIRE_VERSION;
       out.set(fingerprintBytes, 3);
       out.set(body, HEADER_SIZE);
@@ -74,11 +93,11 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     },
     decode(bytes: Uint8Array): T {
       if (bytes.length < HEADER_SIZE) throw new DecodeError("header", "shorter than envelope header");
-      if (bytes[0] !== MAGIC[0] || bytes[1] !== MAGIC[1]) throw new DecodeError("header", "bad magic");
+      if (bytes[0] !== 0x68 || bytes[1] !== 0x66) throw new DecodeError("header", "bad magic");
       if (bytes[2] !== WIRE_VERSION) throw new DecodeError("header", `unsupported wire major ${bytes[2]}`);
       const actual = toHex(bytes.subarray(3, HEADER_SIZE));
       if (actual !== fingerprint) throw new FingerprintMismatchError(fingerprint, actual);
       return decodeBody(bytes.subarray(HEADER_SIZE));
     },
-  };
+  });
 }

@@ -1,12 +1,12 @@
 import { columnarEligible, encodeColumnarArray } from "./columnar.js";
-import { EncodeError } from "./errors.js";
+import { EncodeError, type ErrorCode } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
 const encoder = new TextEncoder();
 
-function fail(code: "type" | "required" | "range" | "utf8" | "float" | "depth", path: string, message: string): never {
+function fail(code: ErrorCode, path: string, message: string): never {
   throw new EncodeError(code, `${path}: ${message}`);
 }
 
@@ -25,8 +25,12 @@ function checkSurrogates(s: string, path: string): void {
 
 export interface EncodeCtx {
   maxDepth: number;
+  maxItems: number;
+  maxByteLength: number;
   columnar: boolean;
   deflate?: (data: Uint8Array) => Uint8Array;
+  /** packing is only canonical when the same codec can also inflate what it wrote */
+  canInflate: boolean;
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
@@ -80,12 +84,14 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
     }
     case "string": {
       const bytes = utf8Bytes(value, path);
+      if (bytes.length > ctx.maxByteLength) fail("limit", path, `string of ${bytes.length} bytes exceeds the codec limit`);
       writeUleb(w, BigInt(bytes.length));
       w.bytes(bytes);
       return;
     }
     case "bytes": {
       if (!(value instanceof Uint8Array)) fail("type", path, "expected Uint8Array");
+      if (value.length > ctx.maxByteLength) fail("limit", path, `bytes of ${value.length} exceeds the codec limit`);
       writeUleb(w, BigInt(value.length));
       w.bytes(value);
       return;
@@ -117,6 +123,7 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         return;
       }
       if (!Array.isArray(value)) fail("type", path, "expected array");
+      if (value.length > ctx.maxItems) fail("limit", path, `array of ${value.length} items exceeds the codec limit`);
       if (node.length !== undefined) {
         if (value.length !== node.length) fail("type", path, `fixed array expects ${node.length} items, got ${value.length}`);
       } else {
@@ -132,10 +139,15 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         fail("type", path, "expected object");
       }
       const record = value as Record<string, unknown>;
+      // own properties only, snapshotted once: inherited Object.prototype members are not data,
+      // and accessor properties must not desync the bitmap from the payload
+      const snapshot = node.fields.map((field) =>
+        Object.prototype.hasOwnProperty.call(record, field.name) ? record[field.name] : undefined,
+      );
       const presence: boolean[] = [];
       const nulls: boolean[] = [];
-      for (const field of node.fields) {
-        const v = record[field.name];
+      node.fields.forEach((field, i) => {
+        const v = snapshot[i];
         const absent = v === undefined;
         if (absent && !field.optional) fail("required", `${path}.${field.name}`, "required field missing");
         if (v === null && !field.nullable && !typeAcceptsNull(field.type)) {
@@ -143,15 +155,15 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         }
         if (field.optional) presence.push(!absent);
         if (field.nullable) nulls.push(!absent && v === null);
-      }
+      });
       writeBitmap(w, presence);
       writeBitmap(w, nulls);
-      for (const field of node.fields) {
-        const v = record[field.name];
-        if (v === undefined) continue;
-        if (v === null && field.nullable) continue;
+      node.fields.forEach((field, i) => {
+        const v = snapshot[i];
+        if (v === undefined) return;
+        if (v === null && field.nullable) return;
         encodeNode(w, field.type, v, `${path}.${field.name}`, depth + 1, ctx);
-      }
+      });
       return;
     }
   }

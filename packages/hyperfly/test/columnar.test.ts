@@ -186,12 +186,16 @@ describe("columnar seeded properties", () => {
     const rng = mulberry32(0xc01c01);
     for (let i = 0; i < 300; i++) {
       const fieldCount = 1 + Math.floor(rng() * 6);
-      const fields = Array.from({ length: fieldCount }, (_, f) => ({
-        name: `f${f}`,
-        type: PRIMITIVES[Math.floor(rng() * PRIMITIVES.length)]!(rng),
-        ...(rng() < 0.25 ? { optional: true } : {}),
-        ...(rng() < 0.25 ? { nullable: true } : {}),
-      }));
+      const fields = Array.from({ length: fieldCount }, (_, f) => {
+        const type = PRIMITIVES[Math.floor(rng() * PRIMITIVES.length)]!(rng);
+        const nullableOk = !(type.kind === "literal" && type.value === null);
+        return {
+          name: `f${f}`,
+          type,
+          ...(rng() < 0.25 ? { optional: true } : {}),
+          ...(rng() < 0.25 && nullableOk ? { nullable: true } : {}),
+        };
+      });
       const ir: IRNode = { kind: "array", element: { kind: "struct", fields } };
       const col = compileIR(ir, { plan: "columnar" });
       const row = compileIR(ir);
@@ -236,5 +240,22 @@ describe("zod integration", () => {
     expect(codec.plan).toBe("columnar");
     const payload = { rows: [{ t: 1, v: 1.5 }, { t: 2, v: 1.5 }] };
     expect(codec.decode(codec.encode(payload))).toEqual(payload);
+  });
+});
+
+describe("empty column canonicality", () => {
+  test("nonzero mode with no rows is rejected for every column type", () => {
+    const cases: [IRNode, string][] = [
+      [{ kind: "int" }, "01 00 01"],
+      [{ kind: "float64" }, "01 00 01"],
+      [{ kind: "string" }, "01 00 01"],
+    ];
+    for (const [type, hex] of cases) {
+      const codec = compileIR(
+        { kind: "array", element: { kind: "struct", fields: [{ name: "x", type, optional: true }] } },
+        { plan: "columnar" },
+      );
+      expect(() => codec.decodeBody(fromHex(hex.replace(/ /g, "")))).toThrow("mode 0x00");
+    }
   });
 });

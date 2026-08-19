@@ -23,3 +23,12 @@ next-env.d.ts
 .DS_Store
 *.pem
 npm-debug.log*
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# rust
+rust/target/

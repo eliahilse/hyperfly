@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hyperfly"
+version = "1.0.0a0"
+description = "Binary compression for typed APIs. Schema-compiled codecs with a fingerprinted wire format and transparent JSON fallback."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Elia Hilse" }]
+
+[project.optional-dependencies]
+pydantic = ["pydantic>=2.5"]
+test = ["pytest>=8", "pydantic>=2.5"]
+
+[project.urls]
+Repository = "https://github.com/eliahilse/hyperfly"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hyperfly"]

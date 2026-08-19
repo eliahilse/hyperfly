@@ -1,10 +1,10 @@
 import { columnarEligible, decodeColumnarArray } from "./columnar.js";
 import { DecodeError } from "./errors.js";
-import type { IRNode } from "./ir.js";
+import { hasPayload, type IRNode } from "./ir.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, unzigzag } from "./varint.js";
 
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function fail(code: "type" | "range" | "utf8" | "float" | "marker" | "bitmap" | "depth" | "limit", path: string, message: string): never {
   throw new DecodeError(code, `${path}: ${message}`);
@@ -44,6 +44,19 @@ export function readBitmap(r: Reader, count: number, path: string): boolean[] {
 }
 
 export type Inflate = (data: Uint8Array, maxOutputLength: number) => Uint8Array;
+
+/**
+ * A declared count must be payable by the bytes still on the wire: every element that
+ * carries any payload costs at least one bit, so a truncated body can never make a
+ * decoder allocate for millions of rows it will never read.
+ */
+export function boundByInput(r: Reader, count: number, element: IRNode, path: string): void {
+  if (count === 0 || !hasPayload(element)) return;
+  const affordable = r.remaining() * 8;
+  if (count > affordable) {
+    throw new DecodeError("limit", `${path}: declared ${count} items but only ${r.remaining()} byte(s) remain`);
+  }
+}
 
 export function decodeNode(
   r: Reader,
@@ -103,6 +116,10 @@ export function decodeNode(
         return decodeColumnarArray(r, node, path, depth, inflate);
       }
       const count = node.length ?? readCount(r, r.limits.maxItems, "array count", path);
+      if (count > r.limits.maxItems) {
+        fail("limit", path, `array count ${count} exceeds limit ${r.limits.maxItems}`);
+      }
+      boundByInput(r, count, node.element, path);
       const out = new Array<unknown>(count);
       for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate);
       return out;
@@ -114,6 +131,8 @@ export function decodeNode(
       const nulls = readBitmap(r, nullableCount, path);
       let pi = 0;
       let ni = 0;
+      // a field may legitimately be named constructor/toString/valueOf; assigning those on a
+      // prototypeful object would hit inherited accessors instead of creating own properties
       const out: Record<string, unknown> = {};
       for (const field of node.fields) {
         const present = field.optional ? presence[pi++]! : true;

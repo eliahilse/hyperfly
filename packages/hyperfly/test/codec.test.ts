@@ -92,3 +92,58 @@ describe("limits", () => {
     expect(() => codec.decodeBody(new Uint8Array([3, 1, 1, 1]))).toThrow("limit");
   });
 });
+
+describe("retro hardening", () => {
+  test("array-index and __proto__ field names are rejected", () => {
+    expect(() => compileIR({ kind: "struct", fields: [{ name: "0", type: { kind: "int" } }] })).toThrow();
+    expect(() => compileIR({ kind: "struct", fields: [{ name: "__proto__", type: { kind: "int" } }] })).toThrow();
+  });
+
+  test("nullable(literal null) is rejected as ambiguous", () => {
+    expect(() => compileIR({ kind: "nullable", inner: { kind: "literal", value: null } })).toThrow();
+  });
+
+  test("lone surrogate in an IR string is rejected", () => {
+    expect(() => compileIR({ kind: "enum", members: ["ok", "\ud800"] })).toThrow();
+  });
+
+  test("leading U+FEFF survives a string round trip", () => {
+    const codec = compileIR({ kind: "string" });
+    const value = "﻿hi";
+    expect(codec.decodeBody(codec.encodeBody(value))).toBe(value);
+  });
+
+  test("fixed arrays honour maxItems", () => {
+    const codec = compileIR({ kind: "array", element: { kind: "bool" }, length: 2 }, { limits: { maxItems: 1 } });
+    expect(() => codec.decodeBody(new Uint8Array([1, 0]))).toThrow("limit");
+  });
+
+  test("mutating the caller's IR after compile does not change output", () => {
+    const ir: IRNode = { kind: "int", min: 0 };
+    const codec = compileIR(ir);
+    (ir as { min: number }).min = 10;
+    expect(codec.encodeBody(0)).toEqual(new Uint8Array([0]));
+  });
+});
+
+describe("allocation and limit safety", () => {
+  test("a declared count must be payable by the remaining input", () => {
+    const ir: IRNode = { kind: "array", element: { kind: "struct", fields: [{ name: "x", type: { kind: "int" } }] } };
+    const bomb = new Uint8Array([0x80, 0x80, 0x80, 0x08]);
+    for (const plan of ["row", "columnar"] as const) {
+      expect(() => compileIR(ir, { plan }).decodeBody(bomb)).toThrow("remain");
+    }
+  });
+
+  test("encoders refuse output their own decoder would reject", () => {
+    const codec = compileIR({ kind: "string" }, { limits: { maxByteLength: 1 } });
+    expect(() => codec.encodeBody("ab")).toThrow("limit");
+  });
+
+  test("a codec that cannot inflate does not emit packed columns", () => {
+    const ir: IRNode = { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } };
+    const rows = Array.from({ length: 20 }, () => ({ s: "a".repeat(24) }));
+    const codec = compileIR(ir, { plan: "columnar", pack: { deflate: (d) => d } });
+    expect(codec.decodeBody(codec.encodeBody(rows))).toEqual(rows);
+  });
+});

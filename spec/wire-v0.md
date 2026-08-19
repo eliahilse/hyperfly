@@ -126,7 +126,19 @@ field flag (§4.10), which uses the bitmap instead.
 
 ### 4.10 `struct { fields }`
 
-Field order is declared order and is canonical. Each field has `optional` and
+Field order is declared order and is canonical.
+
+**Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
+a decimal array index (`0`, or a digit string with no leading zero whose value
+is below 2^32 − 1). Some host languages reorder integer-index object keys and
+trap `__proto__` assignment, so such names cannot round-trip or fingerprint
+identically everywhere. Field names, enum members, and string literals MUST
+also be well-formed Unicode: a lone surrogate has no portable representation
+and MUST be rejected at IR validation.
+
+**Unambiguous null.** `nullable(literal null)`, and a field carrying the
+`nullable` flag over a `literal null` type, are both invalid: they give one
+value two wire encodings. Each field has `optional` and
 `nullable` flags. Layout:
 
 1. **Presence bitmap** over the optional fields, in field order. Bit set =
@@ -186,6 +198,9 @@ partial values.
 ## 7. Frozen decisions (deliberately unimplemented)
 
 - Little-endian everywhere; no big-endian variant will exist.
+- The IR exclusions in §4.10 (portable field names, well-formed Unicode,
+  unambiguous null) are permanent: they exist so that every implementation
+  accepts exactly the same set of artifacts.
 - The fingerprint identifies the full codec artifact. Future columnar, delta,
   dictionary, or profiled layouts are new `plan` values under the same
   serialization scheme; v0 reserves no in-band escape values for them.

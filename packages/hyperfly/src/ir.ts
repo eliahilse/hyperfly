@@ -30,6 +30,34 @@ function isSafeInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v);
 }
 
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function checkString(v: string, path: string, what: string): void {
+  if (hasLoneSurrogate(v)) fail(path, `${what} contains a lone surrogate and has no portable encoding`);
+}
+
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/** Field names must survive as insertion-ordered object keys in every host language. */
+function checkFieldName(name: string, path: string): void {
+  if (name === "__proto__") fail(path, 'field name "__proto__" is not portable');
+  if (ARRAY_INDEX.test(name) && Number(name) < 0xffffffff) {
+    fail(path, `field name "${name}" is an array index and would reorder as an object key`);
+  }
+}
+
 export function validateIR(node: IRNode, path = "$"): void {
   switch (node.kind) {
     case "bool":
@@ -57,6 +85,7 @@ export function validateIR(node: IRNode, path = "$"): void {
         typeof v === "boolean" ||
         (isSafeInt(v) && !Object.is(v, -0));
       if (!ok) fail(path, "literal must be string, boolean, null, or a safe integer");
+      if (typeof v === "string") checkString(v, path, "literal string");
       return;
     }
     case "enum": {
@@ -64,6 +93,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       const seen = new Set<string>();
       for (const m of node.members) {
         if (typeof m !== "string" || m.length === 0) fail(path, "enum members must be non-empty strings");
+        checkString(m, path, "enum member");
         if (seen.has(m)) fail(path, `duplicate enum member "${m}"`);
         seen.add(m);
       }
@@ -71,6 +101,9 @@ export function validateIR(node: IRNode, path = "$"): void {
     }
     case "nullable": {
       if (node.inner.kind === "nullable") fail(path, "nullable(nullable) is invalid");
+      if (node.inner.kind === "literal" && node.inner.value === null) {
+        fail(path, "nullable(literal null) has two encodings for null");
+      }
       validateIR(node.inner, `${path}?`);
       return;
     }
@@ -85,10 +118,15 @@ export function validateIR(node: IRNode, path = "$"): void {
       const seen = new Set<string>();
       for (const f of node.fields) {
         if (typeof f.name !== "string" || f.name.length === 0) fail(path, "field names must be non-empty strings");
+        checkString(f.name, path, "field name");
+        checkFieldName(f.name, path);
         if (seen.has(f.name)) fail(path, `duplicate field "${f.name}"`);
         seen.add(f.name);
         if (f.nullable && f.type.kind === "nullable") {
           fail(`${path}.${f.name}`, "nullable flag on a nullable type is ambiguous");
+        }
+        if (f.nullable && f.type.kind === "literal" && f.type.value === null) {
+          fail(`${path}.${f.name}`, "nullable flag on a null literal has two encodings for null");
         }
         validateIR(f.type, `${path}.${f.name}`);
       }
@@ -96,5 +134,19 @@ export function validateIR(node: IRNode, path = "$"): void {
     }
     default:
       fail(path, `unknown IR kind ${(node as { kind: string }).kind}`);
+  }
+}
+
+/** Whether one element of this type always consumes at least one bit on the wire. */
+export function hasPayload(node: IRNode): boolean {
+  switch (node.kind) {
+    case "literal":
+      return false;
+    case "struct":
+      return node.fields.some((f) => f.optional || f.nullable || hasPayload(f.type));
+    case "array":
+      return node.length === undefined || (node.length > 0 && hasPayload(node.element));
+    default:
+      return true;
   }
 }
