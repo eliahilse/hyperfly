@@ -50,6 +50,11 @@ function contenders(payload: unknown, row: AnyCodec, col: AnyCodec, proto: Proto
       decode: (b) => JSON.parse(dec.decode(brotliDecompressSync(b))),
     },
     {
+      name: "json+br6",
+      encode: () => brotli(enc.encode(JSON.stringify(payload)), 6, constants.BROTLI_MODE_TEXT),
+      decode: (b) => JSON.parse(dec.decode(brotliDecompressSync(b))),
+    },
+    {
       name: "json+br11",
       encode: () => brotli(enc.encode(JSON.stringify(payload)), 11, constants.BROTLI_MODE_TEXT),
       decode: (b) => JSON.parse(dec.decode(brotliDecompressSync(b))),

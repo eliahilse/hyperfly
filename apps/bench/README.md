@@ -20,8 +20,11 @@ cd apps/bench && bun run bench
 
 - Deterministic seeds; payloads identical across contenders, verified by
   round-trip deep-equality before any timing.
-- gzip level 6. Brotli q4 (labelled: latency-oriented dynamic setting) and q11
-  (offline ceiling — report, don't pretend it's a dynamic choice), TEXT mode
+- gzip level 6 (zlib/Express default). Brotli q4 — what edges actually run on
+  dynamic responses (Cloudflare's documented dynamic level) and the primary
+  baseline for any realistic claim; q6 (ngx_brotli's default) for
+  origin-compression setups; q11 is the offline ceiling for pre-compressed
+  static assets — report it, never present it as a dynamic choice. TEXT mode
   + size hint for JSON inputs, GENERIC for binary.
 - `hyperfly+br4` is included because transport compression exists in real
   deployments; it is a valid configuration, not an admission of failure.
