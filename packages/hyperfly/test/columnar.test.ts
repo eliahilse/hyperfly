@@ -51,6 +51,55 @@ describe("columnar golden vectors: invalid encode", () => {
   }
 });
 
+describe("columnar packed vectors: decode-only", () => {
+  for (const v of vectors.packedDecode) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar" });
+      expect(codec.decodeBody(fromHex(v.hex))).toEqual(v.value);
+    });
+  }
+
+  test("packed input without an inflate hook fails closed", () => {
+    const v = vectors.packedDecode[0]!;
+    const codec = compileIR(v.ir as IRNode, { plan: "columnar", pack: false });
+    try {
+      codec.decodeBody(fromHex(v.hex));
+      throw new Error("expected failure");
+    } catch (err) {
+      expect((err as HyperflyError).code).toBe("unsupported");
+    }
+  });
+});
+
+describe("packed string columns", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "body", type: { kind: "string" } }] },
+  };
+  const prose = Array.from({ length: 40 }, (_, i) => ({
+    body: `the quick brown fox jumps over the lazy dog and files report number ${i} about the same fox again`,
+  }));
+
+  test("prose columns pack, shrink, and round-trip", () => {
+    const packedCodec = compileIR(IR, { plan: "columnar" });
+    const plainCodec = compileIR(IR, { plan: "columnar", pack: false });
+    const packed = packedCodec.encodeBody(prose);
+    const plain = plainCodec.encodeBody(prose);
+    expect(packed.length).toBeLessThan(plain.length * 0.5);
+    expect(packedCodec.decodeBody(packed)).toEqual(prose);
+    expect(plainCodec.decodeBody(plain)).toEqual(prose);
+    const again = packedCodec.encodeBody(packedCodec.decodeBody(packed));
+    expect(Buffer.from(again).equals(Buffer.from(packed))).toBe(true);
+  });
+
+  test("tiny strings stay plain even with hooks available", () => {
+    const codec = compileIR(IR, { plan: "columnar" });
+    const value = [{ body: "a" }, { body: "b" }];
+    const plain = compileIR(IR, { plan: "columnar", pack: false }).encodeBody(value);
+    expect(Buffer.from(codec.encodeBody(value)).equals(Buffer.from(plain))).toBe(true);
+  });
+});
+
 describe("plan separation", () => {
   const IR: IRNode = {
     kind: "array",

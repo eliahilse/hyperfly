@@ -26,10 +26,17 @@ function checkSurrogates(s: string, path: string): void {
 export interface EncodeCtx {
   maxDepth: number;
   columnar: boolean;
+  deflate?: (data: Uint8Array) => Uint8Array;
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
   return node.kind === "nullable" || (node.kind === "literal" && node.value === null);
+}
+
+export function utf8Bytes(value: unknown, path: string): Uint8Array {
+  if (typeof value !== "string") fail("type", path, "expected string");
+  checkSurrogates(value, path);
+  return encoder.encode(value);
 }
 
 function encodeInt(w: Writer, node: Extract<IRNode, { kind: "int" }>, value: unknown, path: string): void {
@@ -72,9 +79,7 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
       return;
     }
     case "string": {
-      if (typeof value !== "string") fail("type", path, "expected string");
-      checkSurrogates(value, path);
-      const bytes = encoder.encode(value);
+      const bytes = utf8Bytes(value, path);
       writeUleb(w, BigInt(bytes.length));
       w.bytes(bytes);
       return;

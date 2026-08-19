@@ -1,4 +1,5 @@
 import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
+import { defaultPackHooks } from "./pack.js";
 import { decodeNode } from "./decode.js";
 import { encodeNode } from "./encode.js";
 import { DecodeError, FingerprintMismatchError } from "./errors.js";
@@ -10,9 +11,15 @@ export const MAGIC = new Uint8Array([0x68, 0x66]);
 export const WIRE_VERSION = 1;
 export const HEADER_SIZE = 19;
 
+export interface PackHooks {
+  deflate?: (data: Uint8Array) => Uint8Array;
+  inflate?: (data: Uint8Array, maxOutputLength: number) => Uint8Array;
+}
+
 export interface CompileOptions {
   limits?: Partial<DecodeLimits>;
   plan?: PlanLayout;
+  pack?: PackHooks | false;
 }
 
 export interface Codec<T = unknown> {
@@ -34,16 +41,17 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
   const fingerprint = toHex(fingerprintBytes);
   const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
   const columnar = plan === "columnar";
+  const pack = options.pack === false ? {} : (options.pack ?? defaultPackHooks());
 
   const encodeBody = (value: T): Uint8Array => {
     const w = new Writer();
-    encodeNode(w, ir, value, "$", 0, { maxDepth: limits.maxDepth, columnar });
+    encodeNode(w, ir, value, "$", 0, { maxDepth: limits.maxDepth, columnar, deflate: pack.deflate });
     return w.finish();
   };
 
   const decodeBody = (bytes: Uint8Array): T => {
     const r = new Reader(bytes, limits);
-    const value = decodeNode(r, ir, "$", 0, columnar);
+    const value = decodeNode(r, ir, "$", 0, columnar, pack.inflate);
     r.expectEnd();
     return value as T;
   };
