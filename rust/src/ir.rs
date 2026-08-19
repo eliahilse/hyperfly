@@ -227,12 +227,43 @@ impl Plan {
     fn version(self) -> u32 {
         match self {
             Plan::Row => 1,
-            Plan::Columnar => 2,
+            Plan::Columnar => 3,
         }
     }
 }
 
-pub fn serialize_artifact(ir: &Node, plan: Plan) -> String {
+pub const MAX_DICT_ENTRIES: usize = 16383;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileColumn {
+    pub leaf: usize,
+    pub dict: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Profile {
+    pub columns: Vec<ProfileColumn>,
+}
+
+pub fn serialize_shared(profile: &Profile, out: &mut String) {
+    out.push_str(r#"{"columns":["#);
+    for (i, c) in profile.columns.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(r#"{{"leaf":{},"dict":["#, c.leaf));
+        for (j, entry) in c.dict.iter().enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            esc(entry, out);
+        }
+        out.push_str("]}");
+    }
+    out.push_str("]}");
+}
+
+pub fn serialize_artifact(ir: &Node, plan: Plan, profile: Option<&Profile>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         r#"{{"wire":1,"plan":{{"layout":"{}","version":{}}},"ir":"#,
@@ -240,8 +271,83 @@ pub fn serialize_artifact(ir: &Node, plan: Plan) -> String {
         plan.version()
     ));
     serialize_node(ir, &mut out);
+    if let Some(p) = profile {
+        out.push_str(r#","profile":"#);
+        serialize_shared(p, &mut out);
+    }
     out.push('}');
     out
+}
+
+/// Spec 6.1: the kind of every columnar leaf in the schema, in ordinal order.
+pub fn enumerate_columns(ir: &Node) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    walk_columns(ir, &mut out, &mut Vec::new());
+    out
+}
+
+/// Ordinal of the first leaf of each eligible array, in the order the walk meets them.
+pub fn array_ordinal_bases(ir: &Node) -> Vec<(*const Node, usize)> {
+    let mut out = Vec::new();
+    let mut bases = Vec::new();
+    walk_columns(ir, &mut out, &mut bases);
+    bases
+}
+
+fn walk_columns(node: &Node, out: &mut Vec<&'static str>, bases: &mut Vec<(*const Node, usize)>) {
+    match node {
+        Node::Array { element, .. } => {
+            if let Node::Struct(fields) = &**element {
+                let mut leaves = Vec::new();
+                let mut segs = Vec::new();
+                if crate::codec::flatten_for_profile(fields, &mut segs, &mut leaves) {
+                    bases.push((node as *const Node, out.len()));
+                    for kind in leaves {
+                        out.push(kind);
+                    }
+                    return;
+                }
+            }
+            walk_columns(element, out, bases);
+        }
+        Node::Nullable(inner) => walk_columns(inner, out, bases),
+        Node::Struct(fields) => {
+            for f in fields {
+                walk_columns(&f.ty, out, bases);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn validate_profile(ir: &Node, profile: &Profile) -> Result<()> {
+    let kinds = enumerate_columns(ir);
+    let mut previous: i64 = -1;
+    for column in &profile.columns {
+        if column.leaf >= kinds.len() {
+            return err(ErrorCode::Ir, format!("profile: leaf {} is not a column in this schema", column.leaf));
+        }
+        if column.leaf as i64 <= previous {
+            return err(ErrorCode::Ir, "profile: columns must be sorted by ascending leaf and unique");
+        }
+        previous = column.leaf as i64;
+        if kinds[column.leaf] != "string" {
+            return err(ErrorCode::Ir, format!("profile: leaf {} is not a string column", column.leaf));
+        }
+        if column.dict.is_empty() || column.dict.len() > MAX_DICT_ENTRIES {
+            return err(
+                ErrorCode::Ir,
+                format!("profile: leaf {}: a dictionary holds 1 to {MAX_DICT_ENTRIES} entries", column.leaf),
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for entry in &column.dict {
+            if !seen.insert(entry) {
+                return err(ErrorCode::Ir, format!("profile: leaf {}: duplicate entry", column.leaf));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn fingerprint_of(artifact: &str) -> [u8; 16] {

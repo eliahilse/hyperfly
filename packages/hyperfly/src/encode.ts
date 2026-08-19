@@ -1,4 +1,5 @@
 import { columnarEligible, encodeColumnarArray } from "./columnar.js";
+import type { ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
@@ -31,6 +32,8 @@ export interface EncodeCtx {
   deflate?: (data: Uint8Array) => Uint8Array;
   /** packing is only canonical when the same codec can also inflate what it wrote */
   canInflate: boolean;
+  profile: ProfileIndex;
+  ordinalOf: (node: IRNode) => number;
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {

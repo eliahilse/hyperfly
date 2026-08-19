@@ -259,3 +259,87 @@ describe("empty column canonicality", () => {
     }
   });
 });
+
+describe("profiles: dictionary columns", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+  const profile = {
+    version: 1 as const,
+    shared: { columns: [{ leaf: 0, dict: ["online", "offline"] }] },
+  };
+
+  test("hits become codes, misses escape, and it round-trips", () => {
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const value = [{ s: "online" }, { s: "novel" }, { s: "offline" }];
+    const body = codec.encodeBody(value);
+    expect(toHex(body)).toBe("03010100056e6f76656c02");
+    expect(codec.decodeBody(body)).toEqual(value);
+  });
+
+  test("a profile changes the fingerprint and the artifact", () => {
+    const bare = compileIR(IR, { plan: "columnar" });
+    const withProfile = compileIR(IR, { plan: "columnar", profile });
+    expect(withProfile.fingerprint).not.toBe(bare.fingerprint);
+    expect(withProfile.artifact).toContain('"profile":{"columns":[{"leaf":0,"dict":["online","offline"]}]}');
+    expect(() => bare.decode(withProfile.encode([{ s: "online" }]))).toThrow();
+  });
+
+  test("a decoder without the profile refuses dictionary columns", () => {
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const body = codec.encodeBody([{ s: "online" }]);
+    const bare = compileIR(IR, { plan: "columnar", pack: false });
+    expect(() => bare.decodeBody(body)).toThrow("dictionary column requires a profile");
+  });
+
+  test("an out-of-range code is rejected", () => {
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    expect(() => codec.decodeBody(fromHex("010109"))).toThrow("out of range");
+  });
+
+  test("invalid profiles are rejected at compile", () => {
+    const bad = (columns: unknown) =>
+      compileIR(IR, { plan: "columnar", profile: { version: 1, shared: { columns } } as never });
+    expect(() => bad([{ leaf: 9, dict: ["a"] }])).toThrow("not a column");
+    expect(() => bad([{ leaf: 0, dict: ["a", "a"] }])).toThrow("duplicate entry");
+    expect(() => bad([{ leaf: 0, dict: [] }])).toThrow("1 to");
+    expect(() =>
+      compileIR(IR, { plan: "row", profile: { version: 1, shared: { columns: [] } } }),
+    ).toThrow("columnar plan only");
+  });
+});
+
+describe("profiled golden vectors", () => {
+  for (const v of vectors.profiled.valid) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar", profile: v.profile as never, pack: false });
+      expect(toHex(codec.encodeBody(v.value))).toBe(v.hex);
+      expect(codec.decodeBody(fromHex(v.hex))).toEqual(v.value);
+    });
+  }
+
+  for (const v of vectors.profiled.invalidDecode) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar", profile: v.profile as never, pack: false });
+      try {
+        codec.decodeBody(fromHex(v.hex));
+        throw new Error("expected failure");
+      } catch (err) {
+        expect((err as HyperflyError).code as string).toBe(v.error);
+      }
+    });
+  }
+
+  for (const v of vectors.profiled.requiresProfile) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar", pack: false });
+      try {
+        codec.decodeBody(fromHex(v.hex));
+        throw new Error("expected failure");
+      } catch (err) {
+        expect((err as HyperflyError).code as string).toBe(v.error);
+      }
+    });
+  }
+});

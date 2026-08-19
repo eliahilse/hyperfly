@@ -1,6 +1,7 @@
 import { columnarEligible, decodeColumnarArray } from "./columnar.js";
 import { DecodeError } from "./errors.js";
 import { hasPayload, type IRNode } from "./ir.js";
+import type { ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, unzigzag } from "./varint.js";
 
@@ -64,7 +65,9 @@ export function decodeNode(
   path: string,
   depth: number,
   columnar: boolean,
-  inflate?: Inflate,
+  inflate: Inflate | undefined,
+  profile: ProfileIndex,
+  ordinalOf: (node: IRNode) => number,
 ): unknown {
   if (depth > r.limits.maxDepth) fail("depth", path, `nesting deeper than ${r.limits.maxDepth}`);
 
@@ -109,11 +112,11 @@ export function decodeNode(
       const marker = r.u8();
       if (marker === 0) return null;
       if (marker !== 1) fail("marker", path, `invalid nullable marker 0x${marker.toString(16)}`);
-      return decodeNode(r, node.inner, path, depth + 1, columnar, inflate);
+      return decodeNode(r, node.inner, path, depth + 1, columnar, inflate, profile, ordinalOf);
     }
     case "array": {
       if (columnar && columnarEligible(node)) {
-        return decodeColumnarArray(r, node, path, depth, inflate);
+        return decodeColumnarArray(r, node, path, depth, inflate, profile, ordinalOf);
       }
       const count = node.length ?? readCount(r, r.limits.maxItems, "array count", path);
       if (count > r.limits.maxItems) {
@@ -121,7 +124,7 @@ export function decodeNode(
       }
       boundByInput(r, count, node.element, path);
       const out = new Array<unknown>(count);
-      for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate);
+      for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate, profile, ordinalOf);
       return out;
     }
     case "struct": {
@@ -145,7 +148,7 @@ export function decodeNode(
           out[field.name] = null;
           continue;
         }
-        out[field.name] = decodeNode(r, field.type, `${path}.${field.name}`, depth + 1, columnar, inflate);
+        out[field.name] = decodeNode(r, field.type, `${path}.${field.name}`, depth + 1, columnar, inflate, profile, ordinalOf);
       }
       return out;
     }

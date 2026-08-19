@@ -2,6 +2,7 @@ import { boundByInput, decodeNode, readBitmap, type Inflate } from "./decode.js"
 import { encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import type { IRField, IRNode } from "./ir.js";
+import type { ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import type { Writer } from "./writer.js";
@@ -12,7 +13,7 @@ type IntNode = Extract<IRNode, { kind: "int" }>;
 
 const COLUMN_KINDS = new Set(["bool", "int", "float64", "string", "bytes", "enum", "literal"]);
 
-interface Leaf {
+export interface Leaf {
   segs: readonly string[];
   field: IRField;
 }
@@ -296,13 +297,32 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
   return out;
 }
 
-function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: EncodeCtx): void {
+function encodeStringColumn(
+  w: Writer,
+  values: unknown[],
+  path: string,
+  ctx: EncodeCtx,
+  ordinal: number,
+): void {
   if (values.length === 0) {
     w.u8(0);
     return;
   }
   const bytes = values.map((v, i) => utf8Bytes(v, `${path}[${i}]`));
   const plainCost = bytes.reduce((n, b) => n + ulebLen(BigInt(b.length)) + b.length, 0);
+
+  // dictionary: one byte per hit, escape + plain encoding per miss
+  const dict = ctx.profile.dictOf(ordinal);
+  let dictCost = Infinity;
+  let codes: number[] | null = null;
+  if (dict) {
+    codes = values.map((v) => ctx.profile.codeOf(ordinal, v as string) ?? 0);
+    dictCost = 0;
+    for (let i = 0; i < codes.length; i++) {
+      dictCost += 1;
+      if (codes[i] === 0) dictCost += ulebLen(BigInt(bytes[i]!.length)) + bytes[i]!.length;
+    }
+  }
 
   let packed: Uint8Array | null = null;
   let packedCost = Infinity;
@@ -321,25 +341,46 @@ function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: Enc
       packed.length;
   }
 
-  if (packed && packedCost < plainCost) {
-    w.u8(1);
-    for (const b of bytes) writeUleb(w, BigInt(b.length));
-    writeUleb(w, BigInt(packed.length));
-    w.bytes(packed);
+  // smallest wins; ties go to the lowest flags byte, which is also the most
+  // reproducible encoding (plain, then dictionary, then library-dependent deflate)
+  const best = Math.min(plainCost, dictCost, packed ? packedCost : Infinity);
+  if (best === plainCost) {
+    w.u8(0x00);
+    for (const b of bytes) {
+      writeUleb(w, BigInt(b.length));
+      w.bytes(b);
+    }
     return;
   }
-  w.u8(0);
-  for (const b of bytes) {
-    writeUleb(w, BigInt(b.length));
-    w.bytes(b);
+  if (best === dictCost && codes) {
+    w.u8(0x01);
+    for (let i = 0; i < codes.length; i++) {
+      writeUleb(w, BigInt(codes[i]!));
+      if (codes[i] === 0) {
+        writeUleb(w, BigInt(bytes[i]!.length));
+        w.bytes(bytes[i]!);
+      }
+    }
+    return;
   }
+  w.u8(0x02);
+  for (const b of bytes) writeUleb(w, BigInt(b.length));
+  writeUleb(w, BigInt(packed!.length));
+  w.bytes(packed!);
 }
 
 const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-function decodeStringColumn(r: Reader, count: number, path: string, inflate?: Inflate): string[] {
+function decodeStringColumn(
+  r: Reader,
+  count: number,
+  path: string,
+  inflate: Inflate | undefined,
+  profile: ProfileIndex,
+  ordinal: number,
+): string[] {
   const mode = r.u8();
-  if (mode > 1) throw new DecodeError("marker", `${path}: invalid string column mode 0x${mode.toString(16)}`);
+  if (mode > 2) throw new DecodeError("marker", `${path}: invalid string column flags 0x${mode.toString(16)}`);
   if (count === 0 && mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
   const out: string[] = new Array<string>(count);
   if (count === 0) return out;
@@ -359,6 +400,29 @@ function decodeStringColumn(r: Reader, count: number, path: string, inflate?: In
         throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
       }
       out[i] = decodeSlice(r.bytes(Number(raw)), i);
+    }
+    return out;
+  }
+
+  if (mode === 0x01) {
+    const dict = profile.dictOf(ordinal);
+    if (!dict) {
+      throw new DecodeError("unsupported", `${path}: dictionary column requires a profile for this leaf`);
+    }
+    for (let i = 0; i < count; i++) {
+      const code = readUleb(r);
+      if (code === 0n) {
+        const len = readUleb(r);
+        if (len > BigInt(r.limits.maxByteLength)) {
+          throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
+        }
+        out[i] = decodeSlice(r.bytes(Number(len)), i);
+      } else {
+        if (code > BigInt(dict.length)) {
+          throw new DecodeError("range", `${path}[${i}]: dictionary code ${code} out of range`);
+        }
+        out[i] = dict[Number(code) - 1]!;
+      }
     }
     return out;
   }
@@ -440,6 +504,7 @@ export function encodeColumnarArray(
   });
 
   const leaves = flattenLeaves(element)!;
+  const ordinalBase = ctx.ordinalOf(node);
 
   const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
     let obj: Record<string, unknown> = row;
@@ -457,7 +522,7 @@ export function encodeColumnarArray(
     return obj;
   };
 
-  for (const leaf of leaves) {
+  for (const [leafIndex, leaf] of leaves.entries()) {
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const dotted = leaf.segs.join(".");
@@ -512,7 +577,7 @@ export function encodeColumnarArray(
         encodeBoolColumn(w, participating, fieldPath);
         break;
       case "string":
-        encodeStringColumn(w, participating, fieldPath, ctx);
+        encodeStringColumn(w, participating, fieldPath, ctx, ordinalBase + leafIndex);
         break;
       default:
         for (let i = 0; i < participating.length; i++) {
@@ -527,7 +592,9 @@ export function decodeColumnarArray(
   node: ArrayNode,
   path: string,
   depth: number,
-  inflate?: Inflate,
+  inflate: Inflate | undefined,
+  profile: ProfileIndex,
+  ordinalOf: (node: IRNode) => number,
 ): Record<string, unknown>[] {
   const element = node.element as StructNode;
   let count: number;
@@ -547,6 +614,7 @@ export function decodeColumnarArray(
 
   const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
   const leaves = flattenLeaves(element)!;
+  const ordinalBase = ordinalOf(node);
 
   const containerOf = (row: Record<string, unknown>, segs: readonly string[]): Record<string, unknown> => {
     let obj = row;
@@ -558,7 +626,7 @@ export function decodeColumnarArray(
     return obj;
   };
 
-  for (const leaf of leaves) {
+  for (const [leafIndex, leaf] of leaves.entries()) {
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const fieldPath = `${path}[].${leaf.segs.join(".")}`;
@@ -610,13 +678,13 @@ export function decodeColumnarArray(
         break;
       }
       case "string": {
-        const values = decodeStringColumn(r, slots.length, fieldPath, inflate);
+        const values = decodeStringColumn(r, slots.length, fieldPath, inflate, profile, ordinalBase + leafIndex);
         slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
         break;
       }
       default: {
         for (const row of slots) {
-          containerOf(out[row]!, leaf.segs)[leafName] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false);
+          containerOf(out[row]!, leaf.segs)[leafName] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalOf);
         }
       }
     }

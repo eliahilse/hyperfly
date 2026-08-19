@@ -6,8 +6,17 @@ import struct
 import zlib
 from typing import Any
 
-from ._ir import LEAF_KINDS, fingerprint_of, has_payload, serialize_artifact, validate_ir
+from ._ir import (
+    LEAF_KINDS,
+    array_ordinal_bases,
+    fingerprint_of,
+    has_payload,
+    serialize_artifact,
+    validate_ir,
+    validate_profile,
+)
 from ._wire import (
+    HyperflyError,
     DEFAULT_LIMITS,
     INT_MAX,
     INT_MIN,
@@ -179,9 +188,26 @@ def _sig_bytes(x: int) -> int:
 
 
 class _Ctx:
-    __slots__ = ("max_depth", "max_items", "max_byte_length", "columnar", "deflate", "inflate")
+    __slots__ = (
+        "max_depth",
+        "max_items",
+        "max_byte_length",
+        "columnar",
+        "deflate",
+        "inflate",
+        "dicts",
+        "codes",
+        "bases",
+    )
 
-    def __init__(self, limits: Limits, columnar: bool, deflate, inflate) -> None:
+    def __init__(self, limits: Limits, columnar: bool, deflate, inflate, profile=None, bases=None) -> None:
+        self.dicts: dict[int, list[str]] = {}
+        self.codes: dict[int, dict[str, int]] = {}
+        self.bases = bases or {}
+        if profile is not None:
+            for column in profile["shared"]["columns"]:
+                self.dicts[column["leaf"]] = column["dict"]
+                self.codes[column["leaf"]] = {v: i + 1 for i, v in enumerate(column["dict"])}
         self.max_depth = limits.max_depth
         self.max_items = limits.max_items
         self.max_byte_length = limits.max_byte_length
@@ -344,12 +370,22 @@ def _encode_float_column(out: bytearray, values: list[Any], path: str) -> None:
             write_uleb(out, zigzag(m))
 
 
-def _encode_string_column(out: bytearray, values: list[Any], path: str, ctx: _Ctx) -> None:
+def _encode_string_column(out: bytearray, values: list[Any], path: str, ctx: _Ctx, ordinal: int) -> None:
     if not values:
         out.append(0)
         return
     encoded = [_utf8(v, f"{path}[{i}]") for i, v in enumerate(values)]
     plain_cost = sum(uleb_len(len(b)) + len(b) for b in encoded)
+
+    codes = None
+    dict_cost = math.inf
+    lookup = ctx.codes.get(ordinal)
+    if lookup is not None:
+        codes = [lookup.get(v, 0) for v in values]
+        dict_cost = sum(
+            uleb_len(c) + (uleb_len(len(encoded[i])) + len(encoded[i]) if c == 0 else 0)
+            for i, c in enumerate(codes)
+        )
 
     packed = None
     packed_cost = math.inf
@@ -357,17 +393,26 @@ def _encode_string_column(out: bytearray, values: list[Any], path: str, ctx: _Ct
         packed = ctx.deflate(b"".join(encoded))
         packed_cost = sum(uleb_len(len(b)) for b in encoded) + uleb_len(len(packed)) + len(packed)
 
-    if packed is not None and packed_cost < plain_cost:
-        out.append(1)
-        for b in encoded:
-            write_uleb(out, len(b))
-        write_uleb(out, len(packed))
-        out += packed
-    else:
-        out.append(0)
+    best = min(plain_cost, dict_cost, packed_cost)
+    if best == plain_cost:
+        out.append(0x00)
         for b in encoded:
             write_uleb(out, len(b))
             out += b
+        return
+    if best == dict_cost and codes is not None:
+        out.append(0x01)
+        for i, c in enumerate(codes):
+            write_uleb(out, c)
+            if c == 0:
+                write_uleb(out, len(encoded[i]))
+                out += encoded[i]
+        return
+    out.append(0x02)
+    for b in encoded:
+        write_uleb(out, len(b))
+    write_uleb(out, len(packed))
+    out += packed
 
 
 def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str, depth: int, ctx: _Ctx) -> None:
@@ -389,6 +434,7 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
 
     leaves = _flatten_leaves(element)
     assert leaves is not None
+    ordinal_base = ctx.bases.get(id(node), 0)
 
     def container(row: dict[str, Any], segs: tuple[str, ...], i: int) -> dict[str, Any]:
         obj = row
@@ -400,7 +446,7 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
             obj = nxt
         return obj
 
-    for segs, field in leaves:
+    for leaf_index, (segs, field) in enumerate(leaves):
         dotted = ".".join(segs)
         leaf = segs[-1]
         field_path = f"{path}[].{dotted}"
@@ -442,7 +488,7 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
                     _efail("type", f"{field_path}[{i}]", "expected boolean")
             write_bitmap(out, list(participating))
         elif kind == "string":
-            _encode_string_column(out, participating, field_path, ctx)
+            _encode_string_column(out, participating, field_path, ctx, ordinal_base + leaf_index)
         else:
             for i, v in enumerate(participating):
                 _encode_node(out, t, v, f"{field_path}[{i}]", depth + 2, ctx)
@@ -620,10 +666,10 @@ def _decode_float_column(r: Reader, count: int, path: str) -> list[float]:
     return out
 
 
-def _decode_string_column(r: Reader, count: int, path: str, ctx: _Ctx) -> list[str]:
+def _decode_string_column(r: Reader, count: int, path: str, ctx: _Ctx, ordinal: int = 0) -> list[str]:
     mode = r.u8()
-    if mode > 1:
-        _dfail("marker", path, f"invalid string column mode 0x{mode:x}")
+    if mode > 2:
+        _dfail("marker", path, f"invalid string column flags 0x{mode:x}")
     if count == 0:
         if mode != 0:
             _dfail("marker", path, "empty column must use mode 0x00")
@@ -643,6 +689,24 @@ def _decode_string_column(r: Reader, count: int, path: str, ctx: _Ctx) -> list[s
             if n > r.limits.max_byte_length:
                 _dfail("limit", f"{path}[{i}]", "string length exceeds limit")
             out.append(decode_slice(r.take(n), i))
+        return out
+
+    if mode == 0x01:
+        entries = ctx.dicts.get(ordinal)
+        if entries is None:
+            _dfail("unsupported", path, "dictionary column requires a profile for this leaf")
+        out = []
+        for i in range(count):
+            code = read_uleb(r)
+            if code == 0:
+                n = read_uleb(r)
+                if n > r.limits.max_byte_length:
+                    _dfail("limit", f"{path}[{i}]", "string length exceeds limit")
+                out.append(decode_slice(r.take(n), i))
+            else:
+                if code > len(entries):
+                    _dfail("range", f"{path}[{i}]", f"dictionary code {code} out of range")
+                out.append(entries[code - 1])
         return out
 
     lengths = []
@@ -688,13 +752,14 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
     rows: list[dict[str, Any]] = [{} for _ in range(count)]
     leaves = _flatten_leaves(element)
     assert leaves is not None
+    ordinal_base = ctx.bases.get(id(node), 0)
     def container(row: dict[str, Any], segs: tuple[str, ...]) -> dict[str, Any]:
         obj = row
         for seg in segs[:-1]:
             obj = obj.setdefault(seg, {})
         return obj
 
-    for segs, field in leaves:
+    for leaf_index, (segs, field) in enumerate(leaves):
         leaf = segs[-1]
         field_path = f"{path}[].{'.'.join(segs)}"
         # nested structs are required and non-nullable: materialize the container chain at
@@ -732,7 +797,7 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
         elif kind == "bool":
             values = read_bitmap(r, len(slots), field_path)
         elif kind == "string":
-            values = _decode_string_column(r, len(slots), field_path, ctx)
+            values = _decode_string_column(r, len(slots), field_path, ctx, ordinal_base + leaf_index)
         else:
             values = [
                 _decode_node(r, t, f"{path}[{row}].{leaf}", depth + 2, ctx) for row in slots
@@ -763,13 +828,18 @@ def _default_inflate(data: bytes, max_output_length: int) -> bytes:
 
 
 class Codec:
-    def __init__(self, ir: dict[str, Any], plan: str, limits: Limits, pack) -> None:
+    def __init__(self, ir: dict[str, Any], plan: str, limits: Limits, pack, profile=None) -> None:
         validate_ir(ir)
+        if profile is not None:
+            if plan != "columnar":
+                raise HyperflyError("ir", "profiles apply to the columnar plan only")
+            validate_profile(ir, profile)
         # isolate from later caller mutation: the fingerprint is fixed at compile time
         ir = copy.deepcopy(ir)
         self._ir = ir
         self.plan = plan
-        self.artifact = serialize_artifact(ir, plan)
+        self.profile = copy.deepcopy(profile) if profile is not None else None
+        self.artifact = serialize_artifact(ir, plan, self.profile)
         self._fp = fingerprint_of(self.artifact)
         self.fingerprint = self._fp.hex()
         self._limits = limits
@@ -779,7 +849,7 @@ class Codec:
             deflate, inflate = _default_deflate, _default_inflate
         else:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
-        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate)
+        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self.profile, array_ordinal_bases(ir))
 
     @property
     def ir(self) -> dict[str, Any]:
@@ -814,5 +884,12 @@ class Codec:
         return self.decode_body(data[HEADER_SIZE:])
 
 
-def compile_ir(ir: dict[str, Any], *, plan: str = "row", limits: Limits | None = None, pack=None) -> Codec:
-    return Codec(ir, plan, limits or DEFAULT_LIMITS, pack)
+def compile_ir(
+    ir: dict[str, Any],
+    *,
+    plan: str = "row",
+    limits: Limits | None = None,
+    pack=None,
+    profile: dict[str, Any] | None = None,
+) -> Codec:
+    return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)

@@ -87,3 +87,29 @@ def test_packed_without_inflate_fails_closed():
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(bytes.fromhex(vector["hex"]))
     assert err.value.code == "unsupported"
+
+
+PROFILED = COLUMNAR["profiled"]
+
+
+@pytest.mark.parametrize("vector", PROFILED["valid"], ids=lambda v: v["name"])
+def test_profiled_valid(vector):
+    codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
+    assert codec.encode_body(vector["value"]).hex() == vector["hex"], vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+
+
+@pytest.mark.parametrize("vector", PROFILED["invalidDecode"], ids=lambda v: v["name"])
+def test_profiled_invalid_decode(vector):
+    codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex(vector["hex"]))
+    assert err.value.code == vector["error"], vector["name"]
+
+
+@pytest.mark.parametrize("vector", PROFILED["requiresProfile"], ids=lambda v: v["name"])
+def test_profiled_requires_profile(vector):
+    codec = compile_ir(vector["ir"], plan="columnar", pack=False)
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex(vector["hex"]))
+    assert err.value.code == vector["error"], vector["name"]

@@ -1,5 +1,5 @@
 {
-  "description": "Golden vectors for plan columnar@2. Hex is body bytes only. All vectors compile with plan: columnar.",
+  "description": "Golden vectors for plan columnar@3. Hex is body bytes only. All vectors compile with plan: columnar.",
   "valid": [
     {
       "name": "col-int-raw-on-tie",
@@ -711,7 +711,7 @@
           ]
         }
       },
-      "hex": "0102",
+      "hex": "0103",
       "error": "marker"
     },
     {
@@ -730,7 +730,7 @@
           ]
         }
       },
-      "hex": "0201020208010300fcff686979",
+      "hex": "0202020208010300fcff686979",
       "error": "packed"
     },
     {
@@ -749,7 +749,7 @@
           ]
         }
       },
-      "hex": "010100040300dead",
+      "hex": "010200040300dead",
       "error": "packed"
     }
   ],
@@ -852,7 +852,7 @@
           "s": "yo"
         }
       ],
-      "hex": "0201020209010400fbff6869796f"
+      "hex": "0202020209010400fbff6869796f"
     },
     {
       "name": "col-string-packed-empty-total",
@@ -876,7 +876,184 @@
           "s": ""
         }
       ],
-      "hex": "010100020300"
+      "hex": "010200020300"
     }
-  ]
+  ],
+  "profiled": {
+    "description": "Vectors compiled with plan columnar@3 AND the given profile. Packing is disabled so the encoding is fully deterministic.",
+    "valid": [
+      {
+        "name": "dict-hit-miss-hit",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "online"
+          },
+          {
+            "s": "novel"
+          },
+          {
+            "s": "offline"
+          }
+        ],
+        "hex": "03010100056e6f76656c02"
+      },
+      {
+        "name": "dict-all-hits",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "offline"
+          },
+          {
+            "s": "online"
+          }
+        ],
+        "hex": "02010201"
+      }
+    ],
+    "invalidDecode": [
+      {
+        "name": "dict-code-out-of-range",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "010109",
+        "error": "range"
+      },
+      {
+        "name": "dict-reserved-flags",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "0103",
+        "error": "marker"
+      }
+    ],
+    "requiresProfile": [
+      {
+        "name": "dict-without-profile",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "hex": "010101",
+        "error": "unsupported"
+      }
+    ]
+  }
 }

@@ -1,4 +1,7 @@
-use crate::ir::{fingerprint_of, has_payload, serialize_artifact, validate, Field, Literal, Node, Plan};
+use crate::ir::{
+    array_ordinal_bases, fingerprint_of, has_payload, serialize_artifact, validate, validate_profile,
+    Field, Literal, Node, Plan, Profile,
+};
 use crate::value::Value;
 use crate::wire::*;
 
@@ -43,6 +46,42 @@ fn flatten<'a>(fields: &'a [Field], segs: &mut Vec<&'a str>, out: &mut Vec<LeafC
                 path.push(&f.name);
                 out.push(LeafCol { segs: path, field: f });
             }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Leaf kinds of an eligible element, for the profile ordinal walk (ir.rs).
+pub(crate) fn flatten_for_profile<'a>(
+    fields: &'a [Field],
+    segs: &mut Vec<&'a str>,
+    out: &mut Vec<&'static str>,
+) -> bool {
+    if fields.is_empty() {
+        return false;
+    }
+    for f in fields {
+        match &f.ty {
+            Node::Struct(inner) => {
+                if f.optional || f.nullable {
+                    return false;
+                }
+                segs.push(&f.name);
+                if !flatten_for_profile(inner, segs, out) {
+                    return false;
+                }
+                segs.pop();
+            }
+            t if LEAF_OK(t) => out.push(match t {
+                Node::Bool => "bool",
+                Node::Int { .. } => "int",
+                Node::Float64 => "float64",
+                Node::Str => "string",
+                Node::Bytes => "bytes",
+                Node::Enum(_) => "enum",
+                _ => "literal",
+            }),
             _ => return false,
         }
     }
@@ -154,6 +193,8 @@ pub struct Codec {
     plan: Plan,
     limits: Limits,
     pack: bool,
+    profile: Option<Profile>,
+    bases: Vec<(*const Node, usize)>,
     pub artifact: String,
     fp: [u8; 16],
     pub fingerprint: String,
@@ -161,11 +202,40 @@ pub struct Codec {
 
 impl Codec {
     pub fn compile(ir: Node, plan: Plan, limits: Limits, pack: bool) -> Result<Codec> {
+        Codec::compile_with_profile(ir, plan, limits, pack, None)
+    }
+
+    pub fn compile_with_profile(
+        ir: Node,
+        plan: Plan,
+        limits: Limits,
+        pack: bool,
+        profile: Option<Profile>,
+    ) -> Result<Codec> {
         validate(&ir, "$")?;
-        let artifact = serialize_artifact(&ir, plan);
+        if let Some(p) = &profile {
+            if plan != Plan::Columnar {
+                return err(ErrorCode::Ir, "profiles apply to the columnar plan only");
+            }
+            validate_profile(&ir, p)?;
+        }
+        let artifact = serialize_artifact(&ir, plan, profile.as_ref());
         let fp = fingerprint_of(&artifact);
         let fingerprint = fp.iter().map(|b| format!("{b:02x}")).collect();
-        Ok(Codec { ir, plan, limits, pack, artifact, fp, fingerprint })
+        let bases = array_ordinal_bases(&ir);
+        Ok(Codec { ir, plan, limits, pack, profile, bases, artifact, fp, fingerprint })
+    }
+
+    fn ordinal_base(&self, node: &Node) -> usize {
+        let key = node as *const Node;
+        self.bases.iter().find(|(p, _)| *p == key).map(|(_, n)| *n).unwrap_or(0)
+    }
+
+    fn dict_of(&self, ordinal: usize) -> Option<&[String]> {
+        self.profile
+            .as_ref()
+            .and_then(|p| p.columns.iter().find(|c| c.leaf == ordinal))
+            .map(|c| c.dict.as_slice())
     }
 
     pub fn encode_body(&self, value: &Value) -> Result<Vec<u8>> {
@@ -283,7 +353,7 @@ impl Codec {
             Node::Array { element, length } => {
                 if self.plan == Plan::Columnar {
                     if let Some(leaves) = columnar_leaves(element) {
-                        return self.enc_columnar(out, element, &leaves, *length, value, path, depth);
+                        return self.enc_columnar(out, node, &leaves, *length, value, path, depth);
                     }
                 }
                 let Value::Array(items) = value else {
@@ -345,7 +415,7 @@ impl Codec {
     fn enc_columnar(
         &self,
         out: &mut Vec<u8>,
-        _element: &Node,
+        node_for_ordinal: &Node,
         leaves: &[LeafCol],
         length: Option<u64>,
         value: &Value,
@@ -369,7 +439,8 @@ impl Codec {
             }
         }
 
-        for leaf in leaves {
+        let ordinal_base = self.ordinal_base(node_for_ordinal);
+        for (leaf_index, leaf) in leaves.iter().enumerate() {
             let f = leaf.field;
             let dotted = leaf.segs.join(".");
             let field_path = format!("{path}[].{dotted}");
@@ -457,7 +528,7 @@ impl Codec {
                             _ => return err(ErrorCode::Type, format!("{field_path}[{i}]: expected string")),
                         }
                     }
-                    enc_string_column(out, &strings, self.pack)?;
+                    enc_string_column(out, &strings, self.pack, self.dict_of(ordinal_base + leaf_index))?;
                 }
                 t => {
                     for (i, v) in participating.iter().enumerate() {
@@ -535,7 +606,7 @@ impl Codec {
             Node::Array { element, length } => {
                 if self.plan == Plan::Columnar {
                     if let Some(leaves) = columnar_leaves(element) {
-                        return self.dec_columnar(r, &leaves, *length, path, depth);
+                        return self.dec_columnar(r, node, &leaves, *length, path, depth);
                     }
                 }
                 let count = self.read_count(r, *length, path)?;
@@ -611,7 +682,15 @@ impl Codec {
         Ok(n as usize)
     }
 
-    fn dec_columnar(&self, r: &mut Reader, leaves: &[LeafCol], length: Option<u64>, path: &str, depth: u32) -> Result<Value> {
+    fn dec_columnar(
+        &self,
+        r: &mut Reader,
+        node_for_ordinal: &Node,
+        leaves: &[LeafCol],
+        length: Option<u64>,
+        path: &str,
+        depth: u32,
+    ) -> Result<Value> {
         let count = self.read_count(r, length, path)?;
         // the flattened leaves are the element's payload: any flag or non-literal leaf costs bits
         let element_has_payload = leaves
@@ -683,7 +762,8 @@ impl Codec {
             }
         }
 
-        for leaf in leaves {
+        let ordinal_base = self.ordinal_base(node_for_ordinal);
+        for (leaf_index, leaf) in leaves.iter().enumerate() {
             let f = leaf.field;
             let field_path = format!("{path}[].{}", leaf.segs.join("."));
             // nested structs are required and non-nullable: materialize the container chain at
@@ -730,7 +810,14 @@ impl Codec {
                     .map(Value::Float)
                     .collect(),
                 Node::Bool => read_bitmap(r, slots.len(), &field_path)?.into_iter().map(Value::Bool).collect(),
-                Node::Str => dec_string_column(r, slots.len(), &field_path, &self.limits, self.pack)?
+                Node::Str => dec_string_column(
+                    r,
+                    slots.len(),
+                    &field_path,
+                    &self.limits,
+                    self.pack,
+                    self.dict_of(ordinal_base + leaf_index),
+                )?
                     .into_iter()
                     .map(Value::Str)
                     .collect(),
@@ -939,33 +1026,67 @@ fn dec_float_column(r: &mut Reader, count: usize, path: &str) -> Result<Vec<f64>
     Ok(out)
 }
 
-fn enc_string_column(out: &mut Vec<u8>, values: &[&str], pack: bool) -> Result<()> {
+fn enc_string_column(out: &mut Vec<u8>, values: &[&str], pack: bool, dict: Option<&[String]>) -> Result<()> {
     if values.is_empty() {
         out.push(0);
         return Ok(());
     }
     let plain_cost: usize = values.iter().map(|s| uleb_len(s.len() as u64) + s.len()).sum();
+
+    let mut codes: Option<Vec<u64>> = None;
+    let mut dict_cost = usize::MAX;
+    if let Some(entries) = dict {
+        let assigned: Vec<u64> = values
+            .iter()
+            .map(|v| entries.iter().position(|e| e == v).map(|i| i as u64 + 1).unwrap_or(0))
+            .collect();
+        dict_cost = assigned
+            .iter()
+            .zip(values.iter())
+            .map(|(c, v)| uleb_len(*c) + if *c == 0 { uleb_len(v.len() as u64) + v.len() } else { 0 })
+            .sum();
+        codes = Some(assigned);
+    }
+
+    let mut packed_cost = usize::MAX;
+    let mut packed_blob: Option<Vec<u8>> = None;
     if pack {
         let concat: Vec<u8> = values.iter().flat_map(|s| s.as_bytes().iter().copied()).collect();
         let packed = miniz_oxide::deflate::compress_to_vec(&concat, 6);
-        let packed_cost: usize = values.iter().map(|s| uleb_len(s.len() as u64)).sum::<usize>()
+        packed_cost = values.iter().map(|s| uleb_len(s.len() as u64)).sum::<usize>()
             + uleb_len(packed.len() as u64)
             + packed.len();
-        if packed_cost < plain_cost {
-            out.push(1);
-            for s in values {
-                write_uleb(out, s.len() as u64)?;
-            }
-            write_uleb(out, packed.len() as u64)?;
-            out.extend_from_slice(&packed);
-            return Ok(());
-        }
+        packed_blob = Some(packed);
     }
-    out.push(0);
+
+    let best = plain_cost.min(dict_cost).min(packed_cost);
+    if best == plain_cost {
+        out.push(0x00);
+        for s in values {
+            write_uleb(out, s.len() as u64)?;
+            out.extend_from_slice(s.as_bytes());
+        }
+        return Ok(());
+    }
+    if best == dict_cost {
+        let assigned = codes.expect("dict cost implies codes");
+        out.push(0x01);
+        for (c, v) in assigned.iter().zip(values.iter()) {
+            write_uleb(out, *c)?;
+            if *c == 0 {
+                write_uleb(out, v.len() as u64)?;
+                out.extend_from_slice(v.as_bytes());
+            }
+        }
+        return Ok(());
+    }
+    let packed = packed_blob.expect("packed cost implies a blob");
+    out.push(0x02);
     for s in values {
         write_uleb(out, s.len() as u64)?;
-        out.extend_from_slice(s.as_bytes());
     }
+    write_uleb(out, packed.len() as u64)?;
+    out.extend_from_slice(&packed);
     Ok(())
 }
 
@@ -986,10 +1107,17 @@ fn inflate_exact(blob: &[u8], expected: usize) -> std::result::Result<Vec<u8>, (
     Ok(out)
 }
 
-fn dec_string_column(r: &mut Reader, count: usize, path: &str, limits: &Limits, pack: bool) -> Result<Vec<String>> {
+fn dec_string_column(
+    r: &mut Reader,
+    count: usize,
+    path: &str,
+    limits: &Limits,
+    pack: bool,
+    dict: Option<&[String]>,
+) -> Result<Vec<String>> {
     let mode = r.u8()?;
-    if mode > 1 {
-        return err(ErrorCode::Marker, format!("{path}: invalid string column mode {mode:#x}"));
+    if mode > 2 {
+        return err(ErrorCode::Marker, format!("{path}: invalid string column flags {mode:#x}"));
     }
     if count == 0 {
         if mode != 0 {
@@ -1014,6 +1142,31 @@ fn dec_string_column(r: &mut Reader, count: usize, path: &str, limits: &Limits, 
         }
         return Ok(out);
     }
+    if mode == 0x01 {
+        let entries = match dict {
+            Some(d) => d,
+            None => {
+                return err(ErrorCode::Unsupported, format!("{path}: dictionary column requires a profile for this leaf"))
+            }
+        };
+        for i in 0..count {
+            let code = read_uleb(r)?;
+            if code == 0 {
+                let n = read_uleb(r)?;
+                if n > limits.max_byte_length {
+                    return err(ErrorCode::Limit, format!("{path}[{i}]: string length exceeds limit"));
+                }
+                out.push(decode_slice(r.take(n as usize)?, i)?);
+            } else {
+                if code > entries.len() as u64 {
+                    return err(ErrorCode::Range, format!("{path}[{i}]: dictionary code {code} out of range"));
+                }
+                out.push(entries[code as usize - 1].clone());
+            }
+        }
+        return Ok(out);
+    }
+
     let mut lengths = Vec::with_capacity(count);
     let mut total: u64 = 0;
     for i in 0..count {

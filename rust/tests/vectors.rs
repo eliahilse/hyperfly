@@ -171,7 +171,7 @@ fn fingerprints() {
             "row" => Plan::Row,
             _ => Plan::Columnar,
         };
-        let canonical = serialize_artifact(&node_of(&case["ir"]), plan);
+        let canonical = serialize_artifact(&node_of(&case["ir"]), plan, None);
         assert_eq!(canonical, case["canonical"].as_str().unwrap(), "{}", case["name"]);
         assert_eq!(to_hex(&fingerprint_of(&canonical)), case["fingerprint"].as_str().unwrap(), "{}", case["name"]);
     }
@@ -188,4 +188,52 @@ fn envelope_roundtrip() {
     assert!(deep_eq(&codec.decode(&wire).unwrap(), &value));
     let other = compile(&file["valid"][3]["ir"], Plan::Row);
     assert_eq!(other.decode(&wire).unwrap_err().code.as_str(), "fingerprint");
+}
+
+fn profile_of(json: &Json) -> hyperfly_core::ir::Profile {
+    hyperfly_core::ir::Profile {
+        columns: json["shared"]["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| hyperfly_core::ir::ProfileColumn {
+                leaf: c["leaf"].as_u64().unwrap() as usize,
+                dict: c["dict"].as_array().unwrap().iter().map(|e| e.as_str().unwrap().to_owned()).collect(),
+            })
+            .collect(),
+    }
+}
+
+fn profiled_codec(v: &Json, with_profile: bool) -> Codec {
+    let profile = if with_profile { Some(profile_of(&v["profile"])) } else { None };
+    Codec::compile_with_profile(node_of(&v["ir"]), Plan::Columnar, Limits::default(), false, profile).unwrap()
+}
+
+#[test]
+fn profiled_vectors() {
+    let file = load("columnar.json");
+    let profiled = &file["profiled"];
+
+    for v in profiled["valid"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let codec = profiled_codec(v, true);
+        let value = value_of(&v["value"]);
+        let encoded = codec.encode_body(&value).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(to_hex(&encoded), v["hex"].as_str().unwrap(), "{name}: bytes");
+        assert!(deep_eq(&codec.decode_body(&from_hex(v["hex"].as_str().unwrap())).unwrap(), &value), "{name}");
+    }
+
+    for v in profiled["invalidDecode"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let codec = profiled_codec(v, true);
+        let e = codec.decode_body(&from_hex(v["hex"].as_str().unwrap())).expect_err(name);
+        assert_eq!(e.code.as_str(), v["error"].as_str().unwrap(), "{name}");
+    }
+
+    for v in profiled["requiresProfile"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let codec = profiled_codec(v, false);
+        let e = codec.decode_body(&from_hex(v["hex"].as_str().unwrap())).expect_err(name);
+        assert_eq!(e.code.as_str(), v["error"].as_str().unwrap(), "{name}");
+    }
 }
