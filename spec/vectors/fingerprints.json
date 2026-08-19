@@ -1,0 +1,118 @@
+{
+  "description": "IR → canonical artifact text → fingerprint (first 16 bytes of SHA-256, hex). Locks spec §5.",
+  "cases": [
+    {
+      "name": "bool",
+      "ir": {
+        "kind": "bool"
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"bool\"}}",
+      "fingerprint": "8cf38e4e2a1895b1c1a7b1cc7a237f05"
+    },
+    {
+      "name": "bounded-int",
+      "ir": {
+        "kind": "int",
+        "min": 0,
+        "max": 100
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"int\",\"min\":0,\"max\":100}}",
+      "fingerprint": "e6ad9c84255b247b18321c75a1496245"
+    },
+    {
+      "name": "enum",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "1m",
+          "5m",
+          "1h",
+          "1d"
+        ]
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"enum\",\"members\":[\"1m\",\"5m\",\"1h\",\"1d\"]}}",
+      "fingerprint": "a882294830aa46f069545a0a20885286"
+    },
+    {
+      "name": "candles-response",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "route",
+            "type": {
+              "kind": "literal",
+              "value": "candles"
+            }
+          },
+          {
+            "name": "candles",
+            "type": {
+              "kind": "array",
+              "element": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "t",
+                    "type": {
+                      "kind": "int",
+                      "min": 0
+                    }
+                  },
+                  {
+                    "name": "o",
+                    "type": {
+                      "kind": "float64"
+                    }
+                  },
+                  {
+                    "name": "h",
+                    "type": {
+                      "kind": "float64"
+                    }
+                  },
+                  {
+                    "name": "l",
+                    "type": {
+                      "kind": "float64"
+                    }
+                  },
+                  {
+                    "name": "c",
+                    "type": {
+                      "kind": "float64"
+                    }
+                  },
+                  {
+                    "name": "v",
+                    "type": {
+                      "kind": "float64"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "cursor",
+            "type": {
+              "kind": "string"
+            },
+            "optional": true
+          }
+        ]
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"route\",\"type\":{\"kind\":\"literal\",\"value\":\"candles\"}},{\"name\":\"candles\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"t\",\"type\":{\"kind\":\"int\",\"min\":0}},{\"name\":\"o\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"h\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"l\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"c\",\"type\":{\"kind\":\"float64\"}},{\"name\":\"v\",\"type\":{\"kind\":\"float64\"}}]}}},{\"name\":\"cursor\",\"type\":{\"kind\":\"string\"},\"optional\":true}]}}",
+      "fingerprint": "2a479da0936529cdaf05b2ffce15849a"
+    },
+    {
+      "name": "escaping",
+      "ir": {
+        "kind": "literal",
+        "value": "a\"b\\c"
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"literal\",\"value\":\"a\\\"b\\\\c\"}}",
+      "fingerprint": "81c55aecd9370fe064628de19f0b3147"
+    }
+  ]
+}
