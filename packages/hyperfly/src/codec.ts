@@ -1,8 +1,9 @@
 import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
 import { defaultPackHooks } from "./pack.js";
+import { indexProfile, validateProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
 import { encodeNode } from "./encode.js";
-import { DecodeError, FingerprintMismatchError } from "./errors.js";
+import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
 import { validateIR, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
 import { Writer } from "./writer.js";
@@ -20,6 +21,7 @@ export interface CompileOptions {
   limits?: Partial<DecodeLimits>;
   plan?: PlanLayout;
   pack?: PackHooks | false;
+  profile?: Profile;
 }
 
 export interface Codec<T = unknown> {
@@ -27,6 +29,7 @@ export interface Codec<T = unknown> {
   readonly artifact: string;
   readonly fingerprint: string;
   readonly plan: PlanLayout;
+  readonly profile?: Profile;
   encode(value: T): Uint8Array;
   decode(bytes: Uint8Array): T;
   encodeBody(value: T): Uint8Array;
@@ -47,7 +50,17 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
   // fixed at compile time and the schema behind it must not drift
   ir = deepFreeze(structuredClone(ir));
   const plan: PlanLayout = options.plan ?? "row";
-  const artifact = serializeArtifact(ir, plan);
+  const profile = options.profile;
+  if (profile) {
+    if (plan !== "columnar") {
+      throw new HyperflyError("ir", "profiles apply to the columnar plan only");
+    }
+    validateProfile(ir, profile);
+  }
+  // the profile is fixed by the fingerprint exactly as the IR is
+  const frozenProfile = profile ? deepFreeze(structuredClone(profile)) : undefined;
+  const profileIndex = indexProfile(frozenProfile);
+  const artifact = serializeArtifact(ir, plan, frozenProfile);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);
   const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
@@ -63,13 +76,14 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
       columnar,
       deflate: pack.deflate,
       canInflate: pack.inflate !== undefined,
+      profile: profileIndex,
     });
     return w.finish();
   };
 
   const decodeBody = (bytes: Uint8Array): T => {
     const r = new Reader(bytes, limits);
-    const value = decodeNode(r, ir, "$", 0, columnar, pack.inflate);
+    const value = decodeNode(r, ir, "$", 0, columnar, pack.inflate, profileIndex);
     r.expectEnd();
     return value as T;
   };
@@ -79,6 +93,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     artifact,
     fingerprint,
     plan,
+    profile: frozenProfile,
     encodeBody,
     decodeBody,
     encode(value: T): Uint8Array {

@@ -1,5 +1,5 @@
 {
-  "description": "Golden vectors for plan columnar@2. Hex is body bytes only. All vectors compile with plan: columnar.",
+  "description": "Golden vectors for plan columnar@3. Hex is body bytes only. All vectors compile with plan: columnar.",
   "valid": [
     {
       "name": "col-int-raw-on-tie",
@@ -711,7 +711,7 @@
           ]
         }
       },
-      "hex": "0102",
+      "hex": "0103",
       "error": "marker"
     },
     {
@@ -730,7 +730,7 @@
           ]
         }
       },
-      "hex": "0201020208010300fcff686979",
+      "hex": "0202020208010300fcff686979",
       "error": "packed"
     },
     {
@@ -749,7 +749,7 @@
           ]
         }
       },
-      "hex": "010100040300dead",
+      "hex": "010200040300dead",
       "error": "packed"
     }
   ],
@@ -852,7 +852,7 @@
           "s": "yo"
         }
       ],
-      "hex": "0201020209010400fbff6869796f"
+      "hex": "0202020209010400fbff6869796f"
     },
     {
       "name": "col-string-packed-empty-total",
@@ -876,7 +876,675 @@
           "s": ""
         }
       ],
-      "hex": "010100020300"
+      "hex": "010200020300"
     }
-  ]
+  ],
+  "profiled": {
+    "description": "Vectors compiled with plan columnar@3 AND the given profile. Packing is disabled so the encoding is fully deterministic.",
+    "valid": [
+      {
+        "name": "dict-hit-miss-hit",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "online"
+          },
+          {
+            "s": "novel"
+          },
+          {
+            "s": "offline"
+          }
+        ],
+        "hex": "03010100056e6f76656c02"
+      },
+      {
+        "name": "dict-all-hits",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "offline"
+          },
+          {
+            "s": "online"
+          }
+        ],
+        "hex": "02010201"
+      },
+      {
+        "name": "dict-two-arrays-distinct-ordinals",
+        "description": "each array is its own column: 'red' is code 1 under leaf 0 and code 2 under leaf 1",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "array",
+                "element": {
+                  "kind": "struct",
+                  "fields": [
+                    {
+                      "name": "s",
+                      "type": {
+                        "kind": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "array",
+                "element": {
+                  "kind": "struct",
+                  "fields": [
+                    {
+                      "name": "s",
+                      "type": {
+                        "kind": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "red",
+                  "green"
+                ]
+              },
+              {
+                "leaf": 1,
+                "dict": [
+                  "green",
+                  "red"
+                ]
+              }
+            ]
+          }
+        },
+        "value": {
+          "a": [
+            {
+              "s": "red"
+            }
+          ],
+          "b": [
+            {
+              "s": "red"
+            }
+          ]
+        },
+        "hex": "010101010102"
+      },
+      {
+        "name": "dict-two-byte-codes",
+        "description": "codes past 127 take two uvarint bytes, which the cost model must charge",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "entry-value-0",
+                  "entry-value-1",
+                  "entry-value-2",
+                  "entry-value-3",
+                  "entry-value-4",
+                  "entry-value-5",
+                  "entry-value-6",
+                  "entry-value-7",
+                  "entry-value-8",
+                  "entry-value-9",
+                  "entry-value-10",
+                  "entry-value-11",
+                  "entry-value-12",
+                  "entry-value-13",
+                  "entry-value-14",
+                  "entry-value-15",
+                  "entry-value-16",
+                  "entry-value-17",
+                  "entry-value-18",
+                  "entry-value-19",
+                  "entry-value-20",
+                  "entry-value-21",
+                  "entry-value-22",
+                  "entry-value-23",
+                  "entry-value-24",
+                  "entry-value-25",
+                  "entry-value-26",
+                  "entry-value-27",
+                  "entry-value-28",
+                  "entry-value-29",
+                  "entry-value-30",
+                  "entry-value-31",
+                  "entry-value-32",
+                  "entry-value-33",
+                  "entry-value-34",
+                  "entry-value-35",
+                  "entry-value-36",
+                  "entry-value-37",
+                  "entry-value-38",
+                  "entry-value-39",
+                  "entry-value-40",
+                  "entry-value-41",
+                  "entry-value-42",
+                  "entry-value-43",
+                  "entry-value-44",
+                  "entry-value-45",
+                  "entry-value-46",
+                  "entry-value-47",
+                  "entry-value-48",
+                  "entry-value-49",
+                  "entry-value-50",
+                  "entry-value-51",
+                  "entry-value-52",
+                  "entry-value-53",
+                  "entry-value-54",
+                  "entry-value-55",
+                  "entry-value-56",
+                  "entry-value-57",
+                  "entry-value-58",
+                  "entry-value-59",
+                  "entry-value-60",
+                  "entry-value-61",
+                  "entry-value-62",
+                  "entry-value-63",
+                  "entry-value-64",
+                  "entry-value-65",
+                  "entry-value-66",
+                  "entry-value-67",
+                  "entry-value-68",
+                  "entry-value-69",
+                  "entry-value-70",
+                  "entry-value-71",
+                  "entry-value-72",
+                  "entry-value-73",
+                  "entry-value-74",
+                  "entry-value-75",
+                  "entry-value-76",
+                  "entry-value-77",
+                  "entry-value-78",
+                  "entry-value-79",
+                  "entry-value-80",
+                  "entry-value-81",
+                  "entry-value-82",
+                  "entry-value-83",
+                  "entry-value-84",
+                  "entry-value-85",
+                  "entry-value-86",
+                  "entry-value-87",
+                  "entry-value-88",
+                  "entry-value-89",
+                  "entry-value-90",
+                  "entry-value-91",
+                  "entry-value-92",
+                  "entry-value-93",
+                  "entry-value-94",
+                  "entry-value-95",
+                  "entry-value-96",
+                  "entry-value-97",
+                  "entry-value-98",
+                  "entry-value-99",
+                  "entry-value-100",
+                  "entry-value-101",
+                  "entry-value-102",
+                  "entry-value-103",
+                  "entry-value-104",
+                  "entry-value-105",
+                  "entry-value-106",
+                  "entry-value-107",
+                  "entry-value-108",
+                  "entry-value-109",
+                  "entry-value-110",
+                  "entry-value-111",
+                  "entry-value-112",
+                  "entry-value-113",
+                  "entry-value-114",
+                  "entry-value-115",
+                  "entry-value-116",
+                  "entry-value-117",
+                  "entry-value-118",
+                  "entry-value-119",
+                  "entry-value-120",
+                  "entry-value-121",
+                  "entry-value-122",
+                  "entry-value-123",
+                  "entry-value-124",
+                  "entry-value-125",
+                  "entry-value-126",
+                  "entry-value-127",
+                  "entry-value-128",
+                  "entry-value-129",
+                  "entry-value-130",
+                  "entry-value-131",
+                  "entry-value-132",
+                  "entry-value-133",
+                  "entry-value-134",
+                  "entry-value-135",
+                  "entry-value-136",
+                  "entry-value-137",
+                  "entry-value-138",
+                  "entry-value-139",
+                  "entry-value-140",
+                  "entry-value-141",
+                  "entry-value-142",
+                  "entry-value-143",
+                  "entry-value-144",
+                  "entry-value-145",
+                  "entry-value-146",
+                  "entry-value-147",
+                  "entry-value-148",
+                  "entry-value-149",
+                  "entry-value-150",
+                  "entry-value-151",
+                  "entry-value-152",
+                  "entry-value-153",
+                  "entry-value-154",
+                  "entry-value-155",
+                  "entry-value-156",
+                  "entry-value-157",
+                  "entry-value-158",
+                  "entry-value-159",
+                  "entry-value-160",
+                  "entry-value-161",
+                  "entry-value-162",
+                  "entry-value-163",
+                  "entry-value-164",
+                  "entry-value-165",
+                  "entry-value-166",
+                  "entry-value-167",
+                  "entry-value-168",
+                  "entry-value-169",
+                  "entry-value-170",
+                  "entry-value-171",
+                  "entry-value-172",
+                  "entry-value-173",
+                  "entry-value-174",
+                  "entry-value-175",
+                  "entry-value-176",
+                  "entry-value-177",
+                  "entry-value-178",
+                  "entry-value-179",
+                  "entry-value-180",
+                  "entry-value-181",
+                  "entry-value-182",
+                  "entry-value-183",
+                  "entry-value-184",
+                  "entry-value-185",
+                  "entry-value-186",
+                  "entry-value-187",
+                  "entry-value-188",
+                  "entry-value-189",
+                  "entry-value-190",
+                  "entry-value-191",
+                  "entry-value-192",
+                  "entry-value-193",
+                  "entry-value-194",
+                  "entry-value-195",
+                  "entry-value-196",
+                  "entry-value-197",
+                  "entry-value-198",
+                  "entry-value-199"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "entry-value-0"
+          },
+          {
+            "s": "entry-value-150"
+          },
+          {
+            "s": "nope"
+          }
+        ],
+        "hex": "030101970100046e6f7065"
+      },
+      {
+        "name": "dict-two-byte-codes-decide-the-mode",
+        "description": "Entries past index 126 take two-byte codes. Charging them as one byte would make dictionary mode look cheaper than plain and flip the chosen mode, so this vector fails for any encoder that mis-costs multi-byte codes.",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "fill0",
+                  "fill1",
+                  "fill2",
+                  "fill3",
+                  "fill4",
+                  "fill5",
+                  "fill6",
+                  "fill7",
+                  "fill8",
+                  "fill9",
+                  "fill10",
+                  "fill11",
+                  "fill12",
+                  "fill13",
+                  "fill14",
+                  "fill15",
+                  "fill16",
+                  "fill17",
+                  "fill18",
+                  "fill19",
+                  "fill20",
+                  "fill21",
+                  "fill22",
+                  "fill23",
+                  "fill24",
+                  "fill25",
+                  "fill26",
+                  "fill27",
+                  "fill28",
+                  "fill29",
+                  "fill30",
+                  "fill31",
+                  "fill32",
+                  "fill33",
+                  "fill34",
+                  "fill35",
+                  "fill36",
+                  "fill37",
+                  "fill38",
+                  "fill39",
+                  "fill40",
+                  "fill41",
+                  "fill42",
+                  "fill43",
+                  "fill44",
+                  "fill45",
+                  "fill46",
+                  "fill47",
+                  "fill48",
+                  "fill49",
+                  "fill50",
+                  "fill51",
+                  "fill52",
+                  "fill53",
+                  "fill54",
+                  "fill55",
+                  "fill56",
+                  "fill57",
+                  "fill58",
+                  "fill59",
+                  "fill60",
+                  "fill61",
+                  "fill62",
+                  "fill63",
+                  "fill64",
+                  "fill65",
+                  "fill66",
+                  "fill67",
+                  "fill68",
+                  "fill69",
+                  "fill70",
+                  "fill71",
+                  "fill72",
+                  "fill73",
+                  "fill74",
+                  "fill75",
+                  "fill76",
+                  "fill77",
+                  "fill78",
+                  "fill79",
+                  "fill80",
+                  "fill81",
+                  "fill82",
+                  "fill83",
+                  "fill84",
+                  "fill85",
+                  "fill86",
+                  "fill87",
+                  "fill88",
+                  "fill89",
+                  "fill90",
+                  "fill91",
+                  "fill92",
+                  "fill93",
+                  "fill94",
+                  "fill95",
+                  "fill96",
+                  "fill97",
+                  "fill98",
+                  "fill99",
+                  "fill100",
+                  "fill101",
+                  "fill102",
+                  "fill103",
+                  "fill104",
+                  "fill105",
+                  "fill106",
+                  "fill107",
+                  "fill108",
+                  "fill109",
+                  "fill110",
+                  "fill111",
+                  "fill112",
+                  "fill113",
+                  "fill114",
+                  "fill115",
+                  "fill116",
+                  "fill117",
+                  "fill118",
+                  "fill119",
+                  "fill120",
+                  "fill121",
+                  "fill122",
+                  "fill123",
+                  "fill124",
+                  "fill125",
+                  "fill126",
+                  "a",
+                  "b",
+                  "c"
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "s": "a"
+          },
+          {
+            "s": "b"
+          },
+          {
+            "s": "c"
+          }
+        ],
+        "hex": "0300016101620163"
+      }
+    ],
+    "invalidDecode": [
+      {
+        "name": "dict-code-out-of-range",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "010109",
+        "error": "range"
+      },
+      {
+        "name": "dict-reserved-flags",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "online",
+                  "offline"
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "0103",
+        "error": "marker"
+      }
+    ],
+    "requiresProfile": [
+      {
+        "name": "dict-without-profile",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "hex": "010101",
+        "error": "unsupported"
+      }
+    ]
+  }
 }

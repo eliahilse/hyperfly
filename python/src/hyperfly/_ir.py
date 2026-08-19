@@ -6,7 +6,7 @@ from typing import Any
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
 LEAF_KINDS = frozenset({"bool", "int", "float64", "string", "bytes", "enum", "literal"})
-_PLAN_VERSION = {"row": 1, "columnar": 2}
+_PLAN_VERSION = {"row": 1, "columnar": 3}
 
 
 def _fail(path: str, message: str) -> None:
@@ -166,9 +166,102 @@ def serialize_node(node: dict[str, Any]) -> str:
     return '{"kind":"struct","fields":[' + ",".join(fields) + "]}"
 
 
-def serialize_artifact(ir: dict[str, Any], layout: str = "row") -> str:
+MAX_DICT_ENTRIES = 16383
+
+
+def serialize_shared(shared: dict[str, Any]) -> str:
+    columns = [
+        '{"leaf":' + str(c["leaf"]) + ',"dict":[' + ",".join(_esc(e) for e in c["dict"]) + "]}"
+        for c in shared["columns"]
+    ]
+    return '{"columns":[' + ",".join(columns) + "]}"
+
+
+def serialize_artifact(ir: dict[str, Any], layout: str = "row", profile: dict[str, Any] | None = None) -> str:
     version = _PLAN_VERSION[layout]
-    return f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{serialize_node(ir)}}}'
+    head = f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{serialize_node(ir)}'
+    if profile is None:
+        return head + "}"
+    return head + ',"profile":' + serialize_shared(profile["shared"]) + "}"
+
+
+def enumerate_columns(ir: dict[str, Any]) -> list[str]:
+    """Spec 6.1: the kind of every columnar leaf in the schema, in ordinal order."""
+    out: list[str] = []
+    _walk_columns(ir, out, None)
+    return out
+
+
+def column_count(node: dict[str, Any]) -> int:
+    """Columnar leaves under this node. A pure function of the subtree, so two schema
+    positions sharing one node object still count the same — which is why column bases
+    are threaded positionally rather than looked up by node identity."""
+    from ._codec import _columnar_eligible, _flatten_leaves
+
+    kind = node["kind"]
+    if kind == "array":
+        if _columnar_eligible(node):
+            leaves = _flatten_leaves(node["element"])
+            if leaves is not None:
+                return len(leaves)
+        return column_count(node["element"])
+    if kind == "nullable":
+        return column_count(node["inner"])
+    if kind == "struct":
+        return sum(column_count(f["type"]) for f in node["fields"])
+    return 0
+
+
+def _walk_columns(node: dict[str, Any], out: list[str], bases: None = None) -> None:
+    from ._codec import _columnar_eligible, _flatten_leaves
+
+    kind = node["kind"]
+    if kind == "array":
+        if _columnar_eligible(node):
+            leaves = _flatten_leaves(node["element"])
+            if leaves is not None:
+                for _segs, field in leaves:
+                    out.append(field["type"]["kind"])
+                return
+        _walk_columns(node["element"], out, bases)
+        return
+    if kind == "nullable":
+        _walk_columns(node["inner"], out, bases)
+        return
+    if kind == "struct":
+        for f in node["fields"]:
+            _walk_columns(f["type"], out, bases)
+        return
+
+
+def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
+    def fail(message: str) -> None:
+        raise HyperflyError("ir", f"profile: {message}")
+
+    if profile.get("version") != 1:
+        fail(f"unsupported profile version {profile.get('version')}")
+    kinds = enumerate_columns(ir)
+    previous = -1
+    for column in profile["shared"]["columns"]:
+        leaf = column["leaf"]
+        if type(leaf) is not int or leaf < 0 or leaf >= len(kinds):
+            fail(f"leaf {leaf} is not a column in this schema")
+        if leaf <= previous:
+            fail("columns must be sorted by ascending leaf and unique")
+        previous = leaf
+        if kinds[leaf] != "string":
+            fail(f"leaf {leaf} is not a string column")
+        entries = column["dict"]
+        if not entries or len(entries) > MAX_DICT_ENTRIES:
+            fail(f"leaf {leaf}: a dictionary holds 1 to {MAX_DICT_ENTRIES} entries")
+        seen: set[str] = set()
+        for entry in entries:
+            if type(entry) is not str:
+                fail(f"leaf {leaf}: entries must be strings")
+            _check_string(entry, f"leaf {leaf}", "dictionary entry")
+            if entry in seen:
+                fail(f"leaf {leaf}: duplicate entry gives one value two codes")
+            seen.add(entry)
 
 
 def fingerprint_of(artifact: str) -> bytes:

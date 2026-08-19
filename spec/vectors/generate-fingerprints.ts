@@ -34,6 +34,25 @@ const CASES: { name: string; ir: IRNode }[] = [
   { name: "escaping", ir: { kind: "literal", value: 'a"b\\c' } },
 ];
 
+const PROFILED: { name: string; ir: IRNode; profile: { version: 1; shared: { columns: { leaf: number; dict: string[] }[] } } }[] = [
+  {
+    name: "profiled-single",
+    ir: { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } },
+    profile: { version: 1, shared: { columns: [{ leaf: 0, dict: ['a"q', "b\\s", "c\u0001", "🚀"] }] } },
+  },
+  {
+    name: "profiled-two-arrays",
+    ir: {
+      kind: "struct",
+      fields: [
+        { name: "a", type: { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } } },
+        { name: "b", type: { kind: "array", element: { kind: "struct", fields: [{ name: "t", type: { kind: "string" } }] } } },
+      ],
+    },
+    profile: { version: 1, shared: { columns: [{ leaf: 1, dict: ["only-second"] }] } },
+  },
+];
+
 const LAYOUTS: PlanLayout[] = ["row", "columnar"];
 const out = LAYOUTS.flatMap((layout) =>
   CASES.map(({ name, ir }) => {
@@ -41,6 +60,11 @@ const out = LAYOUTS.flatMap((layout) =>
     return { name: `${name}@${layout}`, plan: layout, ir, canonical, fingerprint: toHex(fingerprintOf(canonical)) };
   }),
 );
+
+for (const c of PROFILED) {
+  const canonical = serializeArtifact(c.ir, "columnar", c.profile);
+  out.push({ name: c.name, plan: "columnar", ir: c.ir, profile: c.profile, canonical, fingerprint: toHex(fingerprintOf(canonical)) } as never);
+}
 
 await Bun.write(
   new URL("./fingerprints.json", import.meta.url).pathname,

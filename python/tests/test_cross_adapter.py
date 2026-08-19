@@ -26,7 +26,7 @@ class Row(BaseModel):
 
 
 EXPECTED_ARTIFACT = (
-    '{"wire":1,"plan":{"layout":"columnar","version":2},"ir":'
+    '{"wire":1,"plan":{"layout":"columnar","version":3},"ir":'
     '{"kind":"struct","fields":['
     '{"name":"id","type":{"kind":"string"}},'
     '{"name":"kind","type":{"kind":"literal","value":"a"}},'

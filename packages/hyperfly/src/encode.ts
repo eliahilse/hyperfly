@@ -1,4 +1,5 @@
 import { columnarEligible, encodeColumnarArray } from "./columnar.js";
+import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
@@ -31,6 +32,7 @@ export interface EncodeCtx {
   deflate?: (data: Uint8Array) => Uint8Array;
   /** packing is only canonical when the same codec can also inflate what it wrote */
   canInflate: boolean;
+  profile: ProfileIndex;
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
@@ -64,7 +66,15 @@ export function writeBitmap(w: Writer, bits: boolean[]): void {
   }
 }
 
-export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string, depth: number, ctx: EncodeCtx): void {
+export function encodeNode(
+  w: Writer,
+  node: IRNode,
+  value: unknown,
+  path: string,
+  depth: number,
+  ctx: EncodeCtx,
+  column = 0,
+): void {
   if (depth > ctx.maxDepth) fail("depth", path, `nesting deeper than ${ctx.maxDepth}`);
 
   switch (node.kind) {
@@ -114,12 +124,12 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         return;
       }
       w.u8(1);
-      encodeNode(w, node.inner, value, path, depth + 1, ctx);
+      encodeNode(w, node.inner, value, path, depth + 1, ctx, column);
       return;
     }
     case "array": {
       if (ctx.columnar && columnarEligible(node)) {
-        encodeColumnarArray(w, node, value, path, depth, ctx);
+        encodeColumnarArray(w, node, value, path, depth, ctx, column);
         return;
       }
       if (!Array.isArray(value)) fail("type", path, "expected array");
@@ -130,7 +140,7 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         writeUleb(w, BigInt(value.length));
       }
       for (let i = 0; i < value.length; i++) {
-        encodeNode(w, node.element, value[i], `${path}[${i}]`, depth + 1, ctx);
+        encodeNode(w, node.element, value[i], `${path}[${i}]`, depth + 1, ctx, column);
       }
       return;
     }
@@ -158,11 +168,15 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
       });
       writeBitmap(w, presence);
       writeBitmap(w, nulls);
+      // columns advance in declared field order, matching the §6.1 walk exactly
+      let fieldColumn = column;
       node.fields.forEach((field, i) => {
         const v = snapshot[i];
+        const base = fieldColumn;
+        fieldColumn += columnCount(field.type);
         if (v === undefined) return;
         if (v === null && field.nullable) return;
-        encodeNode(w, field.type, v, `${path}.${field.name}`, depth + 1, ctx);
+        encodeNode(w, field.type, v, `${path}.${field.name}`, depth + 1, ctx, base);
       });
       return;
     }

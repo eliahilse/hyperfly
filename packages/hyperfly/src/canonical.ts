@@ -1,4 +1,5 @@
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
+import type { SharedProfile } from "./profile.js";
 import { sha256 } from "./sha256.js";
 
 /** Spec §5: not generic JSON canonicalization — key order and escaping are fixed here. */
@@ -59,10 +60,22 @@ export function serializeNode(node: IRNode): string {
 
 export type PlanLayout = "row" | "columnar";
 
-const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 2 };
+const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 3 };
 
-export function serializeArtifact(ir: IRNode, layout: PlanLayout = "row"): string {
-  return `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}}`;
+export function serializeShared(shared: SharedProfile): string {
+  const columns = shared.columns.map(
+    (c) => `{"leaf":${c.leaf},"dict":[${c.dict.map(escapeString).join(",")}]}`,
+  );
+  return `{"columns":[${columns.join(",")}]}`;
+}
+
+export function serializeArtifact(
+  ir: IRNode,
+  layout: PlanLayout = "row",
+  profile?: { shared: SharedProfile },
+): string {
+  const head = `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}`;
+  return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
 }
 
 export function fingerprintOf(artifact: string): Uint8Array {
