@@ -9,7 +9,10 @@
     "lint": "eslint --max-warnings 0"
   },
   "dependencies": {
+    "cbor-x": "^1.6.5",
     "hyperfly": "workspace:*",
+    "msgpackr": "^2.0.5",
+    "protobufjs": "^8.7.2",
     "zod": "^4.0.0"
   },
   "devDependencies": {

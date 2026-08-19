@@ -1,5 +1,8 @@
 import { brotliCompressSync, brotliDecompressSync, constants, gzipSync, gunzipSync } from "node:zlib";
+import { decode as cborDecode, encode as cborEncode } from "cbor-x";
 import { compile } from "hyperfly/zod";
+import { pack, unpack } from "msgpackr";
+import { candlesProto, devicesProto, feedProto, type ProtoCodec } from "./proto.js";
 import { CandleResponse, candlesPayload } from "./corpora/candles.js";
 import { DeviceResponse, devicesPayload } from "./corpora/devices.js";
 import { FeedResponse, feedPayload } from "./corpora/feed.js";
@@ -28,7 +31,7 @@ interface AnyCodec {
   decode(b: Uint8Array): unknown;
 }
 
-function contenders(payload: unknown, row: AnyCodec, col: AnyCodec): Contender[] {
+function contenders(payload: unknown, row: AnyCodec, col: AnyCodec, proto: ProtoCodec): Contender[] {
   const p = payload as never;
   return [
     {
@@ -50,6 +53,36 @@ function contenders(payload: unknown, row: AnyCodec, col: AnyCodec): Contender[]
       name: "json+br11",
       encode: () => brotli(enc.encode(JSON.stringify(payload)), 11, constants.BROTLI_MODE_TEXT),
       decode: (b) => JSON.parse(dec.decode(brotliDecompressSync(b))),
+    },
+    {
+      name: "protobuf",
+      encode: () => proto.encode(payload),
+      decode: (b) => proto.decode(b),
+    },
+    {
+      name: "protobuf+br4",
+      encode: () => brotli(proto.encode(payload), 4, constants.BROTLI_MODE_GENERIC),
+      decode: (b) => proto.decode(new Uint8Array(brotliDecompressSync(b))),
+    },
+    {
+      name: "msgpack",
+      encode: () => pack(payload),
+      decode: (b) => unpack(b),
+    },
+    {
+      name: "msgpack+br4",
+      encode: () => brotli(pack(payload), 4, constants.BROTLI_MODE_GENERIC),
+      decode: (b) => unpack(brotliDecompressSync(b)),
+    },
+    {
+      name: "cbor",
+      encode: () => cborEncode(payload),
+      decode: (b) => cborDecode(b),
+    },
+    {
+      name: "cbor+br4",
+      encode: () => brotli(cborEncode(payload), 4, constants.BROTLI_MODE_GENERIC),
+      decode: (b) => cborDecode(brotliDecompressSync(b)),
     },
     {
       name: "hf-row",
@@ -111,14 +144,14 @@ interface Row {
   decodeP95: number;
 }
 
-function runCorpus(name: string, schema: unknown, payload: unknown, warmup: number, samples: number): Row[] {
+function runCorpus(name: string, schema: unknown, payload: unknown, proto: ProtoCodec, warmup: number, samples: number): Row[] {
   const compileStart = Bun.nanoseconds();
   const rowCodec = compile(schema as never);
   const colCodec = compile(schema as never, { plan: "columnar" });
   const compileMs = (Bun.nanoseconds() - compileStart) / 1e6;
 
   const rows: Row[] = [];
-  const list = contenders(payload, rowCodec as never, colCodec as never);
+  const list = contenders(payload, rowCodec as never, colCodec as never, proto);
   const jsonBytes = list[0]!.encode().length;
 
   for (const c of list) {
@@ -153,12 +186,12 @@ function runCorpus(name: string, schema: unknown, payload: unknown, warmup: numb
 }
 
 const SUITES = [
-  { name: "candles-100", schema: CandleResponse, payload: candlesPayload(100, 0xc1), warmup: 50, samples: 200 },
-  { name: "candles-1000", schema: CandleResponse, payload: candlesPayload(1000, 0xc2), warmup: 30, samples: 100 },
-  { name: "devices-50", schema: DeviceResponse, payload: devicesPayload(50, 0xd1), warmup: 50, samples: 200 },
-  { name: "devices-500", schema: DeviceResponse, payload: devicesPayload(500, 0xd2), warmup: 30, samples: 100 },
-  { name: "feed-10", schema: FeedResponse, payload: feedPayload(10, 0xf1), warmup: 50, samples: 200 },
-  { name: "feed-50", schema: FeedResponse, payload: feedPayload(50, 0xf2), warmup: 30, samples: 100 },
+  { name: "candles-100", schema: CandleResponse, payload: candlesPayload(100, 0xc1), proto: candlesProto(), warmup: 50, samples: 200 },
+  { name: "candles-1000", schema: CandleResponse, payload: candlesPayload(1000, 0xc2), proto: candlesProto(), warmup: 30, samples: 100 },
+  { name: "devices-50", schema: DeviceResponse, payload: devicesPayload(50, 0xd1), proto: devicesProto(), warmup: 50, samples: 200 },
+  { name: "devices-500", schema: DeviceResponse, payload: devicesPayload(500, 0xd2), proto: devicesProto(), warmup: 30, samples: 100 },
+  { name: "feed-10", schema: FeedResponse, payload: feedPayload(10, 0xf1), proto: feedProto(), warmup: 50, samples: 200 },
+  { name: "feed-50", schema: FeedResponse, payload: feedPayload(50, 0xf2), proto: feedProto(), warmup: 30, samples: 100 },
 ];
 
 console.log("hyperfly bench — private harness, in-process timings. Not publishable numbers.");
@@ -166,7 +199,7 @@ console.log(`bun ${Bun.version} · ${process.platform}/${process.arch}`);
 
 const all: Row[] = [];
 for (const suite of SUITES) {
-  all.push(...runCorpus(suite.name, suite.schema, suite.payload, suite.warmup, suite.samples));
+  all.push(...runCorpus(suite.name, suite.schema, suite.payload, suite.proto, suite.warmup, suite.samples));
 }
 
 await Bun.write(
