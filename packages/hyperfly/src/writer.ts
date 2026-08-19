@@ -35,6 +35,12 @@ export class Writer {
     this.len += 8;
   }
 
+  u64le(value: bigint): void {
+    this.ensure(8);
+    this.view.setBigUint64(this.len, value, true);
+    this.len += 8;
+  }
+
   finish(): Uint8Array {
     return this.buf.slice(0, this.len);
   }

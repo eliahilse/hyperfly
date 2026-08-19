@@ -1,3 +1,4 @@
+import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { EncodeError } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
@@ -22,7 +23,12 @@ function checkSurrogates(s: string, path: string): void {
   }
 }
 
-function typeAcceptsNull(node: IRNode): boolean {
+export interface EncodeCtx {
+  maxDepth: number;
+  columnar: boolean;
+}
+
+export function typeAcceptsNull(node: IRNode): boolean {
   return node.kind === "nullable" || (node.kind === "literal" && node.value === null);
 }
 
@@ -37,7 +43,7 @@ function encodeInt(w: Writer, node: Extract<IRNode, { kind: "int" }>, value: unk
   else writeUleb(w, zigzag(BigInt(value)));
 }
 
-function writeBitmap(w: Writer, bits: boolean[]): void {
+export function writeBitmap(w: Writer, bits: boolean[]): void {
   for (let base = 0; base < bits.length; base += 8) {
     let byte = 0;
     for (let bit = 0; bit < 8 && base + bit < bits.length; bit++) {
@@ -47,8 +53,8 @@ function writeBitmap(w: Writer, bits: boolean[]): void {
   }
 }
 
-export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string, depth: number, maxDepth: number): void {
-  if (depth > maxDepth) fail("depth", path, `nesting deeper than ${maxDepth}`);
+export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string, depth: number, ctx: EncodeCtx): void {
+  if (depth > ctx.maxDepth) fail("depth", path, `nesting deeper than ${ctx.maxDepth}`);
 
   switch (node.kind) {
     case "bool": {
@@ -97,10 +103,14 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         return;
       }
       w.u8(1);
-      encodeNode(w, node.inner, value, path, depth + 1, maxDepth);
+      encodeNode(w, node.inner, value, path, depth + 1, ctx);
       return;
     }
     case "array": {
+      if (ctx.columnar && columnarEligible(node)) {
+        encodeColumnarArray(w, node, value, path, depth, ctx);
+        return;
+      }
       if (!Array.isArray(value)) fail("type", path, "expected array");
       if (node.length !== undefined) {
         if (value.length !== node.length) fail("type", path, `fixed array expects ${node.length} items, got ${value.length}`);
@@ -108,7 +118,7 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         writeUleb(w, BigInt(value.length));
       }
       for (let i = 0; i < value.length; i++) {
-        encodeNode(w, node.element, value[i], `${path}[${i}]`, depth + 1, maxDepth);
+        encodeNode(w, node.element, value[i], `${path}[${i}]`, depth + 1, ctx);
       }
       return;
     }
@@ -135,7 +145,7 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         const v = record[field.name];
         if (v === undefined) continue;
         if (v === null && field.nullable) continue;
-        encodeNode(w, field.type, v, `${path}.${field.name}`, depth + 1, maxDepth);
+        encodeNode(w, field.type, v, `${path}.${field.name}`, depth + 1, ctx);
       }
       return;
     }

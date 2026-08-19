@@ -1,4 +1,4 @@
-import { fingerprintOf, serializeArtifact, toHex } from "./canonical.js";
+import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
 import { decodeNode } from "./decode.js";
 import { encodeNode } from "./encode.js";
 import { DecodeError, FingerprintMismatchError } from "./errors.js";
@@ -12,12 +12,14 @@ export const HEADER_SIZE = 19;
 
 export interface CompileOptions {
   limits?: Partial<DecodeLimits>;
+  plan?: PlanLayout;
 }
 
 export interface Codec<T = unknown> {
   readonly ir: IRNode;
   readonly artifact: string;
   readonly fingerprint: string;
+  readonly plan: PlanLayout;
   encode(value: T): Uint8Array;
   decode(bytes: Uint8Array): T;
   encodeBody(value: T): Uint8Array;
@@ -26,20 +28,22 @@ export interface Codec<T = unknown> {
 
 export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
   validateIR(ir);
-  const artifact = serializeArtifact(ir);
+  const plan: PlanLayout = options.plan ?? "row";
+  const artifact = serializeArtifact(ir, plan);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);
   const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
+  const columnar = plan === "columnar";
 
   const encodeBody = (value: T): Uint8Array => {
     const w = new Writer();
-    encodeNode(w, ir, value, "$", 0, limits.maxDepth);
+    encodeNode(w, ir, value, "$", 0, { maxDepth: limits.maxDepth, columnar });
     return w.finish();
   };
 
   const decodeBody = (bytes: Uint8Array): T => {
     const r = new Reader(bytes, limits);
-    const value = decodeNode(r, ir, "$", 0);
+    const value = decodeNode(r, ir, "$", 0, columnar);
     r.expectEnd();
     return value as T;
   };
@@ -48,6 +52,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     ir,
     artifact,
     fingerprint,
+    plan,
     encodeBody,
     decodeBody,
     encode(value: T): Uint8Array {

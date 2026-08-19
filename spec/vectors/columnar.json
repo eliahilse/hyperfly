@@ -1,0 +1,652 @@
+{
+  "description": "Golden vectors for plan columnar@1. Hex is body bytes only. All vectors compile with plan: columnar.",
+  "valid": [
+    {
+      "name": "col-int-raw-on-tie",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 1
+        },
+        {
+          "a": 2
+        },
+        {
+          "a": 3
+        }
+      ],
+      "hex": "0300020406"
+    },
+    {
+      "name": "col-int-delta",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "t",
+              "type": {
+                "kind": "int",
+                "min": 0
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "t": 100000
+        },
+        {
+          "t": 100300
+        },
+        {
+          "t": 100600
+        }
+      ],
+      "hex": "0301a08d06d804d804"
+    },
+    {
+      "name": "col-bool-bitmap",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "b": true
+        },
+        {
+          "b": false
+        },
+        {
+          "b": true
+        }
+      ],
+      "hex": "0305"
+    },
+    {
+      "name": "col-optional-nullable",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "v",
+              "type": {
+                "kind": "int"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "v": 5
+        },
+        {},
+        {
+          "v": null
+        }
+      ],
+      "hex": "030504000a"
+    },
+    {
+      "name": "col-enum-and-string",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "red",
+                  "green",
+                  "blue"
+                ]
+              }
+            },
+            {
+              "name": "name",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "green",
+          "name": "a"
+        },
+        {
+          "s": "red",
+          "name": "bc"
+        }
+      ],
+      "hex": "0201000161026263"
+    },
+    {
+      "name": "col-empty-array",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [],
+      "hex": "0000"
+    },
+    {
+      "name": "col-fixed-length-no-count",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        },
+        "length": 2
+      },
+      "value": [
+        {
+          "b": true
+        },
+        {
+          "b": false
+        }
+      ],
+      "hex": "01"
+    },
+    {
+      "name": "col-ineligible-falls-back-to-row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "p",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "q",
+                    "type": {
+                      "kind": "int"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "p": {
+            "q": 7
+          }
+        }
+      ],
+      "hex": "010e"
+    },
+    {
+      "name": "col-literal-column-zero-bytes",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "k",
+              "type": {
+                "kind": "literal",
+                "value": "ok"
+              }
+            },
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "k": "ok",
+          "a": -1
+        },
+        {
+          "k": "ok",
+          "a": -2
+        }
+      ],
+      "hex": "02000103"
+    },
+    {
+      "name": "col-float-xor",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "x": 1.5000000000000004
+        },
+        {
+          "x": 1.5000000000000004
+        },
+        {
+          "x": 1.5000000000000013
+        }
+      ],
+      "hex": "0301020000000000f83f000104"
+    },
+    {
+      "name": "col-float-raw-when-nothing-wins",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "x": 1.5000000000000004
+        },
+        {
+          "x": -2.5000000000000004
+        }
+      ],
+      "hex": "0200020000000000f83f01000000000004c0"
+    },
+    {
+      "name": "col-float-scaled-delta",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "x": 1.5
+        },
+        {
+          "x": 1.5
+        },
+        {
+          "x": 2.5
+        }
+      ],
+      "hex": "0302011e0014"
+    },
+    {
+      "name": "col-float-scaled-delta-negative",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "x": 1.5
+        },
+        {
+          "x": -2.5
+        }
+      ],
+      "hex": "0202011e4f"
+    }
+  ],
+  "invalidDecode": [
+    {
+      "name": "col-float-siglen-over-8",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0201000000000000f83f09",
+      "error": "marker"
+    },
+    {
+      "name": "col-float-nonminimal-xor",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0201000000000000f83f020100",
+      "error": "float"
+    },
+    {
+      "name": "col-float-negative-zero-seed",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "01010000000000000080",
+      "error": "float"
+    },
+    {
+      "name": "col-null-bit-for-absent-row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "v",
+              "type": {
+                "kind": "int"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "hex": "010001",
+      "error": "bitmap"
+    },
+    {
+      "name": "col-bool-bitmap-padding",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0102",
+      "error": "bitmap"
+    },
+    {
+      "name": "col-delta-escapes-domain",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0201feffffffffffff1f04",
+      "error": "range"
+    },
+    {
+      "name": "col-int-bad-mode",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0102",
+      "error": "marker"
+    },
+    {
+      "name": "col-float-mode-over-3",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "0104",
+      "error": "marker"
+    },
+    {
+      "name": "col-float-scale-over-8",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "010209",
+      "error": "marker"
+    },
+    {
+      "name": "col-float-mantissa-outside-domain",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "float64"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "010300ffffffffffffff7f",
+      "error": "range"
+    }
+  ],
+  "invalidEncode": [
+    {
+      "name": "col-required-missing-in-row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 1
+        },
+        {}
+      ],
+      "error": "required"
+    },
+    {
+      "name": "col-null-for-non-nullable",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": null
+        }
+      ],
+      "error": "type"
+    },
+    {
+      "name": "col-literal-mismatch",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "k",
+              "type": {
+                "kind": "literal",
+                "value": "ok"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "k": "no"
+        }
+      ],
+      "error": "type"
+    }
+  ]
+}

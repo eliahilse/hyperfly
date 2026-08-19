@@ -1,4 +1,4 @@
-import { serializeArtifact, fingerprintOf, toHex, type IRNode } from "../../packages/hyperfly/src/index.js";
+import { serializeArtifact, fingerprintOf, toHex, type IRNode, type PlanLayout } from "../../packages/hyperfly/src/index.js";
 
 const CASES: { name: string; ir: IRNode }[] = [
   { name: "bool", ir: { kind: "bool" } },
@@ -34,10 +34,13 @@ const CASES: { name: string; ir: IRNode }[] = [
   { name: "escaping", ir: { kind: "literal", value: 'a"b\\c' } },
 ];
 
-const out = CASES.map(({ name, ir }) => {
-  const canonical = serializeArtifact(ir);
-  return { name, ir, canonical, fingerprint: toHex(fingerprintOf(canonical)) };
-});
+const LAYOUTS: PlanLayout[] = ["row", "columnar"];
+const out = LAYOUTS.flatMap((layout) =>
+  CASES.map(({ name, ir }) => {
+    const canonical = serializeArtifact(ir, layout);
+    return { name: `${name}@${layout}`, plan: layout, ir, canonical, fingerprint: toHex(fingerprintOf(canonical)) };
+  }),
+);
 
 await Bun.write(
   new URL("./fingerprints.json", import.meta.url).pathname,

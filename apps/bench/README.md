@@ -12,9 +12,9 @@ cd apps/bench && bun run bench
 
 | corpus | shape | expectation |
 |---|---|---|
-| candles | numeric OHLCV rows, f64-heavy | weak for v0 — raw f64 vs short JSON decimals; the columnar/delta plan is what this corpus is for |
-| devices | enums, bounded ints, booleans | the favorable case for schema-only encoding |
-| feed | prose bodies, ids, names | honest loss case — Brotli eats text, schemas don't |
+| candles | numeric OHLCV rows, f64-heavy | weak under plan `row`; the flagship under plan `columnar` (delta timestamps, scaled-decimal prices) |
+| devices | enums, bounded ints, booleans | favorable for schema-only encoding under either plan |
+| feed | prose bodies, ids, names | honest loss case — Brotli eats text, schemas don't; the nested author struct keeps the posts array on the row path even under `columnar` |
 
 ## Fairness rules
 

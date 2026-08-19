@@ -49,6 +49,15 @@ export class Reader {
     return value;
   }
 
+  u64le(): bigint {
+    if (this.offset + 8 > this.buf.length) {
+      throw new DecodeError("truncated", "unexpected end of input");
+    }
+    const value = this.view.getBigUint64(this.offset, true);
+    this.offset += 8;
+    return value;
+  }
+
   isNegativeZeroAt(offsetBack: number): boolean {
     const hi = this.view.getUint32(this.offset - offsetBack + 4, true);
     const lo = this.view.getUint32(this.offset - offsetBack, true);

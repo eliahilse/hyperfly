@@ -1,0 +1,191 @@
+import { describe, expect, test } from "bun:test";
+import vectors from "../../../spec/vectors/columnar.json" with { type: "json" };
+import { z } from "zod";
+import { compileIR, FingerprintMismatchError, toHex, type IRNode } from "../src/index.js";
+import { HyperflyError } from "../src/errors.js";
+import { compile } from "../src/zod.js";
+
+function fromHex(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+describe("columnar golden vectors: valid", () => {
+  for (const v of vectors.valid) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar" });
+      expect(toHex(codec.encodeBody(v.value))).toBe(v.hex);
+      expect(codec.decodeBody(fromHex(v.hex))).toEqual(v.value);
+    });
+  }
+});
+
+describe("columnar golden vectors: invalid decode", () => {
+  for (const v of vectors.invalidDecode) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar" });
+      try {
+        codec.decodeBody(fromHex(v.hex));
+        throw new Error("expected decode to fail");
+      } catch (err) {
+        expect(err).toBeInstanceOf(HyperflyError);
+        expect((err as HyperflyError).code as string).toBe(v.error);
+      }
+    });
+  }
+});
+
+describe("columnar golden vectors: invalid encode", () => {
+  for (const v of vectors.invalidEncode) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar" });
+      try {
+        codec.encodeBody(v.value);
+        throw new Error("expected encode to fail");
+      } catch (err) {
+        expect(err).toBeInstanceOf(HyperflyError);
+        expect((err as HyperflyError).code as string).toBe(v.error);
+      }
+    });
+  }
+});
+
+describe("plan separation", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "a", type: { kind: "int" } }] },
+  };
+
+  test("row and columnar fingerprints differ", () => {
+    const row = compileIR(IR);
+    const col = compileIR(IR, { plan: "columnar" });
+    expect(row.fingerprint).not.toBe(col.fingerprint);
+    expect(row.plan).toBe("row");
+    expect(col.plan).toBe("columnar");
+  });
+
+  test("cross-plan decode is a fingerprint mismatch, not garbage", () => {
+    const row = compileIR(IR);
+    const col = compileIR(IR, { plan: "columnar" });
+    const bytes = col.encode([{ a: 1 }]);
+    expect(() => row.decode(bytes)).toThrow(FingerprintMismatchError);
+  });
+});
+
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const PRIMITIVES: ((rng: () => number) => IRNode)[] = [
+  () => ({ kind: "bool" }),
+  (rng) => {
+    if (rng() < 0.4) return { kind: "int" };
+    const min = Math.floor(rng() * 2000) - 1000;
+    return { kind: "int", min, max: min + Math.floor(rng() * 100000) };
+  },
+  () => ({ kind: "float64" }),
+  () => ({ kind: "string" }),
+  () => ({ kind: "bytes" }),
+  (rng) => ({ kind: "enum", members: ["a", "b", "c", "d"].slice(0, 1 + Math.floor(rng() * 4)) }),
+  (rng) => ({ kind: "literal", value: ["ok", 7, true, null][Math.floor(rng() * 4)] as never }),
+];
+
+function randomColumnValue(rng: () => number, node: IRNode): unknown {
+  switch (node.kind) {
+    case "bool":
+      return rng() < 0.5;
+    case "int": {
+      const min = node.min ?? -(2 ** 53 - 1);
+      const max = node.max ?? 2 ** 53 - 1;
+      if (rng() < 0.1) return min;
+      if (rng() < 0.1) return max;
+      const span = Math.min(max - min, 2 ** 40);
+      return min + Math.floor(rng() * (span + 1));
+    }
+    case "float64": {
+      const r = rng();
+      if (r < 0.15) return 0;
+      if (r < 0.5) return Math.round(rng() * 20000) / 100;
+      return (rng() * 2 - 1) * 2 ** (Math.floor(rng() * 80) - 40);
+    }
+    case "string":
+      return rng() < 0.2 ? "" : `s${Math.floor(rng() * 1000)}`;
+    case "bytes": {
+      const out = new Uint8Array(Math.floor(rng() * 8));
+      for (let i = 0; i < out.length; i++) out[i] = Math.floor(rng() * 256);
+      return out;
+    }
+    case "enum":
+      return node.members[Math.floor(rng() * node.members.length)];
+    case "literal":
+      return node.value;
+    default:
+      throw new Error(`not a column primitive: ${node.kind}`);
+  }
+}
+
+describe("columnar seeded properties", () => {
+  test("300 random eligible schemas: round-trip, plan equivalence, canonical re-encode", () => {
+    const rng = mulberry32(0xc01c01);
+    for (let i = 0; i < 300; i++) {
+      const fieldCount = 1 + Math.floor(rng() * 6);
+      const fields = Array.from({ length: fieldCount }, (_, f) => ({
+        name: `f${f}`,
+        type: PRIMITIVES[Math.floor(rng() * PRIMITIVES.length)]!(rng),
+        ...(rng() < 0.25 ? { optional: true } : {}),
+        ...(rng() < 0.25 ? { nullable: true } : {}),
+      }));
+      const ir: IRNode = { kind: "array", element: { kind: "struct", fields } };
+      const col = compileIR(ir, { plan: "columnar" });
+      const row = compileIR(ir);
+
+      const rowCount = Math.floor(rng() * 40);
+      const value = Array.from({ length: rowCount }, () => {
+        const out: Record<string, unknown> = {};
+        for (const f of fields) {
+          if (f.optional && rng() < 0.3) continue;
+          if (f.nullable && rng() < 0.2) out[f.name] = null;
+          else out[f.name] = randomColumnValue(rng, f.type);
+        }
+        return out;
+      });
+
+      const colBytes = col.encodeBody(value);
+      const decoded = col.decodeBody(colBytes);
+      expect(decoded).toEqual(value as never);
+      expect(row.decodeBody(row.encodeBody(value))).toEqual(value as never);
+      expect(toHex(col.encodeBody(decoded))).toBe(toHex(colBytes));
+    }
+  });
+
+  test("monotonic int columns shrink under columnar", () => {
+    const ir: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "t", type: { kind: "int", min: 0 } }] },
+    };
+    const value = Array.from({ length: 500 }, (_, i) => ({ t: 1735689600000 + i * 300000 }));
+    const row = compileIR(ir).encodeBody(value);
+    const col = compileIR(ir, { plan: "columnar" }).encodeBody(value);
+    expect(col.length).toBeLessThan(row.length * 0.55);
+  });
+});
+
+describe("zod integration", () => {
+  test("plan option flows through hyperfly/zod", () => {
+    const schema = z.object({
+      rows: z.array(z.object({ t: z.number().int().min(0), v: z.number() })),
+    });
+    const codec = compile(schema, { plan: "columnar" });
+    expect(codec.plan).toBe("columnar");
+    const payload = { rows: [{ t: 1, v: 1.5 }, { t: 2, v: 1.5 }] };
+    expect(codec.decode(codec.encode(payload))).toEqual(payload);
+  });
+});
