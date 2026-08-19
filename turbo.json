@@ -24,7 +24,8 @@
     },
     "check-types": {
       "dependsOn": [
-        "^check-types"
+        "^check-types",
+        "^build"
       ]
     },
     "deploy": {
@@ -35,6 +36,9 @@
       "persistent": true
     },
     "test": {
+      "dependsOn": [
+        "^build"
+      ],
       "outputs": []
     }
   }
