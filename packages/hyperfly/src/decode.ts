@@ -4,7 +4,7 @@ import type { IRNode } from "./ir.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, unzigzag } from "./varint.js";
 
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function fail(code: "type" | "range" | "utf8" | "float" | "marker" | "bitmap" | "depth" | "limit", path: string, message: string): never {
   throw new DecodeError(code, `${path}: ${message}`);
@@ -103,6 +103,9 @@ export function decodeNode(
         return decodeColumnarArray(r, node, path, depth, inflate);
       }
       const count = node.length ?? readCount(r, r.limits.maxItems, "array count", path);
+      if (count > r.limits.maxItems) {
+        fail("limit", path, `array count ${count} exceeds limit ${r.limits.maxItems}`);
+      }
       const out = new Array<unknown>(count);
       for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate);
       return out;

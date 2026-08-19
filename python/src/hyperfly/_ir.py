@@ -26,6 +26,13 @@ def _check_string(v: str, path: str, what: str) -> None:
         _fail(path, f"{what} contains a lone surrogate and has no portable encoding")
 
 
+def _check_field_name(name: str, path: str) -> None:
+    if name == "__proto__":
+        _fail(path, 'field name "__proto__" is not portable')
+    if name == "0" or (name.isascii() and name.isdigit() and name[0] != "0" and int(name) < 0xFFFFFFFF):
+        _fail(path, f'field name "{name}" is an array index and would reorder as an object key')
+
+
 def validate_ir(node: dict[str, Any], path: str = "$") -> None:
     kind = node.get("kind")
     if kind in ("bool", "float64", "string", "bytes"):
@@ -63,6 +70,8 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
         inner = node["inner"]
         if inner.get("kind") == "nullable":
             _fail(path, "nullable(nullable) is invalid")
+        if inner.get("kind") == "literal" and inner.get("value") is None:
+            _fail(path, "nullable(literal null) has two encodings for null")
         validate_ir(inner, path + "?")
         return
     if kind == "array":
@@ -78,6 +87,7 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
             if type(name) is not str or not name:
                 _fail(path, "field names must be non-empty strings")
             _check_string(name, path, "field name")
+            _check_field_name(name, path)
             if name in seen:
                 _fail(path, f'duplicate field "{name}"')
             seen.add(name)

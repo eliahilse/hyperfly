@@ -1,5 +1,5 @@
 {
-  "description": "Golden vectors for plan columnar@1. Hex is body bytes only. All vectors compile with plan: columnar.",
+  "description": "Golden vectors for plan columnar@2. Hex is body bytes only. All vectors compile with plan: columnar.",
   "valid": [
     {
       "name": "col-int-raw-on-tie",
@@ -732,6 +732,25 @@
       },
       "hex": "0201020208010300fcff686979",
       "error": "packed"
+    },
+    {
+      "name": "col-string-packed-trailing-bytes",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "010100040300dead",
+      "error": "packed"
     }
   ],
   "invalidEncode": [
@@ -834,6 +853,30 @@
         }
       ],
       "hex": "0201020209010400fbff6869796f"
+    },
+    {
+      "name": "col-string-packed-empty-total",
+      "description": "decode-only: a packed column of one empty string (total=0), valid raw-DEFLATE empty stream",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": ""
+        }
+      ],
+      "hex": "010100020300"
     }
   ]
 }

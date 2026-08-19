@@ -1,12 +1,16 @@
 """The same logical schema declared in pydantic must fingerprint identically to
-the zod adapter's output for the equivalent zod schema. The expected artifacts
-here are pasted from the TS zod adapter (see the matching test on the TS side),
-so the two adapters are pinned to each other, not just to themselves."""
+the zod adapter's output for the equivalent zod schema. The expected artifact
+here is pinned to the string the TS zod adapter emits (see the matching test on
+the TS side), so the two adapters are pinned to each other, not just themselves.
+
+Only required + nullable fields are used: pydantic fills defaults on construction
+and so cannot express a truly wire-absent (optional) field, unlike zod's
+`.optional()`. That asymmetry is intentional and documented."""
 
 from typing import Annotated, Literal, Optional
 
 from annotated_types import Ge, Le
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from hyperfly import serialize_artifact
 from hyperfly.pydantic import to_ir
@@ -18,7 +22,7 @@ class Row(BaseModel):
     score: Annotated[int, Ge(0), Le(100)]
     ratio: float
     note: Optional[str]
-    tag: str | None = None
+    tag: Optional[str]
 
 
 EXPECTED_ARTIFACT = (
@@ -29,7 +33,7 @@ EXPECTED_ARTIFACT = (
     '{"name":"score","type":{"kind":"int","min":0,"max":100}},'
     '{"name":"ratio","type":{"kind":"float64"}},'
     '{"name":"note","type":{"kind":"string"},"nullable":true},'
-    '{"name":"tag","type":{"kind":"string"},"optional":true,"nullable":true}]}}'
+    '{"name":"tag","type":{"kind":"string"},"nullable":true}]}}'
 )
 
 

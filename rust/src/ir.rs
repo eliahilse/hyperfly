@@ -31,6 +31,17 @@ pub struct Field {
     pub nullable: bool,
 }
 
+fn portable_field_name(name: &str) -> bool {
+    if name == "__proto__" {
+        return false;
+    }
+    let is_index = !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_digit())
+        && (name == "0" || name.as_bytes()[0] != b'0')
+        && name.parse::<u64>().map(|n| n < 0xffff_ffff).unwrap_or(false);
+    !is_index
+}
+
 pub fn validate(node: &Node, path: &str) -> Result<()> {
     match node {
         Node::Bool | Node::Float64 | Node::Str | Node::Bytes => Ok(()),
@@ -75,14 +86,27 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
             if matches!(**inner, Node::Nullable(_)) {
                 return err(ErrorCode::Ir, format!("{path}: nullable(nullable) is invalid"));
             }
+            if matches!(**inner, Node::Literal(Literal::Null)) {
+                return err(ErrorCode::Ir, format!("{path}: nullable(literal null) has two encodings for null"));
+            }
             validate(inner, &format!("{path}?"))
         }
-        Node::Array { element, .. } => validate(element, &format!("{path}[]")),
+        Node::Array { element, length } => {
+            if let Some(n) = length {
+                if *n > INT_MAX as u64 {
+                    return err(ErrorCode::Ir, format!("{path}: fixed array length outside the v0 domain"));
+                }
+            }
+            validate(element, &format!("{path}[]"))
+        }
         Node::Struct(fields) => {
             let mut seen = std::collections::HashSet::new();
             for f in fields {
                 if f.name.is_empty() || !seen.insert(&f.name) {
                     return err(ErrorCode::Ir, format!("{path}: invalid field names"));
+                }
+                if !portable_field_name(&f.name) {
+                    return err(ErrorCode::Ir, format!("{path}.{}: field name is not portable", f.name));
                 }
                 if f.nullable && matches!(f.ty, Node::Nullable(_)) {
                     return err(ErrorCode::Ir, format!("{path}.{}: nullable flag on a nullable type", f.name));

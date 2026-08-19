@@ -408,6 +408,10 @@ impl Codec {
                 .map(|v| v.unwrap())
                 .collect();
 
+            if !participating.is_empty() && depth + 1 + leaf.segs.len() as u32 > self.limits.max_depth {
+                return err(ErrorCode::Depth, format!("{path}[].{dotted}: nesting deeper than {}", self.limits.max_depth));
+            }
+
             match &f.ty {
                 Node::Int { min, max } => {
                     let mut ints = Vec::with_capacity(participating.len());
@@ -568,16 +572,14 @@ impl Codec {
     }
 
     fn read_count(&self, r: &mut Reader, length: Option<u64>, path: &str) -> Result<usize> {
-        match length {
-            Some(n) => Ok(n as usize),
-            None => {
-                let n = read_uleb(r)?;
-                if n > self.limits.max_items {
-                    return err(ErrorCode::Limit, format!("{path}: array count {n} exceeds limit"));
-                }
-                Ok(n as usize)
-            }
+        let n = match length {
+            Some(n) => n,
+            None => read_uleb(r)?,
+        };
+        if n > self.limits.max_items {
+            return err(ErrorCode::Limit, format!("{path}: array count {n} exceeds limit"));
         }
+        Ok(n as usize)
     }
 
     fn dec_columnar(&self, r: &mut Reader, leaves: &[LeafCol], length: Option<u64>, path: &str, depth: u32) -> Result<Value> {
@@ -645,9 +647,6 @@ impl Codec {
         for leaf in leaves {
             let f = leaf.field;
             let field_path = format!("{path}[].{}", leaf.segs.join("."));
-            if depth + 1 + leaf.segs.len() as u32 > self.limits.max_depth {
-                return err(ErrorCode::Depth, format!("{field_path}: nesting deeper than {}", self.limits.max_depth));
-            }
             // nested structs are required and non-nullable: materialize the container chain at
             // this leaf's declared position for every row (order-preserving, empty-safe)
             if leaf.segs.len() > 1 {
@@ -673,6 +672,10 @@ impl Codec {
                     continue;
                 }
                 slots.push(i);
+            }
+
+            if !slots.is_empty() && depth + 1 + leaf.segs.len() as u32 > self.limits.max_depth {
+                return err(ErrorCode::Depth, format!("{field_path}: nesting deeper than {}", self.limits.max_depth));
             }
 
             let values: Vec<Value> = match &f.ty {
@@ -918,6 +921,22 @@ fn enc_string_column(out: &mut Vec<u8>, values: &[&str], pack: bool) -> Result<(
     Ok(())
 }
 
+/// Inflate a raw-DEFLATE blob, requiring it to consume the entire input and produce
+/// exactly `expected` bytes — rejects truncation, over-long output, and trailing bytes.
+fn inflate_exact(blob: &[u8], expected: usize) -> std::result::Result<Vec<u8>, ()> {
+    use miniz_oxide::inflate::core::{decompress, DecompressorOxide};
+    use miniz_oxide::inflate::TINFLStatus;
+
+    let mut out = vec![0u8; expected];
+    let mut dec = DecompressorOxide::new();
+    let flags = 0; // raw deflate: no zlib header, no trailing-input tolerance
+    let (status, in_consumed, out_written) = decompress(&mut dec, blob, &mut out, 0, flags);
+    if status != TINFLStatus::Done || out_written != expected || in_consumed != blob.len() {
+        return Err(());
+    }
+    Ok(out)
+}
+
 fn dec_string_column(r: &mut Reader, count: usize, path: &str, limits: &Limits, pack: bool) -> Result<Vec<String>> {
     let mode = r.u8()?;
     if mode > 1 {
@@ -964,11 +983,8 @@ fn dec_string_column(r: &mut Reader, count: usize, path: &str, limits: &Limits, 
     if !pack {
         return err(ErrorCode::Unsupported, format!("{path}: packed string column requires an inflate hook"));
     }
-    let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(blob, total as usize)
-        .map_err(|_| Error { code: ErrorCode::Packed, message: format!("{path}: packed blob failed to inflate") })?;
-    if inflated.len() != total as usize {
-        return err(ErrorCode::Packed, format!("{path}: packed blob inflates to {} bytes, expected {total}", inflated.len()));
-    }
+    let inflated = inflate_exact(blob, total as usize)
+        .map_err(|_| Error { code: ErrorCode::Packed, message: format!("{path}: packed blob failed to inflate or has trailing bytes") })?;
     let mut offset = 0;
     for (i, n) in lengths.iter().enumerate() {
         out.push(decode_slice(&inflated[offset..offset + n], i)?);

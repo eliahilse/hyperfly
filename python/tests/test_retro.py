@@ -61,13 +61,46 @@ def test_columnar_depth_enforced():
     assert err.value.code == "depth"
 
 
-def test_pydantic_optional_from_default():
-    # #6
+def test_pydantic_optional_maps_to_nullable():
+    # Optional[T] is required-nullable in pydantic; defaults are always materialized,
+    # so pydantic does not emit a wire-optional field (documented asymmetry vs zod).
     class M(BaseModel):
         x: str | None = None
 
     field = to_ir(M)["fields"][0]
-    assert field.get("optional") is True and field.get("nullable") is True
+    assert field.get("optional") is None and field.get("nullable") is True
+
+
+def test_pydantic_default_factory_is_encoded_not_dropped():
+    import itertools
+
+    counter = itertools.count(100)
+
+    class M(BaseModel):
+        seq: int = Field(default_factory=lambda: next(counter))
+
+    codec = compile(M)
+    payload = M()
+    first = payload.seq
+    assert codec.decode(codec.encode(payload)) == {"seq": first}
+
+
+def test_pydantic_alias_roundtrips_under_validation():
+    class M(BaseModel):
+        x: int = Field(alias="wire_x")
+
+    codec = compile(M, validate=True)
+    m = M(wire_x=7)
+    assert codec.decode(codec.encode(m)) == M(wire_x=7)
+
+
+def test_pydantic_conint_interval_bounds():
+    from pydantic import conint
+
+    class M(BaseModel):
+        n: conint(gt=1, lt=10)
+
+    assert to_ir(M)["fields"][0]["type"] == {"kind": "int", "min": 2, "max": 9}
 
 
 def test_pydantic_intersects_int_bounds():

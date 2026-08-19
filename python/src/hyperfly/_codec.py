@@ -406,6 +406,9 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
             if states[i][0] and not (states[i][1] and field.get("nullable"))
         ]
 
+        if participating and depth + 1 + len(segs) > ctx.max_depth:
+            _efail("depth", f"{path}[].{dotted}", f"nesting deeper than {ctx.max_depth}")
+
         t = field["type"]
         kind = t["kind"]
         if kind == "int":
@@ -656,10 +659,6 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
     rows: list[dict[str, Any]] = [{} for _ in range(count)]
     leaves = _flatten_leaves(element)
     assert leaves is not None
-    for segs, _field in leaves:
-        if depth + 1 + len(segs) > r.limits.max_depth:
-            _dfail("depth", path, f"nesting deeper than {r.limits.max_depth}")
-
     def container(row: dict[str, Any], segs: tuple[str, ...]) -> dict[str, Any]:
         obj = row
         for seg in segs[:-1]:
@@ -689,6 +688,9 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
                 container(rows[i], segs)[leaf] = None
                 continue
             slots.append(i)
+
+        if slots and depth + 1 + len(segs) > r.limits.max_depth:
+            _dfail("depth", path, f"nesting deeper than {r.limits.max_depth}")
 
         t = field["type"]
         kind = t["kind"]
@@ -724,6 +726,8 @@ def _default_inflate(data: bytes, max_output_length: int) -> bytes:
     out += d.flush()
     if not d.eof:
         raise ValueError("truncated deflate stream")
+    if d.unused_data:
+        raise ValueError("trailing bytes after the deflate stream")
     return out
 
 

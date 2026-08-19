@@ -37,7 +37,7 @@ def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]
         nonlocal hi
         hi = candidate if hi is None else min(hi, candidate)
 
-    for m in metadata:
+    def apply(m: Any) -> None:
         if isinstance(m, _at.Ge):
             tighten_lo(_ceil_int(m.ge, path))
         elif isinstance(m, _at.Gt):
@@ -46,6 +46,19 @@ def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]
             tighten_hi(_floor_int(m.le, path))
         elif isinstance(m, _at.Lt):
             tighten_hi(_ceil_int(m.lt, path) - 1)
+
+    for m in metadata:
+        if isinstance(m, _at.Interval):
+            for part in (
+                _at.Ge(m.ge) if m.ge is not None else None,
+                _at.Gt(m.gt) if m.gt is not None else None,
+                _at.Le(m.le) if m.le is not None else None,
+                _at.Lt(m.lt) if m.lt is not None else None,
+            ):
+                if part is not None:
+                    apply(part)
+        else:
+            apply(m)
     return lo, hi
 
 
@@ -136,12 +149,11 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
     for name, info in model.model_fields.items():
         field_path = f"{path}.{name}"
         node = _node_of(info.annotation, list(info.metadata), field_path)
-        field: dict[str, Any] = {"name": name, "type": node}
+        wire_name = info.alias or name
+        field: dict[str, Any] = {"name": wire_name, "type": node}
         if node["kind"] == "nullable":
             field["type"] = node["inner"]
             field["nullable"] = True
-        if not info.is_required():
-            field["optional"] = True
         fields.append(field)
     return {"kind": "struct", "fields": fields}
 
@@ -177,9 +189,9 @@ class _ModelCodec:
         if isinstance(value, BaseModel):
             if self._validate:
                 value = self._model.model_validate(value)
-            value = value.model_dump(mode="python", exclude_unset=True)
+            value = value.model_dump(mode="python", by_alias=True)
         elif self._validate:
-            value = self._model.model_validate(value).model_dump(mode="python", exclude_unset=True)
+            value = self._model.model_validate(value).model_dump(mode="python", by_alias=True)
         return value
 
     def encode(self, value: Any) -> bytes:

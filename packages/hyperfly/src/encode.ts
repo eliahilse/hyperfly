@@ -132,10 +132,12 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         fail("type", path, "expected object");
       }
       const record = value as Record<string, unknown>;
+      // snapshot each field once so accessor properties cannot desync the bitmap from the payload
+      const snapshot = node.fields.map((field) => record[field.name]);
       const presence: boolean[] = [];
       const nulls: boolean[] = [];
-      for (const field of node.fields) {
-        const v = record[field.name];
+      node.fields.forEach((field, i) => {
+        const v = snapshot[i];
         const absent = v === undefined;
         if (absent && !field.optional) fail("required", `${path}.${field.name}`, "required field missing");
         if (v === null && !field.nullable && !typeAcceptsNull(field.type)) {
@@ -143,15 +145,15 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         }
         if (field.optional) presence.push(!absent);
         if (field.nullable) nulls.push(!absent && v === null);
-      }
+      });
       writeBitmap(w, presence);
       writeBitmap(w, nulls);
-      for (const field of node.fields) {
-        const v = record[field.name];
-        if (v === undefined) continue;
-        if (v === null && field.nullable) continue;
+      node.fields.forEach((field, i) => {
+        const v = snapshot[i];
+        if (v === undefined) return;
+        if (v === null && field.nullable) return;
         encodeNode(w, field.type, v, `${path}.${field.name}`, depth + 1, ctx);
-      }
+      });
       return;
     }
   }

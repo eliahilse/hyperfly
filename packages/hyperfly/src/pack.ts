@@ -26,6 +26,21 @@ export function defaultPackHooks(): PackHooks {
   if (!zlib) return {};
   return {
     deflate: (data) => new Uint8Array(zlib.deflateRawSync(data, { level: 6 })),
-    inflate: (data, maxOutputLength) => new Uint8Array(zlib.inflateRawSync(data, { maxOutputLength })),
+    inflate: (data, maxOutputLength) => {
+      // cap one past the declared size so an over-long stream throws rather than allocating freely
+      const out = zlib.inflateRawSync(data, { maxOutputLength: maxOutputLength + 1 });
+      // node's sync inflater silently ignores bytes after the final block; a tight stream
+      // breaks when its last byte is dropped, a padded one does not — reject the padded case
+      if (data.length > 0) {
+        let tight = false;
+        try {
+          zlib.inflateRawSync(data.subarray(0, data.length - 1), { maxOutputLength: maxOutputLength + 1 });
+        } catch {
+          tight = true;
+        }
+        if (!tight) throw new Error("trailing bytes after the deflate stream");
+      }
+      return new Uint8Array(out);
+    },
   };
 }

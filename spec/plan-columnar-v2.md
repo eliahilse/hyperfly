@@ -85,13 +85,25 @@ When `k = 0`, int, float, and string columns still emit their mode byte
 
 ## 4. Encoder mode choice
 
-Encoders MUST pick the mode with the smaller encoded size, choosing `0x00` on
-ties, so a decode → encode round trip is byte-identical. Decoders accept any
-valid mode — canonicality is an encoder obligation, checked by the re-encode
-property, not a decode-time recomputation. For packed string columns the
-obligation is scoped to one implementation: deflate output is not canonical
-across libraries, so byte-identical re-encode holds within an
-implementation+version, while any spec-valid stream decodes everywhere.
+Encoders MUST pick the mode with the smaller encoded size; on a tie they MUST
+pick the lowest mode byte (`0x00` < `0x01` < `0x02` < `0x03`), so a
+decode → encode round trip is byte-identical and two conforming encoders agree.
+Decoders accept any valid mode — canonicality is an encoder obligation, checked
+by the re-encode property, not a decode-time recomputation.
+
+Two capabilities scope that obligation:
+
+- **Packing.** Deflate output is not canonical across libraries, so
+  byte-identical re-encode holds within an implementation+version; any
+  spec-valid stream decodes everywhere. An implementation without a deflate
+  capability emits string columns in plain mode (`0x00`) and rejects packed
+  input as unsupported — its output is canonical *for that capability*, and a
+  peer that packs still decodes it. The fingerprint identifies the schema and
+  plan, not the packing capability; peers with different packing capabilities
+  interoperate because every decoder accepts both string modes.
+- **Inflater strictness.** A decoder's inflater MUST require the declared blob
+  to be exactly one complete DEFLATE stream: reject truncation, output longer
+  than the declared total, and any trailing bytes after the final block.
 
 ## 5. Rationale (non-normative)
 

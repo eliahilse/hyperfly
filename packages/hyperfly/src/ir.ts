@@ -48,6 +48,16 @@ function checkString(v: string, path: string, what: string): void {
   if (hasLoneSurrogate(v)) fail(path, `${what} contains a lone surrogate and has no portable encoding`);
 }
 
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+/** Field names must survive as insertion-ordered object keys in every host language. */
+function checkFieldName(name: string, path: string): void {
+  if (name === "__proto__") fail(path, 'field name "__proto__" is not portable');
+  if (ARRAY_INDEX.test(name) && Number(name) < 0xffffffff) {
+    fail(path, `field name "${name}" is an array index and would reorder as an object key`);
+  }
+}
+
 export function validateIR(node: IRNode, path = "$"): void {
   switch (node.kind) {
     case "bool":
@@ -91,6 +101,9 @@ export function validateIR(node: IRNode, path = "$"): void {
     }
     case "nullable": {
       if (node.inner.kind === "nullable") fail(path, "nullable(nullable) is invalid");
+      if (node.inner.kind === "literal" && node.inner.value === null) {
+        fail(path, "nullable(literal null) has two encodings for null");
+      }
       validateIR(node.inner, `${path}?`);
       return;
     }
@@ -106,6 +119,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       for (const f of node.fields) {
         if (typeof f.name !== "string" || f.name.length === 0) fail(path, "field names must be non-empty strings");
         checkString(f.name, path, "field name");
+        checkFieldName(f.name, path);
         if (seen.has(f.name)) fail(path, `duplicate field "${f.name}"`);
         seen.add(f.name);
         if (f.nullable && f.type.kind === "nullable") {

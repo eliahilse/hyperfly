@@ -152,7 +152,7 @@ describe("cross-adapter parity (retro)", () => {
       score: z.number().int().min(0).max(100),
       ratio: z.number(),
       note: z.string().nullable(),
-      tag: z.string().nullable().optional(),
+      tag: z.string().nullable(),
     });
     // identical string is asserted in python/tests/test_cross_adapter.py
     expect(serializeArtifact(toIR(Row), "columnar")).toBe(
@@ -163,7 +163,7 @@ describe("cross-adapter parity (retro)", () => {
         '{"name":"score","type":{"kind":"int","min":0,"max":100}},' +
         '{"name":"ratio","type":{"kind":"float64"}},' +
         '{"name":"note","type":{"kind":"string"},"nullable":true},' +
-        '{"name":"tag","type":{"kind":"string"},"optional":true,"nullable":true}]}}',
+        '{"name":"tag","type":{"kind":"string"},"nullable":true}]}}',
     );
   });
 });

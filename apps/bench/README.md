@@ -44,6 +44,13 @@ cd apps/bench && bun run bench
   the wire), which is the honest comparison: schema-aware is precisely the
   thing being measured against.
 - Every binary contender gets the same +br4 stacking option hyperfly gets.
+- Two known minor biases, disclosed rather than hidden: the route discriminator
+  is a schema literal Hyperfly erases to zero bytes but Protobuf sends as a
+  field (≈6–9 B/message in Hyperfly's favour), and the reported "codec compile"
+  time covers both Hyperfly plan compilations while Protobuf's `Root.fromJSON`
+  runs during suite construction outside the timer. Neither moves the byte
+  ranking; both are why these numbers stay private until a fresh-process,
+  matched-setup harness replaces them.
 
 ## What these numbers are NOT
 

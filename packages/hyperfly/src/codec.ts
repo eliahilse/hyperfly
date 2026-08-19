@@ -35,6 +35,8 @@ export interface Codec<T = unknown> {
 
 export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
   validateIR(ir);
+  // isolate from later caller mutation: the fingerprint is fixed at compile time
+  ir = structuredClone(ir);
   const plan: PlanLayout = options.plan ?? "row";
   const artifact = serializeArtifact(ir, plan);
   const fingerprintBytes = fingerprintOf(artifact);
@@ -66,7 +68,8 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     encode(value: T): Uint8Array {
       const body = encodeBody(value);
       const out = new Uint8Array(HEADER_SIZE + body.length);
-      out.set(MAGIC, 0);
+      out[0] = 0x68;
+      out[1] = 0x66;
       out[2] = WIRE_VERSION;
       out.set(fingerprintBytes, 3);
       out.set(body, HEADER_SIZE);
@@ -74,7 +77,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     },
     decode(bytes: Uint8Array): T {
       if (bytes.length < HEADER_SIZE) throw new DecodeError("header", "shorter than envelope header");
-      if (bytes[0] !== MAGIC[0] || bytes[1] !== MAGIC[1]) throw new DecodeError("header", "bad magic");
+      if (bytes[0] !== 0x68 || bytes[1] !== 0x66) throw new DecodeError("header", "bad magic");
       if (bytes[2] !== WIRE_VERSION) throw new DecodeError("header", `unsupported wire major ${bytes[2]}`);
       const actual = toHex(bytes.subarray(3, HEADER_SIZE));
       if (actual !== fingerprint) throw new FingerprintMismatchError(fingerprint, actual);

@@ -30,6 +30,33 @@ function unsupported(path: string, message: string): never {
   throw new UnsupportedSchemaError(path, message);
 }
 
+const ARRAY_INDEX = /^(0|[1-9][0-9]*)$/;
+
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (!((s.charCodeAt(i + 1) ?? 0) >= 0xdc00 && s.charCodeAt(i + 1) <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function checkPortableString(v: string, path: string, what: string): void {
+  if (hasLoneSurrogate(v)) unsupported(path, `${what} contains a lone surrogate and has no portable encoding`);
+}
+
+function checkFieldName(name: string, path: string): void {
+  checkPortableString(name, path, "field name");
+  if (name === "__proto__") unsupported(path, 'field name "__proto__" is not portable');
+  if (ARRAY_INDEX.test(name) && Number(name) < 0xffffffff) {
+    unsupported(path, `field name "${name}" is an array index and would reorder as an object key`);
+  }
+}
+
 function internals(schema: unknown, path: string): ZodInternals {
   const z = (schema as ZodSchemaLike | undefined)?._zod;
   if (!z || typeof z.def?.type !== "string") {
@@ -130,6 +157,12 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
       if (!members.every((m): m is string => typeof m === "string")) {
         unsupported(path, "only string enums are supported in v0");
       }
+      for (const m of members) {
+        checkPortableString(m, path, "enum member");
+        if (ARRAY_INDEX.test(m) && Number(m) < 0xffffffff) {
+          unsupported(path, `enum member "${m}" is an array index; zod cannot preserve its declaration order`);
+        }
+      }
       return { kind: "enum", members };
     }
     case "literal": {
@@ -144,6 +177,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
         typeof v === "boolean" ||
         (typeof v === "number" && Number.isSafeInteger(v));
       if (!ok) unsupported(path, "literal must be string, boolean, null, or a safe integer");
+      if (typeof v === "string") checkPortableString(v, path, "literal string");
       return { kind: "literal", value: v as LiteralValue };
     }
     case "array": {
@@ -162,6 +196,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
       const fields: IRField[] = [];
       for (const [name, fieldSchema] of Object.entries(shape)) {
         const fieldPath = `${path}.${name}`;
+        checkFieldName(name, fieldPath);
         const { inner, optional, nullable } = unwrap(internals(fieldSchema, fieldPath), fieldPath);
         const field: IRField = { name, type: nodeOf(inner, fieldPath) };
         if (optional) field.optional = true;

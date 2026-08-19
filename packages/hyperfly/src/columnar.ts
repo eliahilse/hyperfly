@@ -330,7 +330,7 @@ function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: Enc
   }
 }
 
-const utf8Strict = new TextDecoder("utf-8", { fatal: true });
+const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function decodeStringColumn(r: Reader, count: number, path: string, inflate?: Inflate): string[] {
   const mode = r.u8();
@@ -478,6 +478,10 @@ export function encodeColumnarArray(
       participating.push(values[i]);
     }
 
+    if (participating.length > 0 && depth + 1 + leaf.segs.length > ctx.maxDepth) {
+      throw new EncodeError("depth", `${fieldPath}: nesting deeper than ${ctx.maxDepth}`);
+    }
+
     switch (field.type.kind) {
       case "int":
         encodeIntColumn(
@@ -521,6 +525,9 @@ export function decodeColumnarArray(
     }
     count = Number(raw);
   }
+  if (count > r.limits.maxItems) {
+    throw new DecodeError("limit", `${path}: array count ${count} exceeds limit ${r.limits.maxItems}`);
+  }
 
   const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
   const leaves = flattenLeaves(element)!;
@@ -529,13 +536,7 @@ export function decodeColumnarArray(
     let obj = row;
     for (let d = 0; d < segs.length - 1; d++) {
       const seg = segs[d]!;
-      // guard against a schema field literally named __proto__ polluting the prototype
-      let next = Object.prototype.hasOwnProperty.call(obj, seg) ? obj[seg] : undefined;
-      if (typeof next !== "object" || next === null) {
-        next = Object.create(null) as Record<string, unknown>;
-        Object.defineProperty(obj, seg, { value: next, enumerable: true, writable: true, configurable: true });
-      }
-      obj = next as Record<string, unknown>;
+      obj = (obj[seg] ??= {}) as Record<string, unknown>;
     }
     return obj;
   };
@@ -544,9 +545,6 @@ export function decodeColumnarArray(
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const fieldPath = `${path}[].${leaf.segs.join(".")}`;
-    if (depth + 1 + leaf.segs.length > r.limits.maxDepth) {
-      throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
-    }
     // nested structs are required and non-nullable: materialize the container chain at
     // this leaf's declared position for every row, so an all-absent nested struct still
     // round-trips and keys stay in declared order across implementations
@@ -569,6 +567,10 @@ export function decodeColumnarArray(
         continue;
       }
       slots.push(i);
+    }
+
+    if (slots.length > 0 && depth + 1 + leaf.segs.length > r.limits.maxDepth) {
+      throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
     }
 
     switch (field.type.kind) {
