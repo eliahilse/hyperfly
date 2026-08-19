@@ -30,6 +30,17 @@ cd apps/bench && bun run bench
   consumed to defeat dead-code elimination. Codec compile time reported
   separately (steady-state assumption: both peers hold the artifact).
 - Wire bytes include hyperfly's full 19-byte envelope.
+- Protobuf gets a fair schema, not a strawman: proper proto enums (identifier
+  mapping applied both ways inside the timed pipeline), `sint32` for
+  negative-heavy fields, `int64` for timestamps (decoded as Number — all
+  corpus values sit inside 2^53). proto3 cannot represent null, so nullable
+  fields map null↔unset; the corpora never emit empty strings on those
+  fields, which keeps the inverse mapping lossless, and round-trips are
+  verified against the original payload.
+- MessagePack and CBOR run schemaless (their default mode — field names on
+  the wire), which is the honest comparison: schema-aware is precisely the
+  thing being measured against.
+- Every binary contender gets the same +br4 stacking option hyperfly gets.
 
 ## What these numbers are NOT
 
