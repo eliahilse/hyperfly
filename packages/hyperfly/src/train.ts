@@ -1,7 +1,6 @@
-import { MAX_DICT_ENTRIES, enumerateColumns, type Profile, type ProfileColumn } from "./profile.js";
-import { arrayOrdinalBases } from "./profile.js";
+import { MAX_DICT_ENTRIES, columnCount, enumerateColumns, type Profile, type ProfileColumn } from "./profile.js";
 import { columnarEligible, flattenLeaves } from "./columnar.js";
-import type { IRNode } from "./ir.js";
+import { hasLoneSurrogate, type IRNode } from "./ir.js";
 
 export interface TrainOptions {
   /** A value must appear at least this often across the samples to be considered. */
@@ -32,15 +31,14 @@ function compareUtf8(a: string, b: string): number {
   return x.length - y.length;
 }
 
-function collect(node: IRNode, value: unknown, bases: Map<IRNode, number>, counts: Map<number, Map<string, number>>): void {
+function collect(node: IRNode, value: unknown, base: number, counts: Map<number, Map<string, number>>): void {
   if (value === undefined || value === null) return;
   switch (node.kind) {
     case "array": {
       if (!Array.isArray(value)) return;
       if (columnarEligible(node)) {
         const leaves = flattenLeaves(node.element as Extract<IRNode, { kind: "struct" }>);
-        const base = bases.get(node);
-        if (!leaves || base === undefined) return;
+        if (!leaves) return;
         leaves.forEach((leaf, i) => {
           if (leaf.field.type.kind !== "string") return;
           const ordinal = base + i;
@@ -59,16 +57,19 @@ function collect(node: IRNode, value: unknown, bases: Map<IRNode, number>, count
         });
         return;
       }
-      for (const item of value) collect(node.element, item, bases, counts);
+      for (const item of value) collect(node.element, item, base, counts);
       return;
     }
     case "nullable":
-      collect(node.inner, value, bases, counts);
+      collect(node.inner, value, base, counts);
       return;
     case "struct": {
       if (typeof value !== "object" || value === null) return;
+      let fieldColumn = base;
       for (const f of node.fields) {
-        collect(f.type, (value as Record<string, unknown>)[f.name], bases, counts);
+        const fieldBase = fieldColumn;
+        fieldColumn += columnCount(f.type);
+        collect(f.type, (value as Record<string, unknown>)[f.name], fieldBase, counts);
       }
       return;
     }
@@ -89,9 +90,8 @@ function collect(node: IRNode, value: unknown, bases: Map<IRNode, number>, count
 export function train(ir: IRNode, samples: readonly unknown[], options: TrainOptions = {}): Profile | undefined {
   const minOccurrences = options.minOccurrences ?? 2;
   const maxEntries = Math.min(options.maxEntries ?? MAX_DICT_ENTRIES, MAX_DICT_ENTRIES);
-  const bases = arrayOrdinalBases(ir);
   const counts = new Map<number, Map<string, number>>();
-  for (const sample of samples) collect(ir, sample, bases, counts);
+  for (const sample of samples) collect(ir, sample, 0, counts);
 
   const kinds = enumerateColumns(ir);
   const columns: ProfileColumn[] = [];
@@ -102,7 +102,7 @@ export function train(ir: IRNode, samples: readonly unknown[], options: TrainOpt
     // Code length then depends only on position, which keeps the objective linear
     // instead of self-referential, and lets a trailing entry be dropped safely.
     const ranked = [...bucket.entries()]
-      .filter(([, n]) => n >= minOccurrences)
+      .filter(([value, n]) => n >= minOccurrences && !hasLoneSurrogate(value))
       .sort((a, b) => b[1] - a[1] || compareUtf8(a[0], b[0]))
       .slice(0, maxEntries);
 

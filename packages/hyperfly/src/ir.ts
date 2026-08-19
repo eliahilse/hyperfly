@@ -30,7 +30,7 @@ function isSafeInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v);
 }
 
-function hasLoneSurrogate(s: string): boolean {
+export function hasLoneSurrogate(s: string): boolean {
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
     if (c >= 0xd800 && c <= 0xdbff) {

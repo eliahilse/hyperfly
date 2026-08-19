@@ -236,6 +236,100 @@
       },
       "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":3},\"ir\":{\"kind\":\"literal\",\"value\":\"a\\\"b\\\\c\"}}",
       "fingerprint": "cae5981b91f66217992b7652c780baa6"
+    },
+    {
+      "name": "profiled-single",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "a\"q",
+                "b\\s",
+                "c\u0001",
+                "🚀"
+              ]
+            }
+          ]
+        }
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":3},\"ir\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"s\",\"type\":{\"kind\":\"string\"}}]}},\"profile\":{\"columns\":[{\"leaf\":0,\"dict\":[\"a\\\"q\",\"b\\\\s\",\"c\\u0001\",\"🚀\"]}]}}",
+      "fingerprint": "a65108e20d19c19ff525ddf4789d5ba1"
+    },
+    {
+      "name": "profiled-two-arrays",
+      "plan": "columnar",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "array",
+              "element": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "s",
+                    "type": {
+                      "kind": "string"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "array",
+              "element": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "t",
+                    "type": {
+                      "kind": "string"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 1,
+              "dict": [
+                "only-second"
+              ]
+            }
+          ]
+        }
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":3},\"ir\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"s\",\"type\":{\"kind\":\"string\"}}]}}},{\"name\":\"b\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"t\",\"type\":{\"kind\":\"string\"}}]}}}]},\"profile\":{\"columns\":[{\"leaf\":1,\"dict\":[\"only-second\"]}]}}",
+      "fingerprint": "123c921f0dccfe8d25f976757766c4e1"
     }
   ]
 }

@@ -5,7 +5,7 @@ import { fingerprintOf, serializeArtifact, toHex, type IRNode, type PlanLayout }
 describe("fingerprint vectors", () => {
   for (const c of vectors.cases) {
     test(c.name, () => {
-      const canonical = serializeArtifact(c.ir as IRNode, c.plan as PlanLayout);
+      const canonical = serializeArtifact(c.ir as IRNode, c.plan as PlanLayout, (c as { profile?: never }).profile);
       expect(canonical).toBe(c.canonical);
       expect(toHex(fingerprintOf(canonical))).toBe(c.fingerprint);
     });

@@ -7,6 +7,6 @@ CASES = load("fingerprints.json")["cases"]
 def test_fingerprints_match_reference():
     assert CASES, "fingerprint vectors missing"
     for case in CASES:
-        canonical = serialize_artifact(case["ir"], case["plan"])
+        canonical = serialize_artifact(case["ir"], case["plan"], case.get("profile"))
         assert canonical == case["canonical"], case["name"]
         assert fingerprint_of(canonical).hex() == case["fingerprint"], case["name"]

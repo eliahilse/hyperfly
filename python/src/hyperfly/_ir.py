@@ -192,15 +192,10 @@ def enumerate_columns(ir: dict[str, Any]) -> list[str]:
     return out
 
 
-def array_ordinal_bases(ir: dict[str, Any]) -> dict[int, int]:
-    """Ordinal of the first leaf of each eligible array, keyed by id() of the node."""
-    bases: dict[int, int] = {}
-    out: list[str] = []
-    _walk_columns(ir, out, bases)
-    return bases
-
-
-def _walk_columns(node: dict[str, Any], out: list[str], bases: dict[int, int] | None) -> None:
+def column_count(node: dict[str, Any]) -> int:
+    """Columnar leaves under this node. A pure function of the subtree, so two schema
+    positions sharing one node object still count the same — which is why column bases
+    are threaded positionally rather than looked up by node identity."""
     from ._codec import _columnar_eligible, _flatten_leaves
 
     kind = node["kind"]
@@ -208,8 +203,23 @@ def _walk_columns(node: dict[str, Any], out: list[str], bases: dict[int, int] | 
         if _columnar_eligible(node):
             leaves = _flatten_leaves(node["element"])
             if leaves is not None:
-                if bases is not None:
-                    bases[id(node)] = len(out)
+                return len(leaves)
+        return column_count(node["element"])
+    if kind == "nullable":
+        return column_count(node["inner"])
+    if kind == "struct":
+        return sum(column_count(f["type"]) for f in node["fields"])
+    return 0
+
+
+def _walk_columns(node: dict[str, Any], out: list[str], bases: None = None) -> None:
+    from ._codec import _columnar_eligible, _flatten_leaves
+
+    kind = node["kind"]
+    if kind == "array":
+        if _columnar_eligible(node):
+            leaves = _flatten_leaves(node["element"])
+            if leaves is not None:
                 for _segs, field in leaves:
                     out.append(field["type"]["kind"])
                 return

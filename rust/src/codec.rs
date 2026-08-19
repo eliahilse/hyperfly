@@ -1,7 +1,8 @@
 use crate::ir::{
-    array_ordinal_bases, fingerprint_of, has_payload, serialize_artifact, validate, validate_profile,
-    Field, Literal, Node, Plan, Profile,
+    column_count, fingerprint_of, has_payload, serialize_artifact, validate, validate_profile, Field,
+    Literal, Node, Plan, Profile,
 };
+use std::collections::HashMap;
 use crate::value::Value;
 use crate::wire::*;
 
@@ -194,7 +195,8 @@ pub struct Codec {
     limits: Limits,
     pack: bool,
     profile: Option<Profile>,
-    bases: Vec<(*const Node, usize)>,
+    dicts: HashMap<usize, Vec<String>>,
+    codes: HashMap<usize, HashMap<String, u64>>,
     pub artifact: String,
     fp: [u8; 16],
     pub fingerprint: String,
@@ -222,31 +224,40 @@ impl Codec {
         let artifact = serialize_artifact(&ir, plan, profile.as_ref());
         let fp = fingerprint_of(&artifact);
         let fingerprint = fp.iter().map(|b| format!("{b:02x}")).collect();
-        let bases = array_ordinal_bases(&ir);
-        Ok(Codec { ir, plan, limits, pack, profile, bases, artifact, fp, fingerprint })
-    }
-
-    fn ordinal_base(&self, node: &Node) -> usize {
-        let key = node as *const Node;
-        self.bases.iter().find(|(p, _)| *p == key).map(|(_, n)| *n).unwrap_or(0)
+        let mut dicts = HashMap::new();
+        let mut codes = HashMap::new();
+        if let Some(p) = &profile {
+            for column in &p.columns {
+                dicts.insert(column.leaf, column.dict.clone());
+                let lookup: HashMap<String, u64> = column
+                    .dict
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (e.clone(), i as u64 + 1))
+                    .collect();
+                codes.insert(column.leaf, lookup);
+            }
+        }
+        Ok(Codec { ir, plan, limits, pack, profile, dicts, codes, artifact, fp, fingerprint })
     }
 
     fn dict_of(&self, ordinal: usize) -> Option<&[String]> {
-        self.profile
-            .as_ref()
-            .and_then(|p| p.columns.iter().find(|c| c.leaf == ordinal))
-            .map(|c| c.dict.as_slice())
+        self.dicts.get(&ordinal).map(|d| d.as_slice())
+    }
+
+    fn codes_of(&self, ordinal: usize) -> Option<&HashMap<String, u64>> {
+        self.codes.get(&ordinal)
     }
 
     pub fn encode_body(&self, value: &Value) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        self.enc(&mut out, &self.ir, value, "$", 0)?;
+        self.enc(&mut out, &self.ir, value, "$", 0, 0)?;
         Ok(out)
     }
 
     pub fn decode_body(&self, data: &[u8]) -> Result<Value> {
         let mut r = Reader::new(data, self.limits);
-        let value = self.dec(&mut r, &self.ir, "$", 0)?;
+        let value = self.dec(&mut r, &self.ir, "$", 0, 0)?;
         r.expect_end()?;
         Ok(value)
     }
@@ -277,7 +288,7 @@ impl Codec {
         self.decode_body(&data[HEADER_SIZE..])
     }
 
-    fn enc(&self, out: &mut Vec<u8>, node: &Node, value: &Value, path: &str, depth: u32) -> Result<()> {
+    fn enc(&self, out: &mut Vec<u8>, node: &Node, value: &Value, path: &str, depth: u32, column: usize) -> Result<()> {
         if depth > self.limits.max_depth {
             return err(ErrorCode::Depth, format!("{path}: nesting deeper than {}", self.limits.max_depth));
         }
@@ -347,13 +358,13 @@ impl Codec {
                     Ok(())
                 } else {
                     out.push(1);
-                    self.enc(out, inner, value, path, depth + 1)
+                    self.enc(out, inner, value, path, depth + 1, column)
                 }
             }
             Node::Array { element, length } => {
                 if self.plan == Plan::Columnar {
                     if let Some(leaves) = columnar_leaves(element) {
-                        return self.enc_columnar(out, node, &leaves, *length, value, path, depth);
+                        return self.enc_columnar(out, column, &leaves, *length, value, path, depth);
                     }
                 }
                 let Value::Array(items) = value else {
@@ -371,7 +382,7 @@ impl Codec {
                     None => write_uleb(out, items.len() as u64)?,
                 }
                 for (i, item) in items.iter().enumerate() {
-                    self.enc(out, element, item, &format!("{path}[{i}]"), depth + 1)?;
+                    self.enc(out, element, item, &format!("{path}[{i}]"), depth + 1, column)?;
                 }
                 Ok(())
             }
@@ -400,11 +411,14 @@ impl Codec {
                 }
                 write_bitmap(out, &presence);
                 write_bitmap(out, &nulls);
+                let mut field_column = column;
                 for f in fields {
+                    let base = field_column;
+                    field_column += column_count(&f.ty);
                     match value.get(&f.name) {
                         None => {}
                         Some(Value::Null) if f.nullable => {}
-                        Some(v) => self.enc(out, &f.ty, v, &format!("{path}.{}", f.name), depth + 1)?,
+                        Some(v) => self.enc(out, &f.ty, v, &format!("{path}.{}", f.name), depth + 1, base)?,
                     }
                 }
                 Ok(())
@@ -415,7 +429,7 @@ impl Codec {
     fn enc_columnar(
         &self,
         out: &mut Vec<u8>,
-        node_for_ordinal: &Node,
+        ordinal_base: usize,
         leaves: &[LeafCol],
         length: Option<u64>,
         value: &Value,
@@ -439,7 +453,6 @@ impl Codec {
             }
         }
 
-        let ordinal_base = self.ordinal_base(node_for_ordinal);
         for (leaf_index, leaf) in leaves.iter().enumerate() {
             let f = leaf.field;
             let dotted = leaf.segs.join(".");
@@ -528,11 +541,11 @@ impl Codec {
                             _ => return err(ErrorCode::Type, format!("{field_path}[{i}]: expected string")),
                         }
                     }
-                    enc_string_column(out, &strings, self.pack, self.dict_of(ordinal_base + leaf_index))?;
+                    enc_string_column(out, &strings, self.pack, self.codes_of(ordinal_base + leaf_index))?;
                 }
                 t => {
                     for (i, v) in participating.iter().enumerate() {
-                        self.enc(out, t, v, &format!("{field_path}[{i}]"), depth + 2)?;
+                        self.enc(out, t, v, &format!("{field_path}[{i}]"), depth + 2, ordinal_base + leaf_index)?;
                     }
                 }
             }
@@ -540,7 +553,7 @@ impl Codec {
         Ok(())
     }
 
-    fn dec(&self, r: &mut Reader, node: &Node, path: &str, depth: u32) -> Result<Value> {
+    fn dec(&self, r: &mut Reader, node: &Node, path: &str, depth: u32, column: usize) -> Result<Value> {
         if depth > self.limits.max_depth {
             return err(ErrorCode::Depth, format!("{path}: nesting deeper than {}", self.limits.max_depth));
         }
@@ -600,20 +613,20 @@ impl Codec {
             }
             Node::Nullable(inner) => match r.u8()? {
                 0 => Ok(Value::Null),
-                1 => self.dec(r, inner, path, depth + 1),
+                1 => self.dec(r, inner, path, depth + 1, column),
                 m => err(ErrorCode::Marker, format!("{path}: invalid nullable marker {m:#x}")),
             },
             Node::Array { element, length } => {
                 if self.plan == Plan::Columnar {
                     if let Some(leaves) = columnar_leaves(element) {
-                        return self.dec_columnar(r, node, &leaves, *length, path, depth);
+                        return self.dec_columnar(r, column, &leaves, *length, path, depth);
                     }
                 }
                 let count = self.read_count(r, *length, path)?;
                 self.bound_by_input(r, count, element, path)?;
                 let mut out = Vec::with_capacity(count.min(4096));
                 for i in 0..count {
-                    out.push(self.dec(r, element, &format!("{path}[{i}]"), depth + 1)?);
+                    out.push(self.dec(r, element, &format!("{path}[{i}]"), depth + 1, column)?);
                 }
                 Ok(Value::Array(out))
             }
@@ -625,7 +638,10 @@ impl Codec {
                 let mut pi = 0;
                 let mut ni = 0;
                 let mut out = Vec::new();
+                let mut field_column = column;
                 for f in fields {
+                    let base = field_column;
+                    field_column += column_count(&f.ty);
                     let present = if f.optional {
                         pi += 1;
                         presence[pi - 1]
@@ -648,7 +664,7 @@ impl Codec {
                         out.push((f.name.clone(), Value::Null));
                         continue;
                     }
-                    out.push((f.name.clone(), self.dec(r, &f.ty, &format!("{path}.{}", f.name), depth + 1)?));
+                    out.push((f.name.clone(), self.dec(r, &f.ty, &format!("{path}.{}", f.name), depth + 1, base)?));
                 }
                 Ok(Value::Object(out))
             }
@@ -685,7 +701,7 @@ impl Codec {
     fn dec_columnar(
         &self,
         r: &mut Reader,
-        node_for_ordinal: &Node,
+        ordinal_base: usize,
         leaves: &[LeafCol],
         length: Option<u64>,
         path: &str,
@@ -762,7 +778,6 @@ impl Codec {
             }
         }
 
-        let ordinal_base = self.ordinal_base(node_for_ordinal);
         for (leaf_index, leaf) in leaves.iter().enumerate() {
             let f = leaf.field;
             let field_path = format!("{path}[].{}", leaf.segs.join("."));
@@ -824,7 +839,7 @@ impl Codec {
                 t => {
                     let mut out = Vec::with_capacity(slots.len());
                     for row in &slots {
-                        out.push(self.dec(r, t, &format!("{path}[{row}]"), depth + 2)?);
+                        out.push(self.dec(r, t, &format!("{path}[{row}]"), depth + 2, ordinal_base + leaf_index)?);
                     }
                     out
                 }
@@ -1026,7 +1041,12 @@ fn dec_float_column(r: &mut Reader, count: usize, path: &str) -> Result<Vec<f64>
     Ok(out)
 }
 
-fn enc_string_column(out: &mut Vec<u8>, values: &[&str], pack: bool, dict: Option<&[String]>) -> Result<()> {
+fn enc_string_column(
+    out: &mut Vec<u8>,
+    values: &[&str],
+    pack: bool,
+    codes_index: Option<&HashMap<String, u64>>,
+) -> Result<()> {
     if values.is_empty() {
         out.push(0);
         return Ok(());
@@ -1035,11 +1055,8 @@ fn enc_string_column(out: &mut Vec<u8>, values: &[&str], pack: bool, dict: Optio
 
     let mut codes: Option<Vec<u64>> = None;
     let mut dict_cost = usize::MAX;
-    if let Some(entries) = dict {
-        let assigned: Vec<u64> = values
-            .iter()
-            .map(|v| entries.iter().position(|e| e == v).map(|i| i as u64 + 1).unwrap_or(0))
-            .collect();
+    if let Some(index) = codes_index {
+        let assigned: Vec<u64> = values.iter().map(|v| index.get(*v).copied().unwrap_or(0)).collect();
         dict_cost = assigned
             .iter()
             .zip(values.iter())

@@ -2,6 +2,7 @@ import { brotliCompressSync, brotliDecompressSync, constants, gzipSync, gunzipSy
 import { decode as cborDecode, encode as cborEncode } from "cbor-x";
 import { compile } from "hyperfly/zod";
 import { pack, unpack } from "msgpackr";
+import { runProfileSuite } from "./profiles.js";
 import { candlesProto, devicesProto, feedProto, type ProtoCodec } from "./proto.js";
 import { CandleResponse, candlesPayload } from "./corpora/candles.js";
 import { DeviceResponse, devicesPayload } from "./corpora/devices.js";
@@ -206,6 +207,8 @@ const all: Row[] = [];
 for (const suite of SUITES) {
   all.push(...runCorpus(suite.name, suite.schema, suite.payload, suite.proto, suite.warmup, suite.samples));
 }
+
+runProfileSuite();
 
 await Bun.write(
   new URL("../results/results.json", import.meta.url).pathname,

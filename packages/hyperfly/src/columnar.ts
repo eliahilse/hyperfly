@@ -319,7 +319,7 @@ function encodeStringColumn(
     codes = values.map((v) => ctx.profile.codeOf(ordinal, v as string) ?? 0);
     dictCost = 0;
     for (let i = 0; i < codes.length; i++) {
-      dictCost += 1;
+      dictCost += ulebLen(BigInt(codes[i]!));
       if (codes[i] === 0) dictCost += ulebLen(BigInt(bytes[i]!.length)) + bytes[i]!.length;
     }
   }
@@ -485,6 +485,7 @@ export function encodeColumnarArray(
   path: string,
   depth: number,
   ctx: EncodeCtx,
+  ordinalBase: number,
 ): void {
   if (!Array.isArray(value)) throw new EncodeError("type", `${path}: expected array`);
   const element = node.element as StructNode;
@@ -504,7 +505,6 @@ export function encodeColumnarArray(
   });
 
   const leaves = flattenLeaves(element)!;
-  const ordinalBase = ctx.ordinalOf(node);
 
   const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
     let obj: Record<string, unknown> = row;
@@ -581,7 +581,7 @@ export function encodeColumnarArray(
         break;
       default:
         for (let i = 0; i < participating.length; i++) {
-          encodeNode(w, field.type, participating[i], `${fieldPath}[${i}]`, depth + 2, ctx);
+          encodeNode(w, field.type, participating[i], `${fieldPath}[${i}]`, depth + 2, ctx, ordinalBase + leafIndex);
         }
     }
   }
@@ -594,7 +594,7 @@ export function decodeColumnarArray(
   depth: number,
   inflate: Inflate | undefined,
   profile: ProfileIndex,
-  ordinalOf: (node: IRNode) => number,
+  ordinalBase: number,
 ): Record<string, unknown>[] {
   const element = node.element as StructNode;
   let count: number;
@@ -614,7 +614,6 @@ export function decodeColumnarArray(
 
   const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
   const leaves = flattenLeaves(element)!;
-  const ordinalBase = ordinalOf(node);
 
   const containerOf = (row: Record<string, unknown>, segs: readonly string[]): Record<string, unknown> => {
     let obj = row;
@@ -684,7 +683,7 @@ export function decodeColumnarArray(
       }
       default: {
         for (const row of slots) {
-          containerOf(out[row]!, leaf.segs)[leafName] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalOf);
+          containerOf(out[row]!, leaf.segs)[leafName] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex);
         }
       }
     }

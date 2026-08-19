@@ -171,7 +171,8 @@ fn fingerprints() {
             "row" => Plan::Row,
             _ => Plan::Columnar,
         };
-        let canonical = serialize_artifact(&node_of(&case["ir"]), plan, None);
+        let profile = case.get("profile").map(profile_of);
+        let canonical = serialize_artifact(&node_of(&case["ir"]), plan, profile.as_ref());
         assert_eq!(canonical, case["canonical"].as_str().unwrap(), "{}", case["name"]);
         assert_eq!(to_hex(&fingerprint_of(&canonical)), case["fingerprint"].as_str().unwrap(), "{}", case["name"]);
     }

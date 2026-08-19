@@ -8,7 +8,7 @@ from typing import Any
 
 from ._ir import (
     LEAF_KINDS,
-    array_ordinal_bases,
+    column_count,
     fingerprint_of,
     has_payload,
     serialize_artifact,
@@ -197,13 +197,11 @@ class _Ctx:
         "inflate",
         "dicts",
         "codes",
-        "bases",
     )
 
-    def __init__(self, limits: Limits, columnar: bool, deflate, inflate, profile=None, bases=None) -> None:
+    def __init__(self, limits: Limits, columnar: bool, deflate, inflate, profile=None) -> None:
         self.dicts: dict[int, list[str]] = {}
         self.codes: dict[int, dict[str, int]] = {}
-        self.bases = bases or {}
         if profile is not None:
             for column in profile["shared"]["columns"]:
                 self.dicts[column["leaf"]] = column["dict"]
@@ -216,7 +214,7 @@ class _Ctx:
         self.inflate = inflate
 
 
-def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, depth: int, ctx: _Ctx) -> None:
+def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, depth: int, ctx: _Ctx, column: int = 0) -> None:
     if depth > ctx.max_depth:
         _efail("depth", path, f"nesting deeper than {ctx.max_depth}")
     kind = node["kind"]
@@ -258,10 +256,10 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
             out.append(0)
         else:
             out.append(1)
-            _encode_node(out, node["inner"], value, path, depth + 1, ctx)
+            _encode_node(out, node["inner"], value, path, depth + 1, ctx, column)
     elif kind == "array":
         if ctx.columnar and _columnar_eligible(node):
-            _encode_columnar(out, node, value, path, depth, ctx)
+            _encode_columnar(out, node, value, path, depth, ctx, column)
             return
         if type(value) is not list:
             _efail("type", path, "expected array")
@@ -274,7 +272,7 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
         else:
             write_uleb(out, len(value))
         for i, item in enumerate(value):
-            _encode_node(out, node["element"], item, f"{path}[{i}]", depth + 1, ctx)
+            _encode_node(out, node["element"], item, f"{path}[{i}]", depth + 1, ctx, column)
     elif kind == "struct":
         if not isinstance(value, dict):
             _efail("type", path, "expected object")
@@ -293,13 +291,16 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
                 nulls.append(not absent and v is None)
         write_bitmap(out, presence)
         write_bitmap(out, nulls)
+        field_column = column
         for f in node["fields"]:
+            base = field_column
+            field_column += column_count(f["type"])
             if f["name"] not in value:
                 continue
             v = value[f["name"]]
             if v is None and f.get("nullable"):
                 continue
-            _encode_node(out, f["type"], v, f"{path}.{f['name']}", depth + 1, ctx)
+            _encode_node(out, f["type"], v, f"{path}.{f['name']}", depth + 1, ctx, base)
     else:
         _efail("type", path, f"unknown kind {kind}")
 
@@ -415,7 +416,7 @@ def _encode_string_column(out: bytearray, values: list[Any], path: str, ctx: _Ct
     out += packed
 
 
-def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str, depth: int, ctx: _Ctx) -> None:
+def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str, depth: int, ctx: _Ctx, ordinal_base: int = 0) -> None:
     element = node["element"]
     if type(value) is not list:
         _efail("type", path, "expected array")
@@ -434,7 +435,6 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
 
     leaves = _flatten_leaves(element)
     assert leaves is not None
-    ordinal_base = ctx.bases.get(id(node), 0)
 
     def container(row: dict[str, Any], segs: tuple[str, ...], i: int) -> dict[str, Any]:
         obj = row
@@ -494,7 +494,7 @@ def _encode_columnar(out: bytearray, node: dict[str, Any], value: Any, path: str
                 _encode_node(out, t, v, f"{field_path}[{i}]", depth + 2, ctx)
 
 
-def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _Ctx) -> Any:
+def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _Ctx, column: int = 0) -> Any:
     if depth > ctx.max_depth:
         _dfail("depth", path, f"nesting deeper than {ctx.max_depth}")
     kind = node["kind"]
@@ -542,17 +542,17 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             return None
         if marker != 1:
             _dfail("marker", path, f"invalid nullable marker 0x{marker:x}")
-        return _decode_node(r, node["inner"], path, depth + 1, ctx)
+        return _decode_node(r, node["inner"], path, depth + 1, ctx, column)
     if kind == "array":
         if ctx.columnar and _columnar_eligible(node):
-            return _decode_columnar(r, node, path, depth, ctx)
+            return _decode_columnar(r, node, path, depth, ctx, column)
         length = node.get("length")
         if length is None:
             length = read_uleb(r)
         if length > r.limits.max_items:
             _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
         _bound_by_input(r, length, node["element"], path)
-        return [_decode_node(r, node["element"], f"{path}[{i}]", depth + 1, ctx) for i in range(length)]
+        return [_decode_node(r, node["element"], f"{path}[{i}]", depth + 1, ctx, column) for i in range(length)]
     if kind == "struct":
         optional = [f for f in node["fields"] if f.get("optional")]
         nullable = [f for f in node["fields"] if f.get("nullable")]
@@ -560,7 +560,10 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         nulls = read_bitmap(r, len(nullable), path)
         pi = ni = 0
         out: dict[str, Any] = {}
+        field_column = column
         for f in node["fields"]:
+            base = field_column
+            field_column += column_count(f["type"])
             present = True
             if f.get("optional"):
                 present = presence[pi]
@@ -576,7 +579,7 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             if is_null:
                 out[f["name"]] = None
                 continue
-            out[f["name"]] = _decode_node(r, f["type"], f"{path}.{f['name']}", depth + 1, ctx)
+            out[f["name"]] = _decode_node(r, f["type"], f"{path}.{f['name']}", depth + 1, ctx, base)
         return out
     _dfail("marker", path, f"unknown kind {kind}")
 
@@ -739,7 +742,7 @@ def _decode_string_column(r: Reader, count: int, path: str, ctx: _Ctx, ordinal: 
     return out
 
 
-def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _Ctx) -> list[dict[str, Any]]:
+def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _Ctx, ordinal_base: int = 0) -> list[dict[str, Any]]:
     element = node["element"]
     length = node.get("length")
     if length is None:
@@ -752,7 +755,6 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
     rows: list[dict[str, Any]] = [{} for _ in range(count)]
     leaves = _flatten_leaves(element)
     assert leaves is not None
-    ordinal_base = ctx.bases.get(id(node), 0)
     def container(row: dict[str, Any], segs: tuple[str, ...]) -> dict[str, Any]:
         obj = row
         for seg in segs[:-1]:
@@ -849,7 +851,7 @@ class Codec:
             deflate, inflate = _default_deflate, _default_inflate
         else:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
-        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self.profile, array_ordinal_bases(ir))
+        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self.profile)
 
     @property
     def ir(self) -> dict[str, Any]:

@@ -1,5 +1,6 @@
 import { columnarEligible, flattenLeaves } from "./columnar.js";
 import { HyperflyError } from "./errors.js";
+import { hasLoneSurrogate } from "./ir.js";
 import type { IRNode } from "./ir.js";
 
 export interface ProfileColumn {
@@ -59,36 +60,27 @@ export function enumerateColumns(ir: IRNode): ColumnRef[] {
   return out;
 }
 
-/** Ordinal of the first leaf of each eligible array, by identity, from the §6.1 walk. */
-export function arrayOrdinalBases(ir: IRNode): Map<IRNode, number> {
-  const bases = new Map<IRNode, number>();
-  let next = 0;
-  const walk = (node: IRNode): void => {
-    switch (node.kind) {
-      case "array": {
-        if (columnarEligible(node)) {
-          const leaves = flattenLeaves(node.element as Extract<IRNode, { kind: "struct" }>);
-          if (leaves) {
-            bases.set(node, next);
-            next += leaves.length;
-            return;
-          }
-        }
-        walk(node.element);
-        return;
+/**
+ * Columnar leaves under this node. A pure function of the subtree, so two schema
+ * positions sharing one node object still count the same — which is why column
+ * bases are threaded positionally rather than looked up by node identity.
+ */
+export function columnCount(node: IRNode): number {
+  switch (node.kind) {
+    case "array": {
+      if (columnarEligible(node)) {
+        const leaves = flattenLeaves(node.element as Extract<IRNode, { kind: "struct" }>);
+        if (leaves) return leaves.length;
       }
-      case "nullable":
-        walk(node.inner);
-        return;
-      case "struct":
-        for (const f of node.fields) walk(f.type);
-        return;
-      default:
-        return;
+      return columnCount(node.element);
     }
-  };
-  walk(ir);
-  return bases;
+    case "nullable":
+      return columnCount(node.inner);
+    case "struct":
+      return node.fields.reduce((n, f) => n + columnCount(f.type), 0);
+    default:
+      return 0;
+  }
 }
 
 export function validateProfile(ir: IRNode, profile: Profile): void {
@@ -113,6 +105,9 @@ export function validateProfile(ir: IRNode, profile: Profile): void {
     const seen = new Set<string>();
     for (const entry of column.dict) {
       if (typeof entry !== "string") fail(`leaf ${column.leaf}: entries must be strings`);
+      if (hasLoneSurrogate(entry)) {
+        fail(`leaf ${column.leaf}: entry contains a lone surrogate and has no portable encoding`);
+      }
       if (seen.has(entry)) fail(`leaf ${column.leaf}: duplicate entry gives one value two codes`);
       seen.add(entry);
     }

@@ -282,38 +282,38 @@ pub fn serialize_artifact(ir: &Node, plan: Plan, profile: Option<&Profile>) -> S
 /// Spec 6.1: the kind of every columnar leaf in the schema, in ordinal order.
 pub fn enumerate_columns(ir: &Node) -> Vec<&'static str> {
     let mut out = Vec::new();
-    walk_columns(ir, &mut out, &mut Vec::new());
+    walk_columns(ir, &mut out);
     out
 }
 
-/// Ordinal of the first leaf of each eligible array, in the order the walk meets them.
-pub fn array_ordinal_bases(ir: &Node) -> Vec<(*const Node, usize)> {
+/// Columnar leaves under this node. A pure function of the subtree, so two schema
+/// positions sharing one node still count the same — which is why column bases are
+/// threaded positionally rather than looked up by node identity.
+pub fn column_count(node: &Node) -> usize {
     let mut out = Vec::new();
-    let mut bases = Vec::new();
-    walk_columns(ir, &mut out, &mut bases);
-    bases
+    walk_columns(node, &mut out);
+    out.len()
 }
 
-fn walk_columns(node: &Node, out: &mut Vec<&'static str>, bases: &mut Vec<(*const Node, usize)>) {
+fn walk_columns(node: &Node, out: &mut Vec<&'static str>) {
     match node {
         Node::Array { element, .. } => {
             if let Node::Struct(fields) = &**element {
                 let mut leaves = Vec::new();
                 let mut segs = Vec::new();
                 if crate::codec::flatten_for_profile(fields, &mut segs, &mut leaves) {
-                    bases.push((node as *const Node, out.len()));
                     for kind in leaves {
                         out.push(kind);
                     }
                     return;
                 }
             }
-            walk_columns(element, out, bases);
+            walk_columns(element, out);
         }
-        Node::Nullable(inner) => walk_columns(inner, out, bases),
+        Node::Nullable(inner) => walk_columns(inner, out),
         Node::Struct(fields) => {
             for f in fields {
-                walk_columns(&f.ty, out, bases);
+                walk_columns(&f.ty, out);
             }
         }
         _ => {}

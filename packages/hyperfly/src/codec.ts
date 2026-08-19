@@ -1,6 +1,6 @@
 import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
 import { defaultPackHooks } from "./pack.js";
-import { arrayOrdinalBases, indexProfile, validateProfile, type Profile } from "./profile.js";
+import { indexProfile, validateProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
 import { encodeNode } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
@@ -57,10 +57,10 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     }
     validateProfile(ir, profile);
   }
-  const profileIndex = indexProfile(profile);
-  const bases = arrayOrdinalBases(ir);
-  const ordinalOf = (node: IRNode): number => bases.get(node) ?? 0;
-  const artifact = serializeArtifact(ir, plan, profile);
+  // the profile is fixed by the fingerprint exactly as the IR is
+  const frozenProfile = profile ? deepFreeze(structuredClone(profile)) : undefined;
+  const profileIndex = indexProfile(frozenProfile);
+  const artifact = serializeArtifact(ir, plan, frozenProfile);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);
   const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
@@ -77,14 +77,13 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
       deflate: pack.deflate,
       canInflate: pack.inflate !== undefined,
       profile: profileIndex,
-      ordinalOf,
     });
     return w.finish();
   };
 
   const decodeBody = (bytes: Uint8Array): T => {
     const r = new Reader(bytes, limits);
-    const value = decodeNode(r, ir, "$", 0, columnar, pack.inflate, profileIndex, ordinalOf);
+    const value = decodeNode(r, ir, "$", 0, columnar, pack.inflate, profileIndex);
     r.expectEnd();
     return value as T;
   };
@@ -94,7 +93,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     artifact,
     fingerprint,
     plan,
-    profile,
+    profile: frozenProfile,
     encodeBody,
     decodeBody,
     encode(value: T): Uint8Array {
