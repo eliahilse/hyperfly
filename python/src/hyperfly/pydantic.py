@@ -152,11 +152,12 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
         # the wire name must be what model_dump(by_alias=True) emits AND what
         # model_validate accepts; anything that splits those has no single wire name
         ser_name = info.serialization_alias or info.alias or name
-        val_name = (
-            info.validation_alias
-            if isinstance(info.validation_alias, str)
-            else (info.alias if info.validation_alias is None else None)
-        ) or name
+        if info.validation_alias is not None and not isinstance(info.validation_alias, str):
+            _unsupported(
+                field_path,
+                "AliasChoices/AliasPath validation aliases have no single wire name; use alias=...",
+            )
+        val_name = info.validation_alias or info.alias or name
         if ser_name != val_name:
             _unsupported(
                 field_path,
@@ -194,10 +195,17 @@ class _ModelCodec:
         self._codec = codec
         self._model = model
         self._validate = validate
-        self.ir = codec.ir
+        self._codec_ir = codec.ir
         self.plan = codec.plan
         self.artifact = codec.artifact
         self.fingerprint = codec.fingerprint
+
+    @property
+    def ir(self) -> dict[str, Any]:
+        """A copy: the compiled schema is fixed by the fingerprint and never mutated."""
+        import copy as _copy
+
+        return _copy.deepcopy(self._codec_ir)
 
     def _to_value(self, value: Any) -> Any:
         if isinstance(value, BaseModel):

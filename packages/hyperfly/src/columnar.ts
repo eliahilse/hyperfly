@@ -1,8 +1,7 @@
-import { decodeNode, type Inflate } from "./decode.js";
+import { boundByInput, decodeNode, readBitmap, type Inflate } from "./decode.js";
 import { encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import type { IRField, IRNode } from "./ir.js";
-import { readBitmap } from "./decode.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import type { Writer } from "./writer.js";
@@ -307,7 +306,7 @@ function encodeStringColumn(w: Writer, values: unknown[], path: string, ctx: Enc
 
   let packed: Uint8Array | null = null;
   let packedCost = Infinity;
-  if (ctx.deflate) {
+  if (ctx.deflate && ctx.canInflate) {
     const total = bytes.reduce((n, b) => n + b.length, 0);
     const concat = new Uint8Array(total);
     let offset = 0;
@@ -544,6 +543,7 @@ export function decodeColumnarArray(
   if (count > r.limits.maxItems) {
     throw new DecodeError("limit", `${path}: array count ${count} exceeds limit ${r.limits.maxItems}`);
   }
+  boundByInput(r, count, element, path);
 
   const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
   const leaves = flattenLeaves(element)!;

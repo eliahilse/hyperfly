@@ -56,7 +56,14 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
 
   const encodeBody = (value: T): Uint8Array => {
     const w = new Writer();
-    encodeNode(w, ir, value, "$", 0, { maxDepth: limits.maxDepth, columnar, deflate: pack.deflate });
+    encodeNode(w, ir, value, "$", 0, {
+      maxDepth: limits.maxDepth,
+      maxItems: limits.maxItems,
+      maxByteLength: limits.maxByteLength,
+      columnar,
+      deflate: pack.deflate,
+      canInflate: pack.inflate !== undefined,
+    });
     return w.finish();
   };
 
@@ -67,7 +74,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
     return value as T;
   };
 
-  return {
+  return Object.freeze({
     ir,
     artifact,
     fingerprint,
@@ -92,5 +99,5 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
       if (actual !== fingerprint) throw new FingerprintMismatchError(fingerprint, actual);
       return decodeBody(bytes.subarray(HEADER_SIZE));
     },
-  };
+  });
 }

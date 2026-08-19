@@ -250,3 +250,16 @@ pub fn fingerprint_of(artifact: &str) -> [u8; 16] {
     fp.copy_from_slice(&digest[..16]);
     fp
 }
+
+/// Whether one element of this type always consumes at least one bit on the wire.
+pub fn has_payload(node: &Node) -> bool {
+    match node {
+        Node::Literal(_) => false,
+        Node::Struct(fields) => fields.iter().any(|f| f.optional || f.nullable || has_payload(&f.ty)),
+        Node::Array { element, length } => match length {
+            None => true,
+            Some(n) => *n > 0 && has_payload(element),
+        },
+        _ => true,
+    }
+}

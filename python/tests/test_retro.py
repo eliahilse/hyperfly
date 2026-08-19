@@ -162,3 +162,32 @@ def test_pydantic_rejects_one_sided_alias():
 
     with pytest.raises(HyperflyError):
         to_ir(M)
+
+
+def test_declared_count_bounded_by_remaining_input():
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "x", "type": {"kind": "int"}}]}}
+    bomb = bytes([0x80, 0x80, 0x80, 0x08])  # declares 2**24 rows, carries no payload
+    for plan in ("row", "columnar"):
+        with pytest.raises(HyperflyError) as err:
+            compile_ir(ir, plan=plan).decode_body(bomb)
+        assert err.value.code == "limit"
+
+
+def test_encoder_respects_its_own_limits():
+    codec = compile_ir({"kind": "string"}, limits=Limits(max_byte_length=1))
+    with pytest.raises(HyperflyError) as err:
+        codec.encode_body("ab")
+    assert err.value.code == "limit"
+
+
+def test_deflate_without_inflate_does_not_pack():
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "s", "type": {"kind": "string"}}]}}
+    rows = [{"s": "aaaaaaaaaaaaaaaaaaaaaaaa"} for _ in range(20)]
+    import zlib
+
+    def deflate(data: bytes) -> bytes:
+        c = zlib.compressobj(6, zlib.DEFLATED, -15)
+        return c.compress(data) + c.flush()
+
+    codec = compile_ir(ir, plan="columnar", pack={"deflate": deflate})
+    assert codec.decode_body(codec.encode_body(rows)) == rows

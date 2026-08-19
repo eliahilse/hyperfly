@@ -1,12 +1,12 @@
 import { columnarEligible, encodeColumnarArray } from "./columnar.js";
-import { EncodeError } from "./errors.js";
+import { EncodeError, type ErrorCode } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
 const encoder = new TextEncoder();
 
-function fail(code: "type" | "required" | "range" | "utf8" | "float" | "depth", path: string, message: string): never {
+function fail(code: ErrorCode, path: string, message: string): never {
   throw new EncodeError(code, `${path}: ${message}`);
 }
 
@@ -25,8 +25,12 @@ function checkSurrogates(s: string, path: string): void {
 
 export interface EncodeCtx {
   maxDepth: number;
+  maxItems: number;
+  maxByteLength: number;
   columnar: boolean;
   deflate?: (data: Uint8Array) => Uint8Array;
+  /** packing is only canonical when the same codec can also inflate what it wrote */
+  canInflate: boolean;
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
@@ -80,12 +84,14 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
     }
     case "string": {
       const bytes = utf8Bytes(value, path);
+      if (bytes.length > ctx.maxByteLength) fail("limit", path, `string of ${bytes.length} bytes exceeds the codec limit`);
       writeUleb(w, BigInt(bytes.length));
       w.bytes(bytes);
       return;
     }
     case "bytes": {
       if (!(value instanceof Uint8Array)) fail("type", path, "expected Uint8Array");
+      if (value.length > ctx.maxByteLength) fail("limit", path, `bytes of ${value.length} exceeds the codec limit`);
       writeUleb(w, BigInt(value.length));
       w.bytes(value);
       return;
@@ -117,6 +123,7 @@ export function encodeNode(w: Writer, node: IRNode, value: unknown, path: string
         return;
       }
       if (!Array.isArray(value)) fail("type", path, "expected array");
+      if (value.length > ctx.maxItems) fail("limit", path, `array of ${value.length} items exceeds the codec limit`);
       if (node.length !== undefined) {
         if (value.length !== node.length) fail("type", path, `fixed array expects ${node.length} items, got ${value.length}`);
       } else {

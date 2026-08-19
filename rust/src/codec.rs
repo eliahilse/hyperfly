@@ -1,4 +1,4 @@
-use crate::ir::{fingerprint_of, serialize_artifact, validate, Field, Literal, Node, Plan};
+use crate::ir::{fingerprint_of, has_payload, serialize_artifact, validate, Field, Literal, Node, Plan};
 use crate::value::Value;
 use crate::wire::*;
 
@@ -230,6 +230,9 @@ impl Codec {
             }
             Node::Str => match value {
                 Value::Str(s) => {
+                    if s.len() as u64 > self.limits.max_byte_length {
+                        return err(ErrorCode::Limit, format!("{path}: string exceeds the codec limit"));
+                    }
                     write_uleb(out, s.len() as u64)?;
                     out.extend_from_slice(s.as_bytes());
                     Ok(())
@@ -238,6 +241,9 @@ impl Codec {
             },
             Node::Bytes => match value {
                 Value::Bytes(b) => {
+                    if b.len() as u64 > self.limits.max_byte_length {
+                        return err(ErrorCode::Limit, format!("{path}: bytes exceed the codec limit"));
+                    }
                     write_uleb(out, b.len() as u64)?;
                     out.extend_from_slice(b);
                     Ok(())
@@ -283,6 +289,9 @@ impl Codec {
                 let Value::Array(items) = value else {
                     return err(ErrorCode::Type, format!("{path}: expected array"));
                 };
+                if items.len() as u64 > self.limits.max_items {
+                    return err(ErrorCode::Limit, format!("{path}: array exceeds the codec limit"));
+                }
                 match length {
                     Some(n) => {
                         if items.len() as u64 != *n {
@@ -530,6 +539,7 @@ impl Codec {
                     }
                 }
                 let count = self.read_count(r, *length, path)?;
+                self.bound_by_input(r, count, element, path)?;
                 let mut out = Vec::with_capacity(count.min(4096));
                 for i in 0..count {
                     out.push(self.dec(r, element, &format!("{path}[{i}]"), depth + 1)?);
@@ -574,6 +584,22 @@ impl Codec {
         }
     }
 
+    /// A declared count must be payable by the bytes still on the wire: any element that
+    /// carries payload costs at least one bit, so truncation cannot force a huge allocation.
+    fn bound_by_input(&self, r: &Reader, count: usize, element: &Node, path: &str) -> Result<()> {
+        if count == 0 || !has_payload(element) {
+            return Ok(());
+        }
+        let affordable = r.remaining().saturating_mul(8);
+        if count > affordable {
+            return err(
+                ErrorCode::Limit,
+                format!("{path}: declared {count} items but only {} byte(s) remain", r.remaining()),
+            );
+        }
+        Ok(())
+    }
+
     fn read_count(&self, r: &mut Reader, length: Option<u64>, path: &str) -> Result<usize> {
         let n = match length {
             Some(n) => n,
@@ -587,6 +613,16 @@ impl Codec {
 
     fn dec_columnar(&self, r: &mut Reader, leaves: &[LeafCol], length: Option<u64>, path: &str, depth: u32) -> Result<Value> {
         let count = self.read_count(r, length, path)?;
+        // the flattened leaves are the element's payload: any flag or non-literal leaf costs bits
+        let element_has_payload = leaves
+            .iter()
+            .any(|l| l.field.optional || l.field.nullable || !matches!(l.field.ty, Node::Literal(_)));
+        if count > 0 && element_has_payload && count > r.remaining().saturating_mul(8) {
+            return err(
+                ErrorCode::Limit,
+                format!("{path}: declared {count} items but only {} byte(s) remain", r.remaining()),
+            );
+        }
         let mut rows: Vec<Vec<(String, Value)>> = (0..count).map(|_| Vec::new()).collect();
 
         fn ensure_path(entries: &mut Vec<(String, Value)>, segs: &[&str]) {

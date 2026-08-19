@@ -64,6 +64,10 @@ export class Reader {
     return hi === 0x80000000 && lo === 0;
   }
 
+  remaining(): number {
+    return this.buf.length - this.offset;
+  }
+
   expectEnd(): void {
     if (this.offset !== this.buf.length) {
       throw new DecodeError("trailing", `${this.buf.length - this.offset} trailing byte(s) after body`);

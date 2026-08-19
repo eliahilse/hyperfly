@@ -136,3 +136,17 @@ export function validateIR(node: IRNode, path = "$"): void {
       fail(path, `unknown IR kind ${(node as { kind: string }).kind}`);
   }
 }
+
+/** Whether one element of this type always consumes at least one bit on the wire. */
+export function hasPayload(node: IRNode): boolean {
+  switch (node.kind) {
+    case "literal":
+      return false;
+    case "struct":
+      return node.fields.some((f) => f.optional || f.nullable || hasPayload(f.type));
+    case "array":
+      return node.length === undefined || (node.length > 0 && hasPayload(node.element));
+    default:
+      return true;
+  }
+}

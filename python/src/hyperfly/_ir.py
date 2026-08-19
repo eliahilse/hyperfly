@@ -173,3 +173,16 @@ def serialize_artifact(ir: dict[str, Any], layout: str = "row") -> str:
 
 def fingerprint_of(artifact: str) -> bytes:
     return hashlib.sha256(artifact.encode("utf-8")).digest()[:16]
+
+
+def has_payload(node: dict[str, Any]) -> bool:
+    """Whether one element of this type always consumes at least one bit on the wire."""
+    kind = node["kind"]
+    if kind == "literal":
+        return False
+    if kind == "struct":
+        return any(f.get("optional") or f.get("nullable") or has_payload(f["type"]) for f in node["fields"])
+    if kind == "array":
+        length = node.get("length")
+        return length is None or (length > 0 and has_payload(node["element"]))
+    return True

@@ -125,3 +125,25 @@ describe("retro hardening", () => {
     expect(codec.encodeBody(0)).toEqual(new Uint8Array([0]));
   });
 });
+
+describe("allocation and limit safety", () => {
+  test("a declared count must be payable by the remaining input", () => {
+    const ir: IRNode = { kind: "array", element: { kind: "struct", fields: [{ name: "x", type: { kind: "int" } }] } };
+    const bomb = new Uint8Array([0x80, 0x80, 0x80, 0x08]);
+    for (const plan of ["row", "columnar"] as const) {
+      expect(() => compileIR(ir, { plan }).decodeBody(bomb)).toThrow("remain");
+    }
+  });
+
+  test("encoders refuse output their own decoder would reject", () => {
+    const codec = compileIR({ kind: "string" }, { limits: { maxByteLength: 1 } });
+    expect(() => codec.encodeBody("ab")).toThrow("limit");
+  });
+
+  test("a codec that cannot inflate does not emit packed columns", () => {
+    const ir: IRNode = { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } };
+    const rows = Array.from({ length: 20 }, () => ({ s: "a".repeat(24) }));
+    const codec = compileIR(ir, { plan: "columnar", pack: { deflate: (d) => d } });
+    expect(codec.decodeBody(codec.encodeBody(rows))).toEqual(rows);
+  });
+});

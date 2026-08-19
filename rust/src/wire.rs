@@ -112,6 +112,10 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    pub fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     pub fn expect_end(&self) -> Result<()> {
         if self.pos != self.buf.len() {
             return err(ErrorCode::Trailing, format!("{} trailing byte(s) after body", self.buf.len() - self.pos));

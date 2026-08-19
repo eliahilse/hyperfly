@@ -69,6 +69,9 @@ class Reader:
         self.pos += n
         return out
 
+    def remaining(self) -> int:
+        return len(self.buf) - self.pos
+
     def expect_end(self) -> None:
         if self.pos != len(self.buf):
             raise DecodeError("trailing", f"{len(self.buf) - self.pos} trailing byte(s) after body")

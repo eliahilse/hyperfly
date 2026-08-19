@@ -6,7 +6,7 @@ import struct
 import zlib
 from typing import Any
 
-from ._ir import LEAF_KINDS, fingerprint_of, serialize_artifact, validate_ir
+from ._ir import LEAF_KINDS, fingerprint_of, has_payload, serialize_artifact, validate_ir
 from ._wire import (
     DEFAULT_LIMITS,
     INT_MAX,
@@ -32,6 +32,15 @@ HEADER_SIZE = 19
 _NEG_ZERO_BITS = 0x8000000000000000
 _POW10 = [10**i for i in range(9)]
 _MAX_SCALE = 8
+
+
+def _bound_by_input(r: Reader, count: int, element: dict[str, Any], path: str) -> None:
+    """A declared count must be payable by the bytes still on the wire: any element that
+    carries payload costs at least one bit, so truncation cannot force a huge allocation."""
+    if count == 0 or not has_payload(element):
+        return
+    if count > r.remaining() * 8:
+        _dfail("limit", path, f"declared {count} items but only {r.remaining()} byte(s) remain")
 
 
 def _efail(code: str, path: str, message: str) -> None:
@@ -170,10 +179,12 @@ def _sig_bytes(x: int) -> int:
 
 
 class _Ctx:
-    __slots__ = ("max_depth", "columnar", "deflate", "inflate")
+    __slots__ = ("max_depth", "max_items", "max_byte_length", "columnar", "deflate", "inflate")
 
     def __init__(self, limits: Limits, columnar: bool, deflate, inflate) -> None:
         self.max_depth = limits.max_depth
+        self.max_items = limits.max_items
+        self.max_byte_length = limits.max_byte_length
         self.columnar = columnar
         self.deflate = deflate
         self.inflate = inflate
@@ -194,11 +205,15 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
         out += struct.pack("<d", _canon_float(value, path))
     elif kind == "string":
         data = _utf8(value, path)
+        if len(data) > ctx.max_byte_length:
+            _efail("limit", path, f"string of {len(data)} bytes exceeds the codec limit")
         write_uleb(out, len(data))
         out += data
     elif kind == "bytes":
         if not isinstance(value, (bytes, bytearray)):
             _efail("type", path, "expected bytes")
+        if len(value) > ctx.max_byte_length:
+            _efail("limit", path, f"bytes of {len(value)} exceeds the codec limit")
         write_uleb(out, len(value))
         out += value
     elif kind == "literal":
@@ -224,6 +239,8 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
             return
         if type(value) is not list:
             _efail("type", path, "expected array")
+        if len(value) > ctx.max_items:
+            _efail("limit", path, f"array of {len(value)} items exceeds the codec limit")
         length = node.get("length")
         if length is not None:
             if len(value) != length:
@@ -336,7 +353,7 @@ def _encode_string_column(out: bytearray, values: list[Any], path: str, ctx: _Ct
 
     packed = None
     packed_cost = math.inf
-    if ctx.deflate is not None:
+    if ctx.deflate is not None and ctx.inflate is not None:
         packed = ctx.deflate(b"".join(encoded))
         packed_cost = sum(uleb_len(len(b)) for b in encoded) + uleb_len(len(packed)) + len(packed)
 
@@ -488,6 +505,7 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             length = read_uleb(r)
         if length > r.limits.max_items:
             _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
+        _bound_by_input(r, length, node["element"], path)
         return [_decode_node(r, node["element"], f"{path}[{i}]", depth + 1, ctx) for i in range(length)]
     if kind == "struct":
         optional = [f for f in node["fields"] if f.get("optional")]
@@ -664,6 +682,7 @@ def _decode_columnar(r: Reader, node: dict[str, Any], path: str, depth: int, ctx
         length = read_uleb(r)
     if length > r.limits.max_items:
         _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
+    _bound_by_input(r, length, element, path)
     count = length
 
     rows: list[dict[str, Any]] = [{} for _ in range(count)]

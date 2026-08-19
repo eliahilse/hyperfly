@@ -1,6 +1,6 @@
 import { columnarEligible, decodeColumnarArray } from "./columnar.js";
 import { DecodeError } from "./errors.js";
-import type { IRNode } from "./ir.js";
+import { hasPayload, type IRNode } from "./ir.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, unzigzag } from "./varint.js";
 
@@ -44,6 +44,19 @@ export function readBitmap(r: Reader, count: number, path: string): boolean[] {
 }
 
 export type Inflate = (data: Uint8Array, maxOutputLength: number) => Uint8Array;
+
+/**
+ * A declared count must be payable by the bytes still on the wire: every element that
+ * carries any payload costs at least one bit, so a truncated body can never make a
+ * decoder allocate for millions of rows it will never read.
+ */
+export function boundByInput(r: Reader, count: number, element: IRNode, path: string): void {
+  if (count === 0 || !hasPayload(element)) return;
+  const affordable = r.remaining() * 8;
+  if (count > affordable) {
+    throw new DecodeError("limit", `${path}: declared ${count} items but only ${r.remaining()} byte(s) remain`);
+  }
+}
 
 export function decodeNode(
   r: Reader,
@@ -106,6 +119,7 @@ export function decodeNode(
       if (count > r.limits.maxItems) {
         fail("limit", path, `array count ${count} exceeds limit ${r.limits.maxItems}`);
       }
+      boundByInput(r, count, node.element, path);
       const out = new Array<unknown>(count);
       for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate);
       return out;
