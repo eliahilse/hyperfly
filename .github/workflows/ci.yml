@@ -27,3 +27,17 @@ jobs:
       - run: bun run check-types
 
       - run: bun run test
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install ./python[test]
+
+      - run: pytest python/tests -q

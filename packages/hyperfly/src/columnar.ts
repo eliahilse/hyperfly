@@ -147,13 +147,20 @@ function sigBytes(x: bigint): number {
 const POW10 = [1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000];
 const MAX_SCALE = POW10.length - 1;
 
+/** Spec-pinned mantissa recovery: sign(v) * floor(|v|*10^s + 0.5), pure IEEE ops. */
+function decimalMantissa(v: number, pow: number): number {
+  if (v > 0) return Math.floor(v * pow + 0.5);
+  if (v < 0) return -Math.floor(-v * pow + 0.5);
+  return 0;
+}
+
 /** Smallest s with every value exactly m/10^s for a safe integer m, or null. */
 function decimalScale(values: number[]): number | null {
   for (let s = 0; s <= MAX_SCALE; s++) {
     const pow = POW10[s]!;
     let ok = true;
     for (const v of values) {
-      const m = Math.round(v * pow);
+      const m = decimalMantissa(v, pow);
       if (!Number.isSafeInteger(m) || m / pow !== v) {
         ok = false;
         break;
@@ -190,7 +197,7 @@ function encodeFloatColumn(w: Writer, values: number[], path: string): void {
   let scaledRawCost = Infinity;
   let mantissas: bigint[] = [];
   if (scale !== null) {
-    mantissas = canon.map((v) => BigInt(Math.round(v * POW10[scale]!)));
+    mantissas = canon.map((v) => BigInt(decimalMantissa(v, POW10[scale]!)));
     scaledRawCost = 1 + mantissas.reduce((n, m) => n + ulebLen(zigzag(m)), 0);
     scaledDeltaCost = 1 + ulebLen(zigzag(mantissas[0]!));
     for (let i = 1; i < mantissas.length; i++) {

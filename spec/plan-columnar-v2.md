@@ -66,9 +66,11 @@ always agree.
   - `0x02` scaled-delta / `0x03` scaled-raw: a scale byte `d` (0–8, larger
     MUST be rejected), then mantissas `m[i] = v[i] · 10^d` — `svarint(m[0])`
     followed by `svarint(m[i] - m[i-1])` for `0x02`, or `svarint(m[i])` per
-    value for `0x03`. Encoders may choose these modes only when `d` is the
-    smallest scale for which every value satisfies
-    `round(v · 10^d) / 10^d == v` exactly with `m` in the integer domain;
+    value for `0x03`. The mantissa is pinned to pure IEEE 754 operations so
+    every language derives the same bytes:
+    `m = sign(v) · floor(|v| · 10^d + 0.5)`. Encoders may choose these modes
+    only when `d` is the smallest scale for which every value satisfies
+    `m / 10^d == v` exactly with `m` in the integer domain;
     decoding computes `Number(m) / 10^d`, which reproduces the encoder's
     doubles exactly because both sides perform one correctly-rounded IEEE 754
     division of the same integers. Mantissas outside the v0 integer domain
