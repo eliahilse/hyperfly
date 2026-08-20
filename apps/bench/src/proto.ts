@@ -206,3 +206,194 @@ export function feedProto(): ProtoCodec {
     }),
   );
 }
+
+const [ORDER_STATUS_TO, ORDER_STATUS_FROM] = enumMaps([
+  ["pending", "PENDING"], ["paid", "PAID"], ["packed", "PACKED"],
+  ["shipped", "SHIPPED"], ["delivered", "DELIVERED"], ["refunded", "REFUNDED"],
+]);
+const [CURRENCY_TO, CURRENCY_FROM] = enumMaps([
+  ["USD", "USD"], ["EUR", "EUR"], ["GBP", "GBP"], ["JPY", "JPY"], ["CHF", "CHF"],
+]);
+const [TIER_TO, TIER_FROM] = enumMaps([
+  ["free", "FREE"], ["standard", "STANDARD"], ["plus", "PLUS"], ["enterprise", "ENTERPRISE"],
+]);
+const [COUNTRY_TO, COUNTRY_FROM] = enumMaps([
+  ["US", "US"], ["GB", "GB"], ["DE", "DE"], ["FR", "FR"], ["JP", "JP"], ["CA", "CA"], ["AU", "AU"], ["NL", "NL"],
+]);
+
+export function ordersProto(): ProtoCodec {
+  const root = protobuf.Root.fromJSON({
+    nested: {
+      OrderStatus: {
+        values: {
+          ORDER_STATUS_UNSPECIFIED: 0, PENDING: 1, PAID: 2, PACKED: 3,
+          SHIPPED: 4, DELIVERED: 5, REFUNDED: 6,
+        },
+      },
+      Currency: { values: { CURRENCY_UNSPECIFIED: 0, USD: 1, EUR: 2, GBP: 3, JPY: 4, CHF: 5 } },
+      Tier: { values: { TIER_UNSPECIFIED: 0, FREE: 1, STANDARD: 2, PLUS: 3, ENTERPRISE: 4 } },
+      Country: {
+        values: {
+          COUNTRY_UNSPECIFIED: 0, US: 1, GB: 2, DE: 3, FR: 4, JP: 5, CA: 6, AU: 7, NL: 8,
+        },
+      },
+      Customer: {
+        fields: {
+          id: { type: "string", id: 1 },
+          name: { type: "string", id: 2 },
+          email: { type: "string", id: 3 },
+          tier: { type: "Tier", id: 4 },
+        },
+      },
+      Shipping: {
+        fields: {
+          country: { type: "Country", id: 1 },
+          city: { type: "string", id: 2 },
+          postcode: { type: "string", id: 3 },
+        },
+      },
+      Item: {
+        fields: {
+          sku: { type: "string", id: 1 },
+          title: { type: "string", id: 2 },
+          qty: { type: "int32", id: 3 },
+          unitPrice: { type: "double", id: 4 },
+          taxRate: { type: "double", id: 5 },
+        },
+      },
+      Order: {
+        fields: {
+          route: { type: "string", id: 1 },
+          id: { type: "string", id: 2 },
+          status: { type: "OrderStatus", id: 3 },
+          currency: { type: "Currency", id: 4 },
+          customer: { type: "Customer", id: 5 },
+          shipping: { type: "Shipping", id: 6 },
+          items: { rule: "repeated", type: "Item", id: 7 },
+          subtotal: { type: "double", id: 8 },
+          tax: { type: "double", id: 9 },
+          total: { type: "double", id: 10 },
+          placedAt: { type: "int64", id: 11 },
+          note: { type: "string", id: 12 },
+        },
+      },
+    },
+  });
+  type Customer = { tier: string } & Record<string, unknown>;
+  type Shipping = { country: string } & Record<string, unknown>;
+  type Payload = {
+    status: string;
+    currency: string;
+    customer: Customer;
+    shipping: Shipping;
+    note: string | null;
+  } & Record<string, unknown>;
+  return codec(
+    root,
+    "Order",
+    (p) => ({
+      ...(p as Payload),
+      status: ORDER_STATUS_TO[(p as Payload).status]!,
+      currency: CURRENCY_TO[(p as Payload).currency]!,
+      customer: { ...(p as Payload).customer, tier: TIER_TO[(p as Payload).customer.tier]! },
+      shipping: { ...(p as Payload).shipping, country: COUNTRY_TO[(p as Payload).shipping.country]! },
+      // notes are full sentences or null; the corpus never emits "", so unset round-trips as null
+      note: (p as Payload).note ?? "",
+    }),
+    (o) => ({
+      ...o,
+      status: ORDER_STATUS_FROM[o.status as string]!,
+      currency: CURRENCY_FROM[o.currency as string]!,
+      customer: { ...(o.customer as Customer), tier: TIER_FROM[(o.customer as Customer).tier]! },
+      shipping: { ...(o.shipping as Shipping), country: COUNTRY_FROM[(o.shipping as Shipping).country]! },
+      note: o.note === "" ? null : o.note,
+    }),
+  );
+}
+
+const [EVENT_TYPE_TO, EVENT_TYPE_FROM] = enumMaps([
+  ["user.login", "USER_LOGIN"], ["user.logout", "USER_LOGOUT"],
+  ["file.upload", "FILE_UPLOAD"], ["file.delete", "FILE_DELETE"],
+  ["billing.charge", "BILLING_CHARGE"], ["billing.refund", "BILLING_REFUND"],
+  ["project.create", "PROJECT_CREATE"], ["project.archive", "PROJECT_ARCHIVE"],
+  ["member.invite", "MEMBER_INVITE"], ["member.remove", "MEMBER_REMOVE"],
+]);
+const [RESOURCE_TYPE_TO, RESOURCE_TYPE_FROM] = enumMaps([
+  ["user", "USER"], ["file", "FILE"], ["project", "PROJECT"],
+  ["invoice", "INVOICE"], ["member", "MEMBER"], ["apikey", "APIKEY"],
+]);
+
+export function eventsProto(): ProtoCodec {
+  const root = protobuf.Root.fromJSON({
+    nested: {
+      EventType: {
+        values: {
+          EVENT_TYPE_UNSPECIFIED: 0, USER_LOGIN: 1, USER_LOGOUT: 2, FILE_UPLOAD: 3, FILE_DELETE: 4,
+          BILLING_CHARGE: 5, BILLING_REFUND: 6, PROJECT_CREATE: 7, PROJECT_ARCHIVE: 8,
+          MEMBER_INVITE: 9, MEMBER_REMOVE: 10,
+        },
+      },
+      ResourceType: {
+        values: {
+          RESOURCE_TYPE_UNSPECIFIED: 0, USER: 1, FILE: 2, PROJECT: 3, INVOICE: 4, MEMBER: 5, APIKEY: 6,
+        },
+      },
+      Region: {
+        values: {
+          REGION_UNSPECIFIED: 0, US_EAST: 1, US_WEST: 2, EU_CENTRAL: 3, EU_WEST: 4,
+          AP_SOUTH: 5, AP_NORTHEAST: 6, SA_EAST: 7, AF_SOUTH: 8,
+        },
+      },
+      Event: {
+        fields: {
+          id: { type: "string", id: 1 },
+          type: { type: "EventType", id: 2 },
+          actorId: { type: "string", id: 3 },
+          actorEmail: { type: "string", id: 4 },
+          resourceId: { type: "string", id: 5 },
+          resourceType: { type: "ResourceType", id: 6 },
+          ip: { type: "string", id: 7 },
+          userAgent: { type: "string", id: 8 },
+          region: { type: "Region", id: 9 },
+          durationMs: { type: "int32", id: 10 },
+          ok: { type: "bool", id: 11 },
+          at: { type: "int64", id: 12 },
+        },
+      },
+      EventsResponse: {
+        fields: {
+          route: { type: "string", id: 1 },
+          cursor: { type: "string", id: 2 },
+          events: { rule: "repeated", type: "Event", id: 3 },
+        },
+      },
+    },
+  });
+  type Event = { type: string; resourceType: string; region: string } & Record<string, unknown>;
+  type Payload = { cursor: string | null; events: Event[] } & Record<string, unknown>;
+  return codec(
+    root,
+    "EventsResponse",
+    (p) => ({
+      ...(p as Payload),
+      // cursors are 16 hex chars or absent; the corpus never emits "", so unset round-trips as null
+      cursor: (p as Payload).cursor ?? "",
+      events: (p as Payload).events.map((e) => ({
+        ...e,
+        type: EVENT_TYPE_TO[e.type]!,
+        resourceType: RESOURCE_TYPE_TO[e.resourceType]!,
+        region: REGION_TO[e.region]!,
+      })),
+    }),
+    (o) => ({
+      ...o,
+      cursor: o.cursor === "" ? null : o.cursor,
+      events: (o.events as Event[]).map((e) => ({
+        ...e,
+        type: EVENT_TYPE_FROM[e.type]!,
+        resourceType: RESOURCE_TYPE_FROM[e.resourceType]!,
+        region: REGION_FROM[e.region]!,
+      })),
+    }),
+  );
+}

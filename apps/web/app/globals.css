@@ -465,7 +465,7 @@ h3 {
 
 .bar {
   display: grid;
-  grid-template-columns: 10.5rem minmax(0, 1fr) 6rem 3rem;
+  grid-template-columns: 12rem minmax(0, 1fr) 6rem 3rem;
   align-items: center;
   gap: 14px;
   padding: 7px 0;
@@ -518,12 +518,17 @@ h3 {
 }
 
 .bar[data-kind="profile"] .bar-fill {
-  background: rgba(95, 217, 255, 0.62);
-  box-shadow: 0 0 26px rgba(95, 217, 255, 0.28);
+  background: rgba(95, 217, 255, 0.55);
+}
+
+.bar[data-kind="full"] .bar-fill {
+  background: rgba(95, 217, 255, 0.85);
+  box-shadow: 0 0 26px rgba(95, 217, 255, 0.3);
 }
 
 .bar[data-kind="hyperfly"] .bar-label,
-.bar[data-kind="profile"] .bar-label {
+.bar[data-kind="profile"] .bar-label,
+.bar[data-kind="full"] .bar-label {
   color: var(--text);
 }
 
@@ -544,7 +549,8 @@ h3 {
 }
 
 .bar[data-kind="hyperfly"] .bar-ratio,
-.bar[data-kind="profile"] .bar-ratio {
+.bar[data-kind="profile"] .bar-ratio,
+.bar[data-kind="full"] .bar-ratio {
   color: var(--accent);
 }
 
