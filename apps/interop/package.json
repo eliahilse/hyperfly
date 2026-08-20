@@ -1,0 +1,22 @@
+{
+  "name": "@hyperfly/interop",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "serve": "bun server.ts",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0"
+  },
+  "dependencies": {
+    "hyperfly": "workspace:*",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@repo/eslint-config": "*",
+    "@repo/typescript-config": "*",
+    "@types/bun": "^1.2.0",
+    "eslint": "^9.39.1",
+    "typescript": "5.9.2"
+  }
+}

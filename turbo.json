@@ -41,5 +41,8 @@
       ],
       "outputs": []
     }
-  }
+  },
+  "globalEnv": [
+    "PORT"
+  ]
 }

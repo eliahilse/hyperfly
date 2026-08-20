@@ -54,3 +54,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - run: cargo test --manifest-path rust/Cargo.toml
+
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build --filter=hyperfly
+
+      - run: pip install ./python
+
+      # a TypeScript server and a Python client over the real protocol: the proof
+      # the golden vectors imply but cannot demonstrate
+      - name: cross-language interop
+        run: |
+          bun apps/interop/server.ts &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8787/fingerprints > /dev/null && break
+            sleep 1
+          done
+          python apps/interop/client.py
