@@ -32,7 +32,8 @@
     "build": "tsc -p tsconfig.build.json",
     "check-types": "tsc --noEmit",
     "lint": "eslint --max-warnings 0",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "bun run lint && bun run check-types && bun test && bun run build"
   },
   "peerDependencies": {
     "zod": "^4.0.0"
@@ -49,5 +50,25 @@
     "eslint": "^9.39.1",
     "typescript": "5.9.2",
     "zod": "^4.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "binary",
+    "compression",
+    "serialization",
+    "codec",
+    "zod",
+    "schema",
+    "protobuf",
+    "msgpack",
+    "cbor",
+    "api"
+  ],
+  "homepage": "https://hyperfly.dev",
+  "bugs": {
+    "url": "https://github.com/eliahilse/hyperfly/issues"
   }
 }
