@@ -6,7 +6,7 @@ import { useInView } from "./reveal";
 type Row = {
   label: string;
   bytes: number;
-  kind?: "baseline" | "generic" | "binary" | "hyperfly" | "profile";
+  kind?: "baseline" | "generic" | "binary" | "hyperfly" | "profile" | "full";
 };
 
 type Payload = {
@@ -18,43 +18,74 @@ type Payload = {
 
 const PAYLOADS: Payload[] = [
   {
-    route: "GET /v1/candles",
-    shape: "1 000 OHLCV rows · 7 numeric columns · monotonic timestamps",
+    route: "GET /v1/events",
+    shape: "500 messages · 20–50 audit records each · recurring actors and user agents",
     rows: [
-      { label: "JSON", bytes: 88209, kind: "baseline" },
-      { label: "JSON + gzip", bytes: 21705, kind: "generic" },
-      { label: "JSON + Brotli — edge q4", bytes: 21315, kind: "generic" },
-      { label: "Protobuf", bytes: 56996, kind: "binary" },
-      { label: "Hyperfly · columnar", bytes: 12628, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 7915, kind: "profile" },
+      { label: "JSON", bytes: 12687, kind: "baseline" },
+      { label: "JSON + gzip", bytes: 2503, kind: "generic" },
+      { label: "JSON + Brotli — edge q4", bytes: 2512, kind: "generic" },
+      { label: "Protobuf", bytes: 7190, kind: "binary" },
+      { label: "Hyperfly · columnar", bytes: 2109, kind: "hyperfly" },
+      { label: "Hyperfly · profiled", bytes: 896, kind: "profile" },
+      { label: "Hyperfly · full", bytes: 823, kind: "full" },
     ],
-    note: "Columns ride separately: timestamps become deltas, and prices that are exact decimals travel as integer mantissas instead of eight raw bytes. No entropy coder is involved yet — layout alone, uncompressed, undercuts what the edge actually serves. It clears Brotli's offline q11 ceiling too; the harness in the repo has the receipts.",
+    note: "An audit log repeats itself across requests, not within one: the same user agents, the same actor emails, the same resource ids, request after request. A compressor only ever sees one response and has to rediscover them every time. The profile learned 692 values once, and pays for itself after ten requests.",
   },
   {
     route: "GET /v1/devices",
-    shape: "500 telemetry records · enums · bounded integers · repeated ids",
+    shape: "500 messages · 20–50 telemetry records each · fixed 400-device fleet",
     rows: [
-      { label: "JSON", bytes: 113443, kind: "baseline" },
-      { label: "JSON + gzip", bytes: 17026, kind: "generic" },
-      { label: "JSON + Brotli — edge q4", bytes: 16823, kind: "generic" },
-      { label: "Protobuf", bytes: 29056, kind: "binary" },
-      { label: "Hyperfly · columnar", bytes: 11945, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 9726, kind: "profile" },
+      { label: "JSON", bytes: 7994, kind: "baseline" },
+      { label: "JSON + gzip", bytes: 1473, kind: "generic" },
+      { label: "JSON + Brotli — edge q4", bytes: 1422, kind: "generic" },
+      { label: "Protobuf", bytes: 2007, kind: "binary" },
+      { label: "Hyperfly · columnar", bytes: 896, kind: "hyperfly" },
+      { label: "Hyperfly · profiled", bytes: 705, kind: "profile" },
+      { label: "Hyperfly · full", bytes: 638, kind: "full" },
     ],
-    note: "An enum with six members is an index, not a string. Bounded integers ship as offsets from their declared minimum, booleans pack into bitmaps, and repetitive id columns deflate inside the codec — so the uncompressed wire already undercuts what the edge serves.",
+    note: "An enum with six members is an index, not a string. Bounded integers ship as offsets from their declared minimum and booleans pack into bitmaps — that is the columnar row. The profile then learns the fleet: the device ids that recur on every page.",
+  },
+  {
+    route: "GET /v1/orders/:id",
+    shape: "500 messages · one order each · fixed catalogue and customer base",
+    rows: [
+      { label: "JSON", bytes: 782, kind: "baseline" },
+      { label: "JSON + gzip", bytes: 423, kind: "generic" },
+      { label: "JSON + Brotli — edge q4", bytes: 408, kind: "generic" },
+      { label: "Protobuf", bytes: 388, kind: "binary" },
+      { label: "Hyperfly · columnar", bytes: 271, kind: "hyperfly" },
+      { label: "Hyperfly · profiled", bytes: 184, kind: "profile" },
+      { label: "Hyperfly · full", bytes: 188, kind: "full" },
+    ],
+    note: "The single-entity response, and the case a general compressor handles worst: under a kilobyte there is nothing yet to build a window from. Note that full is larger than profiled here — at 184 bytes, Brotli's framing costs more than it saves, so the right configuration for this route is to skip it.",
   },
   {
     route: "GET /v1/feed",
-    shape: "50 posts · nested authors · free-form text bodies",
+    shape: "500 messages · 10–25 posts each · recurring cast of 120 authors",
     rows: [
-      { label: "JSON", bytes: 22245, kind: "baseline" },
-      { label: "JSON + gzip", bytes: 7775, kind: "generic" },
-      { label: "JSON + Brotli — edge q4", bytes: 7691, kind: "generic" },
-      { label: "Protobuf", bytes: 15232, kind: "binary" },
-      { label: "Hyperfly · columnar", bytes: 6513, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 6443, kind: "profile" },
+      { label: "JSON", bytes: 6863, kind: "baseline" },
+      { label: "JSON + gzip", bytes: 2307, kind: "generic" },
+      { label: "JSON + Brotli — edge q4", bytes: 2294, kind: "generic" },
+      { label: "Protobuf", bytes: 4396, kind: "binary" },
+      { label: "Hyperfly · columnar", bytes: 1908, kind: "hyperfly" },
+      { label: "Hyperfly · profiled", bytes: 1536, kind: "profile" },
+      { label: "Hyperfly · full", bytes: 1535, kind: "full" },
     ],
-    note: "Prose does not vanish under a schema — so text columns pack through deflate inside the codec, with shared context across every row, and unpack bit-exactly. Structure travels as columns around them. The all-text route now lands ahead of Brotli's offline ceiling instead of behind it.",
+    note: "Prose is the hard case: the bodies are genuinely new every time and nothing can invent redundancy that is not there. What does recur are the authors, so that is what the profile takes. Full and profiled land within a byte of each other because the dictionary already removed what Brotli was living on.",
+  },
+  {
+    route: "GET /v1/candles",
+    shape: "500 messages · 20–50 OHLCV rows each · monotonic timestamps",
+    rows: [
+      { label: "JSON", bytes: 3225, kind: "baseline" },
+      { label: "JSON + gzip", bytes: 928, kind: "generic" },
+      { label: "JSON + Brotli — edge q4", bytes: 842, kind: "generic" },
+      { label: "Protobuf", bytes: 2034, kind: "binary" },
+      { label: "Hyperfly · columnar", bytes: 496, kind: "hyperfly" },
+      { label: "Hyperfly · profiled", bytes: 496, kind: "profile" },
+      { label: "Hyperfly · full", bytes: 372, kind: "full" },
+    ],
+    note: "Timestamps become deltas and exact-decimal prices travel as integer mantissas rather than eight raw bytes. The profile changes nothing at all here, and the row is left in to show it: this route's only string sits outside the array, so there is no column for a dictionary to key on.",
   },
 ];
 
@@ -137,7 +168,7 @@ export function Benchmark() {
             </button>
           ))}
         </div>
-        <span className="bench-flag">measured — synthetic corpora, reference implementation</span>
+        <span className="bench-flag">measured — per message, 500-message corpora</span>
       </div>
 
       <p className="bench-shape">{payload.shape}</p>

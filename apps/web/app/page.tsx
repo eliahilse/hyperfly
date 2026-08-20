@@ -163,13 +163,14 @@ export default function Home() {
 
           <Reveal delay={120}>
             <p className="footnote">
-              Measured with the TypeScript reference implementation on deterministic synthetic
-              corpora — reproduce with `bun run bench` in the repo. The Brotli row is q4, the
-              level edges actually run on dynamic responses; q6 (nginx&apos;s default) and the q11
-              offline ceiling are in the harness — and uncompressed columnar output clears even
-              q11 on all three corpora. Protobuf gets proper enums and int64. Results still
-              depend on the payload; the feed tab is where the margin is thinnest, and it says
-              why.
+              Bytes per message, averaged over 500 independent responses per route, measured
+              with the TypeScript reference implementation — reproduce with `bun run bench`. The
+              profile is trained on the route&apos;s own traffic, which is what a deployment does;
+              it is an out-of-band artifact, and the repo reports its size and how many requests
+              it takes to pay for itself (ten for events, thirty-five for orders). The Brotli row
+              is q4, the level edges actually run on dynamic responses. Protobuf gets proper
+              enums and int64. Corpora are synthetic but shaped like real routes: a fixed device
+              fleet, a fixed product catalogue, a recurring cast of authors.
             </p>
           </Reveal>
         </section>

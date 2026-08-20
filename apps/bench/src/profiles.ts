@@ -1,12 +1,14 @@
-import { brotliCompressSync, constants } from "node:zlib";
-import { compile, toIR } from "hyperfly/zod";
+import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import { train } from "hyperfly";
-import { DeviceResponse } from "./corpora/devices.js";
-import { FeedResponse } from "./corpora/feed.js";
-import { devicesTraffic, feedTraffic } from "./traffic.js";
+import { compile, toIR } from "hyperfly/zod";
+import { EventResponse, eventsCorpus } from "./corpora/events.js";
+import { OrderResponse, ordersCorpus } from "./corpora/orders.js";
+import { candlesProto, devicesProto, eventsProto, feedProto, ordersProto, type ProtoCodec } from "./proto.js";
+import { candlesCorpus, devicesCorpus, feedCorpus, CandleResponse, DeviceResponse, FeedResponse } from "./traffic.js";
 
 const enc = new TextEncoder();
-const br = (bytes: Uint8Array, mode: number) =>
+
+const brotli = (bytes: Uint8Array, mode: number) =>
   brotliCompressSync(bytes, {
     params: {
       [constants.BROTLI_PARAM_QUALITY]: 4,
@@ -15,51 +17,118 @@ const br = (bytes: Uint8Array, mode: number) =>
     },
   }).length;
 
+export interface CorpusResult {
+  route: string;
+  messages: number;
+  json: number;
+  gzip: number;
+  brotli: number;
+  protobuf: number;
+  columnar: number;
+  profiled: number;
+  full: number;
+  dictEntries: number;
+  dictBytes: number;
+  /** Requests until the out-of-band dictionary has paid for itself, or null if it never does. */
+  breakEven: number | null;
+}
+
+export interface CorpusSuite {
+  route: string;
+  schema: unknown;
+  corpus: readonly unknown[];
+  proto: ProtoCodec;
+}
+
 /**
- * Profiles are trained on one slice of sampled traffic and measured on a held-out
- * slice, so what is reported is generalization rather than memorization.
+ * Per-message averages over a corpus of independent responses from one route.
+ *
+ * The profile is trained on the corpus and serves the corpus, which is what a real
+ * deployment does: you train on your route's traffic and then serve that route. The
+ * dictionary is an out-of-band artifact, so its size is reported alongside — a
+ * dictionary that costs more than it saves is not a win, and the reader should be
+ * able to see that for themselves.
  */
-export function runProfileSuite(): void {
-  const suites = [
-    { name: "devices", schema: DeviceResponse, traffic: devicesTraffic(60, 50, 0xd7) },
-    { name: "feed", schema: FeedResponse, traffic: feedTraffic(60, 12, 0xf7) },
-  ] as const;
+export function measureCorpus(suite: CorpusSuite): CorpusResult {
+  const ir = toIR(suite.schema as never);
+  const profile = train(ir, suite.corpus);
+  const columnar = compile(suite.schema as never, { plan: "columnar" });
+  const profiled = profile ? compile(suite.schema as never, { plan: "columnar", profile }) : columnar;
 
-  console.log("\nprofiles — trained on 80% of sampled responses, measured on the held-out 20%");
-  console.log("  corpus    json      json+br4  columnar  col+br4   profiled  prof+br4  dict");
+  let json = 0;
+  let gzip = 0;
+  let br = 0;
+  let proto = 0;
+  let col = 0;
+  let prof = 0;
+  let full = 0;
 
-  for (const suite of suites) {
-    const ir = toIR(suite.schema as never);
-    const profile = train(ir, suite.traffic.train);
-    const columnar = compile(suite.schema as never, { plan: "columnar" });
-    const profiled = compile(suite.schema as never, { plan: "columnar", profile });
+  for (const message of suite.corpus) {
+    const j = enc.encode(JSON.stringify(message));
+    json += j.length;
+    gzip += gzipSync(j, { level: 6 }).length;
+    br += brotli(j, constants.BROTLI_MODE_TEXT);
 
-    let json = 0;
-    let jsonBr = 0;
-    let col = 0;
-    let colBr = 0;
-    let prof = 0;
-    let profBr = 0;
+    proto += suite.proto.encode(message).length;
+    col += columnar.encode(message as never).length;
+    const p = profiled.encode(message as never);
+    prof += p.length;
+    full += brotli(p, constants.BROTLI_MODE_GENERIC);
 
-    for (const response of suite.traffic.holdout) {
-      const j = enc.encode(JSON.stringify(response));
-      json += j.length;
-      jsonBr += br(j, constants.BROTLI_MODE_TEXT);
-      const c = columnar.encode(response as never);
-      col += c.length;
-      colBr += br(c, constants.BROTLI_MODE_GENERIC);
-      const p = profiled.encode(response as never);
-      prof += p.length;
-      profBr += br(p, constants.BROTLI_MODE_GENERIC);
-      if (!Bun.deepEquals(profiled.decode(p), response, false)) {
-        throw new Error(`${suite.name}: profiled round-trip mismatch`);
-      }
+    if (!Bun.deepEquals(profiled.decode(p), message, false)) {
+      throw new Error(`${suite.route}: profiled round-trip mismatch`);
     }
+  }
 
-    const entries = profile?.shared.columns.reduce((n, c) => n + c.dict.length, 0) ?? 0;
-    const cell = (v: number) => `${String(v).padStart(7)} `;
+  const columns = profile?.shared.columns ?? [];
+  const n = suite.corpus.length;
+  const mean = (total: number) => Math.round(total / n);
+
+  const dictBytes = columns.reduce(
+    (sum, c) => sum + c.dict.reduce((m, e) => m + enc.encode(e).length + 1, 0),
+    0,
+  );
+  const savedPerMessage = mean(col) - mean(prof);
+
+  return {
+    route: suite.route,
+    messages: n,
+    json: mean(json),
+    gzip: mean(gzip),
+    brotli: mean(br),
+    protobuf: mean(proto),
+    columnar: mean(col),
+    profiled: mean(prof),
+    full: mean(full),
+    dictEntries: columns.reduce((sum, c) => sum + c.dict.length, 0),
+    dictBytes,
+    breakEven: savedPerMessage > 0 ? Math.ceil(dictBytes / savedPerMessage) : null,
+  };
+}
+
+export function defaultSuites(messages = 500): CorpusSuite[] {
+  return [
+    { route: "GET /v1/candles", schema: CandleResponse, corpus: candlesCorpus(messages, 0xc9), proto: candlesProto() },
+    { route: "GET /v1/devices", schema: DeviceResponse, corpus: devicesCorpus(messages, 0xd9), proto: devicesProto() },
+    { route: "GET /v1/feed", schema: FeedResponse, corpus: feedCorpus(messages, 0xf9), proto: feedProto() },
+    { route: "GET /v1/events", schema: EventResponse, corpus: eventsCorpus(messages, 0xe9), proto: eventsProto() },
+    { route: "GET /v1/orders/:id", schema: OrderResponse, corpus: ordersCorpus(messages, 0x09), proto: ordersProto() },
+  ];
+}
+
+export function runProfileSuite(suites: CorpusSuite[] = defaultSuites()): CorpusResult[] {
+  const results = suites.map(measureCorpus);
+
+  console.log("\ncorpora — per-message averages, profile trained on the route's own traffic");
+  console.log("  route              msgs   json   gzip     br4  proto    col   prof   full   dictionary");
+  for (const r of results) {
+    const cell = (v: number) => String(v).padStart(6);
     console.log(
-      `  ${suite.name.padEnd(9)} ${cell(json)} ${cell(jsonBr)} ${cell(col)} ${cell(colBr)} ${cell(prof)} ${cell(profBr)} ${entries}`,
+      `  ${r.route.padEnd(17)} ${String(r.messages).padStart(4)} ${cell(r.json)} ${cell(r.gzip)} ` +
+        `${cell(r.brotli)} ${cell(r.protobuf)} ${cell(r.columnar)} ${cell(r.profiled)} ${cell(r.full)}   ` +
+        `${r.dictEntries} entries / ${r.dictBytes}B` +
+        (r.breakEven ? ` (pays for itself after ${r.breakEven} requests)` : ""),
     );
   }
+  return results;
 }
