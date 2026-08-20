@@ -105,9 +105,15 @@ export default function Home() {
                 github
                 <span aria-hidden="true">↗</span>
               </a>
-              <span className="button ghost" aria-disabled="true">
-                docs — soon
-              </span>
+              <a
+                className="button"
+                href={`${GITHUB}#readme`}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                docs
+                <span aria-hidden="true">↗</span>
+              </a>
             </div>
           </div>
           <div className="hero-rule" aria-hidden="true" />
