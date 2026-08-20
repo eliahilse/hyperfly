@@ -164,13 +164,14 @@ export default function Home() {
           <Reveal delay={120}>
             <p className="footnote">
               Bytes per message, averaged over 500 independent responses per route, measured
-              with the TypeScript reference implementation — reproduce with `bun run bench`. The
-              profile is trained on the route&apos;s own traffic, which is what a deployment does;
-              it is an out-of-band artifact, and the repo reports its size and how many requests
-              it takes to pay for itself (ten for events, thirty-five for orders). The Brotli row
-              is q4, the level edges actually run on dynamic responses. Protobuf gets proper
-              enums and int64. Corpora are synthetic but shaped like real routes: a fixed device
-              fleet, a fixed product catalogue, a recurring cast of authors.
+              with the TypeScript reference implementation — reproduce with `bun run bench`. Each
+              Hyperfly row adds exactly one thing: schema-compiled layout, then generic
+              compression on top of it, then a dictionary trained on the route&apos;s own traffic.
+              That dictionary is an out-of-band artifact; the repo reports its size and how many
+              requests it takes to pay for itself — ten for events, thirty-five for orders. The
+              Brotli rows are q4, the level edges actually run on dynamic responses. Protobuf
+              gets proper enums and int64. Corpora are synthetic but shaped like real routes: a
+              fixed device fleet, a fixed product catalogue, a recurring cast of authors.
             </p>
           </Reveal>
         </section>
