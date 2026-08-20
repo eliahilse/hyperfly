@@ -1,3 +1,4 @@
+from .registry import CodecRegistry
 from ._codec import Codec, HEADER_SIZE, MAGIC, WIRE_VERSION, compile_ir
 from ._ir import fingerprint_of, serialize_artifact, serialize_node, validate_ir
 from ._wire import (
@@ -14,6 +15,7 @@ from ._wire import (
 
 __all__ = [
     "Codec",
+    "CodecRegistry",
     "DEFAULT_LIMITS",
     "DecodeError",
     "EncodeError",

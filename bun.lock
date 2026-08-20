@@ -27,6 +27,21 @@
         "typescript": "5.9.2",
       },
     },
+    "apps/interop": {
+      "name": "@hyperfly/interop",
+      "version": "0.0.0",
+      "dependencies": {
+        "hyperfly": "workspace:*",
+        "zod": "^4.0.0",
+      },
+      "devDependencies": {
+        "@repo/eslint-config": "*",
+        "@repo/typescript-config": "*",
+        "@types/bun": "^1.2.0",
+        "eslint": "^9.39.1",
+        "typescript": "5.9.2",
+      },
+    },
     "apps/web": {
       "name": "@hyperfly/web",
       "version": "0.1.0",
@@ -322,6 +337,8 @@
     "@humanwhocodes/retry": ["@humanwhocodes/retry@0.4.3", "", {}, "sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ=="],
 
     "@hyperfly/bench": ["@hyperfly/bench@workspace:apps/bench"],
+
+    "@hyperfly/interop": ["@hyperfly/interop@workspace:apps/interop"],
 
     "@hyperfly/lb": ["@hyperfly/lb@workspace:packages/lb"],
 

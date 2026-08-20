@@ -3,6 +3,7 @@ export { defaultPackHooks } from "./pack.js";
 export { serializeArtifact, serializeNode, fingerprintOf, toHex, type PlanLayout } from "./canonical.js";
 export { columnarEligible } from "./columnar.js";
 export { train, type TrainOptions } from "./train.js";
+export { CodecRegistry } from "./registry.js";
 export {
   enumerateColumns,
   validateProfile,
