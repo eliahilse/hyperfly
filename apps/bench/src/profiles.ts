@@ -25,6 +25,7 @@ export interface CorpusResult {
   brotli: number;
   protobuf: number;
   columnar: number;
+  columnarBrotli: number;
   profiled: number;
   full: number;
   dictEntries: number;
@@ -60,6 +61,7 @@ export function measureCorpus(suite: CorpusSuite): CorpusResult {
   let br = 0;
   let proto = 0;
   let col = 0;
+  let colBr = 0;
   let prof = 0;
   let full = 0;
 
@@ -70,7 +72,9 @@ export function measureCorpus(suite: CorpusSuite): CorpusResult {
     br += brotli(j, constants.BROTLI_MODE_TEXT);
 
     proto += suite.proto.encode(message).length;
-    col += columnar.encode(message as never).length;
+    const c = columnar.encode(message as never);
+    col += c.length;
+    colBr += brotli(c, constants.BROTLI_MODE_GENERIC);
     const p = profiled.encode(message as never);
     prof += p.length;
     full += brotli(p, constants.BROTLI_MODE_GENERIC);
@@ -98,6 +102,7 @@ export function measureCorpus(suite: CorpusSuite): CorpusResult {
     brotli: mean(br),
     protobuf: mean(proto),
     columnar: mean(col),
+    columnarBrotli: mean(colBr),
     profiled: mean(prof),
     full: mean(full),
     dictEntries: columns.reduce((sum, c) => sum + c.dict.length, 0),
@@ -120,12 +125,12 @@ export function runProfileSuite(suites: CorpusSuite[] = defaultSuites()): Corpus
   const results = suites.map(measureCorpus);
 
   console.log("\ncorpora — per-message averages, profile trained on the route's own traffic");
-  console.log("  route              msgs   json   gzip     br4  proto    col   prof   full   dictionary");
+  console.log("  route              msgs   json    br4  proto    col col+br   prof   full   dictionary");
   for (const r of results) {
     const cell = (v: number) => String(v).padStart(6);
     console.log(
-      `  ${r.route.padEnd(17)} ${String(r.messages).padStart(4)} ${cell(r.json)} ${cell(r.gzip)} ` +
-        `${cell(r.brotli)} ${cell(r.protobuf)} ${cell(r.columnar)} ${cell(r.profiled)} ${cell(r.full)}   ` +
+      `  ${r.route.padEnd(17)} ${String(r.messages).padStart(4)} ${cell(r.json)} ` +
+        `${cell(r.brotli)} ${cell(r.protobuf)} ${cell(r.columnar)} ${cell(r.columnarBrotli)} ${cell(r.profiled)} ${cell(r.full)}   ` +
         `${r.dictEntries} entries / ${r.dictBytes}B` +
         (r.breakEven ? ` (pays for itself after ${r.breakEven} requests)` : ""),
     );
