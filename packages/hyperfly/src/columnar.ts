@@ -59,6 +59,67 @@ function bitsToFloat(bits: bigint): number {
 
 const NEG_ZERO_BITS = 0x8000000000000000n;
 
+const MAX_WIDTH = 56;
+
+/** Bits needed for an unsigned value; zero for zero, so a constant column packs to nothing. */
+function bitWidth(max: bigint): number {
+  let w = 0;
+  let v = max;
+  while (v > 0n) {
+    v >>= 1n;
+    w++;
+  }
+  return w;
+}
+
+function packedBytes(count: number, width: number): number {
+  return Math.ceil((count * width) / 8);
+}
+
+/** Spec §3.1: little-endian bit stream, value i at bits [i*w, (i+1)*w). */
+function packBits(w: Writer, values: readonly bigint[], width: number): void {
+  if (width === 0) return;
+  let acc = 0n;
+  let bits = 0;
+  for (const value of values) {
+    acc |= value << BigInt(bits);
+    bits += width;
+    while (bits >= 8) {
+      w.u8(Number(acc & 0xffn));
+      acc >>= 8n;
+      bits -= 8;
+    }
+  }
+  if (bits > 0) w.u8(Number(acc & 0xffn));
+}
+
+function unpackBits(r: Reader, count: number, width: number, path: string): bigint[] {
+  if (width > MAX_WIDTH) {
+    throw new DecodeError("marker", `${path}: bit width ${width} exceeds ${MAX_WIDTH}`);
+  }
+  if (width === 0) return new Array<bigint>(count).fill(0n);
+  const bytes = r.bytes(packedBytes(count, width));
+  const mask = (1n << BigInt(width)) - 1n;
+  const out: bigint[] = new Array<bigint>(count);
+  let acc = 0n;
+  let bits = 0;
+  let index = 0;
+  for (let i = 0; i < count; i++) {
+    while (bits < width) {
+      acc |= BigInt(bytes[index++] ?? 0) << BigInt(bits);
+      bits += 8;
+    }
+    out[i] = acc & mask;
+    acc >>= BigInt(width);
+    bits -= width;
+  }
+  // leftover bits are padding and must be zero, or one value would have two encodings
+  if (acc !== 0n) {
+    throw new DecodeError("bitmap", `${path}: nonzero bit-packing padding`);
+  }
+  return out;
+}
+
 function intForm(node: IntNode, value: number): bigint {
   return node.min !== undefined ? BigInt(value) - BigInt(node.min) : zigzag(BigInt(value));
 }
@@ -81,26 +142,64 @@ function encodeIntColumn(w: Writer, node: IntNode, values: number[]): void {
     w.u8(0);
     return;
   }
+  const exact = values.map((v) => BigInt(v));
   const forms = values.map((v) => intForm(node, v));
   const diffs: bigint[] = [];
-  for (let i = 1; i < values.length; i++) {
-    diffs.push(zigzag(BigInt(values[i]!) - BigInt(values[i - 1]!)));
-  }
+  for (let i = 1; i < exact.length; i++) diffs.push(exact[i]! - exact[i - 1]!);
+
   const rawCost = forms.reduce((n, f) => n + ulebLen(f), 0);
-  const deltaCost = ulebLen(forms[0]!) + diffs.reduce((n, d) => n + ulebLen(d), 0);
-  if (deltaCost < rawCost) {
-    w.u8(1);
-    writeUleb(w, forms[0]!);
-    for (const d of diffs) writeUleb(w, d);
-  } else {
-    w.u8(0);
-    for (const f of forms) writeUleb(w, f);
+  const deltaCost = ulebLen(forms[0]!) + diffs.reduce((n, d) => n + ulebLen(zigzag(d)), 0);
+
+  // frame of reference: subtract the column minimum, then spend only the bits the
+  // remaining span needs rather than a whole number of bytes per value
+  const forBase = exact.reduce((m, v) => (v < m ? v : m), exact[0]!);
+  const forWidth = bitWidth(exact.reduce((m, v) => (v - forBase > m ? v - forBase : m), 0n));
+  const forCost =
+    forWidth > MAX_WIDTH
+      ? Infinity
+      : ulebLen(zigzag(forBase)) + 1 + packedBytes(exact.length, forWidth);
+
+  let deltaForCost = Infinity;
+  let deltaBase = 0n;
+  let deltaWidth = 0;
+  if (diffs.length > 0) {
+    deltaBase = diffs.reduce((m, d) => (d < m ? d : m), diffs[0]!);
+    deltaWidth = bitWidth(diffs.reduce((m, d) => (d - deltaBase > m ? d - deltaBase : m), 0n));
+    if (deltaWidth <= MAX_WIDTH) {
+      deltaForCost =
+        ulebLen(forms[0]!) + ulebLen(zigzag(deltaBase)) + 1 + packedBytes(diffs.length, deltaWidth);
+    }
   }
+
+  const best = Math.min(rawCost, deltaCost, forCost, deltaForCost);
+  if (best === rawCost) {
+    w.u8(0x00);
+    for (const f of forms) writeUleb(w, f);
+    return;
+  }
+  if (best === deltaCost) {
+    w.u8(0x01);
+    writeUleb(w, forms[0]!);
+    for (const d of diffs) writeUleb(w, zigzag(d));
+    return;
+  }
+  if (best === forCost) {
+    w.u8(0x02);
+    writeUleb(w, zigzag(forBase));
+    w.u8(forWidth);
+    packBits(w, exact.map((v) => v - forBase), forWidth);
+    return;
+  }
+  w.u8(0x03);
+  writeUleb(w, forms[0]!);
+  writeUleb(w, zigzag(deltaBase));
+  w.u8(deltaWidth);
+  packBits(w, diffs.map((d) => d - deltaBase), deltaWidth);
 }
 
 function decodeIntColumn(r: Reader, node: IntNode, count: number, path: string): number[] {
   const mode = r.u8();
-  if (mode > 1) throw new DecodeError("marker", `${path}: invalid int column mode 0x${mode.toString(16)}`);
+  if (mode > 3) throw new DecodeError("marker", `${path}: invalid int column mode 0x${mode.toString(16)}`);
   const out: number[] = new Array<number>(count);
   if (count === 0) {
     if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
@@ -124,10 +223,33 @@ function decodeIntColumn(r: Reader, node: IntNode, count: number, path: string):
     return num;
   };
 
-  if (mode === 0) {
+  if (mode === 0x00) {
     for (let i = 0; i < count; i++) out[i] = validate(fromForm(readUleb(r)), i);
     return out;
   }
+
+  if (mode === 0x02) {
+    const base = unzigzag(readUleb(r));
+    const width = r.u8();
+    const packed = unpackBits(r, count, width, path);
+    for (let i = 0; i < count; i++) out[i] = validate(base + packed[i]!, i);
+    return out;
+  }
+
+  if (mode === 0x03) {
+    const first = fromForm(readUleb(r));
+    const base = unzigzag(readUleb(r));
+    const width = r.u8();
+    const packed = unpackBits(r, Math.max(0, count - 1), width, path);
+    let running = first;
+    out[0] = validate(running, 0);
+    for (let i = 1; i < count; i++) {
+      running = running + base + packed[i - 1]!;
+      out[i] = validate(running, i);
+    }
+    return out;
+  }
+
   let prev = fromForm(readUleb(r));
   out[0] = validate(prev, 0);
   for (let i = 1; i < count; i++) {

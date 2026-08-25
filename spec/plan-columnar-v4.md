@@ -1,12 +1,12 @@
-# Hyperfly plan `columnar` — v3
+# Hyperfly plan `columnar` — v4
 
 Status: draft. Extends `spec/wire-v0.md`; everything there (envelope, varints,
 bitmaps, scalar encodings, limits, canonical serialization) applies unchanged.
 The artifact is
-`{"wire":1,"plan":{"layout":"columnar","version":3},"ir":…,"profile":…}` — a
+`{"wire":1,"plan":{"layout":"columnar","version":4},"ir":…,"profile":…}` — a
 different fingerprint than the row plan for the same IR, so the two never mix
-on the wire. (v1 and v2 were never released; no artifact for either exists in
-the wild.)
+on the wire. (v1 through v3 were never released; no artifact for any of them
+exists in the wild.)
 
 ## 1. Scope
 
@@ -32,6 +32,20 @@ always agree.
       bitmap-null), in row order.
 
 ## 3. Column payloads
+
+### 3.1 Bit packing
+
+Several column modes pack `k` unsigned values of a fixed width `w` bits.
+
+- `w` is a single byte, `0 ≤ w ≤ 56`; larger MUST be rejected. The 56-bit
+  ceiling matches the `uvarint` domain of wire-v0 §3.1.
+- `w = 0` encodes no payload bytes at all: every value equals the frame base.
+  A constant column therefore costs its base and nothing more.
+- Value `i` occupies bits `[i·w, (i+1)·w)` of a little-endian bit stream: bit
+  `n` is bit `n mod 8` of byte `⌊n/8⌋`, counting from the least significant.
+- The payload is exactly `⌈k·w/8⌉` bytes. Bits after the last value in the
+  final byte MUST be zero, and a decoder MUST reject nonzero padding — without
+  that rule one value would have several encodings.
 
 `k` = participating row count.
 
@@ -68,8 +82,20 @@ always agree.
   - `0x01` delta: the first value in its wire-v0 form, then
     `svarint(v[i] - v[i-1])` for each subsequent value. Differences stay
     within 55 bits for domain-valid values, so the 8-byte uvarint cap holds.
+  - `0x02` frame of reference: `svarint(base)`, one width byte `w`, then the
+    values bit-packed (§3.1) as `v[i] - base`. `base` is the column minimum, so
+    every packed value is non-negative and fits `w` bits.
+  - `0x03` delta frame of reference: `svarint(v[0])`, `svarint(base)`, one
+    width byte `w`, then `d[i] - base` bit-packed for `i` in `1..k-1`, where
+    `d[i] = v[i] - v[i-1]` and `base` is the minimum difference.
   - Other mode bytes MUST be rejected. Declared bounds are validated per
-    decoded value, after delta accumulation.
+    decoded value, after any accumulation.
+
+  A varint spends whole bytes on values that need a fraction of one: a column
+  ranging over four possible values costs eight bits each under `0x00` and two
+  under `0x02`. The frame is per-column and self-describing, so it needs no
+  profile — an untrained codec gets it — and it adapts to the values actually
+  present rather than the bounds the schema permits.
 - **float64** — one mode byte, then:
   - `0x00` raw: each value as 8 bytes LE (wire-v0 §4.5 rules per value).
   - `0x01` xor: first value as 8 bytes LE, then for each subsequent value a

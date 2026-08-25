@@ -1,5 +1,5 @@
 {
-  "description": "Golden vectors for plan columnar@3. Hex is body bytes only. All vectors compile with plan: columnar.",
+  "description": "Golden vectors for plan columnar@4. Hex is body bytes only. All vectors compile with plan: columnar.",
   "valid": [
     {
       "name": "col-int-raw-on-tie",
@@ -31,7 +31,7 @@
       "hex": "0300020406"
     },
     {
-      "name": "col-int-delta",
+      "name": "col-int-delta-for",
       "ir": {
         "kind": "array",
         "element": {
@@ -58,7 +58,8 @@
           "t": 100600
         }
       ],
-      "hex": "0301a08d06d804d804"
+      "hex": "0303a08d06d80400",
+      "description": "constant stride: delta frame of reference packs to width 0, so the payload is empty"
     },
     {
       "name": "col-bool-bitmap",
@@ -500,6 +501,110 @@
         }
       ],
       "hex": "02000204020012"
+    },
+    {
+      "name": "col-int-delta-still-wins",
+      "description": "one huge jump among tiny ones makes bit-packing wider than varints, so plain delta wins",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "t",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "t": 0
+        },
+        {
+          "t": 1
+        },
+        {
+          "t": 2
+        },
+        {
+          "t": 3
+        },
+        {
+          "t": 1099511627776
+        }
+      ],
+      "hex": "050000020406808080808040"
+    },
+    {
+      "name": "col-int-for-narrow",
+      "description": "four possible values cost two bits each, not eight",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "t",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 30
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "t": 1
+        },
+        {
+          "t": 2
+        },
+        {
+          "t": 3
+        },
+        {
+          "t": 4
+        }
+      ],
+      "hex": "04020202e4"
+    },
+    {
+      "name": "col-int-for-constant-width-zero",
+      "description": "a constant column packs to width 0 and carries no payload bytes at all",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "t",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "t": 7
+        },
+        {
+          "t": 7
+        },
+        {
+          "t": 7
+        },
+        {
+          "t": 7
+        }
+      ],
+      "hex": "04020e00"
     }
   ],
   "invalidDecode": [
@@ -635,7 +740,7 @@
           ]
         }
       },
-      "hex": "0102",
+      "hex": "0104",
       "error": "marker"
     },
     {
@@ -751,6 +856,45 @@
       },
       "hex": "010200040300dead",
       "error": "packed"
+    },
+    {
+      "name": "col-int-for-width-over-56",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "t",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "01020039",
+      "error": "marker"
+    },
+    {
+      "name": "col-int-for-nonzero-padding",
+      "description": "two 2-bit values leave six padding bits; nonzero padding would give one value two encodings",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "t",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "hex": "02020002f4",
+      "error": "bitmap"
     }
   ],
   "invalidEncode": [

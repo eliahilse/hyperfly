@@ -227,7 +227,7 @@ impl Plan {
     fn version(self) -> u32 {
         match self {
             Plan::Row => 1,
-            Plan::Columnar => 3,
+            Plan::Columnar => 4,
         }
     }
 }

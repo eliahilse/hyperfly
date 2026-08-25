@@ -60,7 +60,7 @@ export function serializeNode(node: IRNode): string {
 
 export type PlanLayout = "row" | "columnar";
 
-const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 3 };
+const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 4 };
 
 export function serializeShared(shared: SharedProfile): string {
   const columns = shared.columns.map(
