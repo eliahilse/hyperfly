@@ -156,7 +156,7 @@ describe("cross-adapter parity (retro)", () => {
     });
     // identical string is asserted in python/tests/test_cross_adapter.py
     expect(serializeArtifact(toIR(Row), "columnar")).toBe(
-      '{"wire":1,"plan":{"layout":"columnar","version":3},"ir":' +
+      '{"wire":1,"plan":{"layout":"columnar","version":4},"ir":' +
         '{"kind":"struct","fields":[' +
         '{"name":"id","type":{"kind":"string"}},' +
         '{"name":"kind","type":{"kind":"literal","value":"a"}},' +

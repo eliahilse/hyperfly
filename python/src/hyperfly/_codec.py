@@ -105,6 +105,60 @@ def _literal_matches(lit: Any, v: Any) -> bool:
     return type(v) is str and v == lit
 
 
+_MAX_WIDTH = 56
+
+
+def _bit_width(max_value: int) -> int:
+    """Bits needed for an unsigned value; zero for zero, so a constant column packs to nothing."""
+    return max_value.bit_length()
+
+
+def _packed_bytes(count: int, width: int) -> int:
+    return -(-count * width // 8) if width else 0
+
+
+def _pack_bits(out: bytearray, values: list[int], width: int) -> None:
+    """Spec 3.1: little-endian bit stream, value i at bits [i*w, (i+1)*w)."""
+    if width == 0:
+        return
+    acc = 0
+    bits = 0
+    for value in values:
+        acc |= value << bits
+        bits += width
+        while bits >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            bits -= 8
+    if bits:
+        out.append(acc & 0xFF)
+
+
+def _unpack_bits(r: Reader, count: int, width: int, path: str) -> list[int]:
+    if width > _MAX_WIDTH:
+        _dfail("marker", path, f"bit width {width} exceeds {_MAX_WIDTH}")
+    if width == 0:
+        return [0] * count
+    data = r.take(_packed_bytes(count, width))
+    mask = (1 << width) - 1
+    out: list[int] = []
+    acc = 0
+    bits = 0
+    index = 0
+    for _ in range(count):
+        while bits < width:
+            acc |= (data[index] if index < len(data) else 0) << bits
+            index += 1
+            bits += 8
+        out.append(acc & mask)
+        acc >>= width
+        bits -= width
+    # leftover bits are padding and must be zero, or one value would have two encodings
+    if acc:
+        _dfail("bitmap", path, "nonzero bit-packing padding")
+    return out
+
+
 def _int_form(node: dict[str, Any], value: int) -> int:
     lo = node.get("min")
     return value - lo if lo is not None else zigzag(value)
@@ -310,18 +364,58 @@ def _encode_int_column(out: bytearray, node: dict[str, Any], values: list[int]) 
         out.append(0)
         return
     forms = [_int_form(node, v) for v in values]
-    diffs = [zigzag(values[i] - values[i - 1]) for i in range(1, len(values))]
+    diffs = [values[i] - values[i - 1] for i in range(1, len(values))]
+
     raw_cost = sum(uleb_len(f) for f in forms)
-    delta_cost = uleb_len(forms[0]) + sum(uleb_len(d) for d in diffs)
-    if delta_cost < raw_cost:
-        out.append(1)
-        write_uleb(out, forms[0])
-        for d in diffs:
-            write_uleb(out, d)
-    else:
-        out.append(0)
+    delta_cost = uleb_len(forms[0]) + sum(uleb_len(zigzag(d)) for d in diffs)
+
+    # frame of reference: subtract the column minimum, then spend only the bits the
+    # remaining span needs rather than a whole number of bytes per value
+    for_base = min(values)
+    for_width = _bit_width(max(v - for_base for v in values))
+    for_cost = (
+        math.inf
+        if for_width > _MAX_WIDTH
+        else uleb_len(zigzag(for_base)) + 1 + _packed_bytes(len(values), for_width)
+    )
+
+    delta_for_cost = math.inf
+    delta_base = 0
+    delta_width = 0
+    if diffs:
+        delta_base = min(diffs)
+        delta_width = _bit_width(max(d - delta_base for d in diffs))
+        if delta_width <= _MAX_WIDTH:
+            delta_for_cost = (
+                uleb_len(forms[0])
+                + uleb_len(zigzag(delta_base))
+                + 1
+                + _packed_bytes(len(diffs), delta_width)
+            )
+
+    best = min(raw_cost, delta_cost, for_cost, delta_for_cost)
+    if best == raw_cost:
+        out.append(0x00)
         for f in forms:
             write_uleb(out, f)
+        return
+    if best == delta_cost:
+        out.append(0x01)
+        write_uleb(out, forms[0])
+        for d in diffs:
+            write_uleb(out, zigzag(d))
+        return
+    if best == for_cost:
+        out.append(0x02)
+        write_uleb(out, zigzag(for_base))
+        out.append(for_width)
+        _pack_bits(out, [v - for_base for v in values], for_width)
+        return
+    out.append(0x03)
+    write_uleb(out, forms[0])
+    write_uleb(out, zigzag(delta_base))
+    out.append(delta_width)
+    _pack_bits(out, [d - delta_base for d in diffs], delta_width)
 
 
 def _encode_float_column(out: bytearray, values: list[Any], path: str) -> None:
@@ -586,15 +680,31 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
 
 def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -> list[int]:
     mode = r.u8()
-    if mode > 1:
+    if mode > 3:
         _dfail("marker", path, f"invalid int column mode 0x{mode:x}")
     if count == 0:
         if mode != 0:
             _dfail("marker", path, "empty column must use mode 0x00")
         return []
     lo = node.get("min")
-    if mode == 0:
+    if mode == 0x00:
         return [_decode_int_value(node, read_uleb(r), f"{path}[{i}]") for i in range(count)]
+    if mode == 0x02:
+        base = unzigzag(read_uleb(r))
+        width = r.u8()
+        packed = _unpack_bits(r, count, width, path)
+        return [_check_decoded(node, base + packed[i], f"{path}[{i}]") for i in range(count)]
+    if mode == 0x03:
+        raw_first = read_uleb(r)
+        running = raw_first + lo if lo is not None else unzigzag(raw_first)
+        base = unzigzag(read_uleb(r))
+        width = r.u8()
+        packed = _unpack_bits(r, max(0, count - 1), width, path)
+        acc = [_check_decoded(node, running, f"{path}[0]")]
+        for i in range(1, count):
+            running += base + packed[i - 1]
+            acc.append(_check_decoded(node, running, f"{path}[{i}]"))
+        return acc
     out = []
     raw = read_uleb(r)
     prev = raw + lo if lo is not None else unzigzag(raw)

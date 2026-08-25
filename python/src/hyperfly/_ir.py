@@ -6,7 +6,7 @@ from typing import Any
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
 LEAF_KINDS = frozenset({"bool", "int", "float64", "string", "bytes", "enum", "literal"})
-_PLAN_VERSION = {"row": 1, "columnar": 3}
+_PLAN_VERSION = {"row": 1, "columnar": 4}
 
 
 def _fail(path: str, message: str) -> None:

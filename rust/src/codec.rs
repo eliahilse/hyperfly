@@ -857,33 +857,144 @@ impl Codec {
     }
 }
 
+const MAX_WIDTH: u8 = 56;
+
+/// Bits needed for an unsigned value; zero for zero, so a constant column packs to nothing.
+fn bit_width(max: u64) -> u8 {
+    (64 - max.leading_zeros()) as u8
+}
+
+fn packed_bytes(count: usize, width: u8) -> usize {
+    if width == 0 { 0 } else { (count * width as usize + 7) / 8 }
+}
+
+/// Spec 3.1: little-endian bit stream, value i at bits [i*w, (i+1)*w).
+fn pack_bits(out: &mut Vec<u8>, values: &[u64], width: u8) {
+    if width == 0 {
+        return;
+    }
+    let mut acc: u128 = 0;
+    let mut bits: u32 = 0;
+    for value in values {
+        acc |= (*value as u128) << bits;
+        bits += width as u32;
+        while bits >= 8 {
+            out.push((acc & 0xff) as u8);
+            acc >>= 8;
+            bits -= 8;
+        }
+    }
+    if bits > 0 {
+        out.push((acc & 0xff) as u8);
+    }
+}
+
+fn unpack_bits(r: &mut Reader, count: usize, width: u8, path: &str) -> Result<Vec<u64>> {
+    if width > MAX_WIDTH {
+        return err(ErrorCode::Marker, format!("{path}: bit width {width} exceeds {MAX_WIDTH}"));
+    }
+    if width == 0 {
+        return Ok(vec![0; count]);
+    }
+    let data = r.take(packed_bytes(count, width))?.to_vec();
+    let mask: u128 = (1u128 << width) - 1;
+    let mut out = Vec::with_capacity(count);
+    let mut acc: u128 = 0;
+    let mut bits: u32 = 0;
+    let mut index = 0usize;
+    for _ in 0..count {
+        while bits < width as u32 {
+            let byte = data.get(index).copied().unwrap_or(0);
+            index += 1;
+            acc |= (byte as u128) << bits;
+            bits += 8;
+        }
+        out.push((acc & mask) as u64);
+        acc >>= width;
+        bits -= width as u32;
+    }
+    // leftover bits are padding and must be zero, or one value would have two encodings
+    if acc != 0 {
+        return err(ErrorCode::Bitmap, format!("{path}: nonzero bit-packing padding"));
+    }
+    Ok(out)
+}
+
 fn enc_int_column(out: &mut Vec<u8>, min: Option<i64>, values: &[i64]) -> Result<()> {
     if values.is_empty() {
         out.push(0);
         return Ok(());
     }
     let forms: Vec<u64> = values.iter().map(|v| int_form(min, *v)).collect();
-    let diffs: Vec<u64> = values.windows(2).map(|w| zigzag(w[1] - w[0])).collect();
+    let diffs: Vec<i128> = values.windows(2).map(|w| w[1] as i128 - w[0] as i128).collect();
+
     let raw_cost: usize = forms.iter().map(|f| uleb_len(*f)).sum();
-    let delta_cost: usize = uleb_len(forms[0]) + diffs.iter().map(|d| uleb_len(*d)).sum::<usize>();
-    if delta_cost < raw_cost {
-        out.push(1);
-        write_uleb(out, forms[0])?;
-        for d in diffs {
-            write_uleb(out, d)?;
-        }
+    let delta_cost: usize =
+        uleb_len(forms[0]) + diffs.iter().map(|d| uleb_len(zigzag(*d as i64))).sum::<usize>();
+
+    // frame of reference: subtract the column minimum, then spend only the bits the
+    // remaining span needs rather than a whole number of bytes per value
+    let for_base = *values.iter().min().unwrap();
+    let for_span = values.iter().map(|v| (*v as i128 - for_base as i128) as u64).max().unwrap();
+    let for_width = bit_width(for_span);
+    let for_cost = if for_width > MAX_WIDTH {
+        usize::MAX
     } else {
-        out.push(0);
+        uleb_len(zigzag(for_base)) + 1 + packed_bytes(values.len(), for_width)
+    };
+
+    let mut delta_for_cost = usize::MAX;
+    let mut delta_base: i128 = 0;
+    let mut delta_width: u8 = 0;
+    if !diffs.is_empty() {
+        delta_base = *diffs.iter().min().unwrap();
+        let span = diffs.iter().map(|d| (d - delta_base) as u64).max().unwrap();
+        delta_width = bit_width(span);
+        if delta_width <= MAX_WIDTH {
+            delta_for_cost = uleb_len(forms[0])
+                + uleb_len(zigzag(delta_base as i64))
+                + 1
+                + packed_bytes(diffs.len(), delta_width);
+        }
+    }
+
+    let best = raw_cost.min(delta_cost).min(for_cost).min(delta_for_cost);
+    if best == raw_cost {
+        out.push(0x00);
         for f in forms {
             write_uleb(out, f)?;
         }
+        return Ok(());
     }
+    if best == delta_cost {
+        out.push(0x01);
+        write_uleb(out, forms[0])?;
+        for d in &diffs {
+            write_uleb(out, zigzag(*d as i64))?;
+        }
+        return Ok(());
+    }
+    if best == for_cost {
+        out.push(0x02);
+        write_uleb(out, zigzag(for_base))?;
+        out.push(for_width);
+        let packed: Vec<u64> =
+            values.iter().map(|v| (*v as i128 - for_base as i128) as u64).collect();
+        pack_bits(out, &packed, for_width);
+        return Ok(());
+    }
+    out.push(0x03);
+    write_uleb(out, forms[0])?;
+    write_uleb(out, zigzag(delta_base as i64))?;
+    out.push(delta_width);
+    let packed: Vec<u64> = diffs.iter().map(|d| (d - delta_base) as u64).collect();
+    pack_bits(out, &packed, delta_width);
     Ok(())
 }
 
 fn dec_int_column(r: &mut Reader, min: Option<i64>, max: Option<i64>, count: usize, path: &str) -> Result<Vec<i64>> {
     let mode = r.u8()?;
-    if mode > 1 {
+    if mode > 3 {
         return err(ErrorCode::Marker, format!("{path}: invalid int column mode {mode:#x}"));
     }
     if count == 0 {
@@ -899,9 +1010,33 @@ fn dec_int_column(r: &mut Reader, min: Option<i64>, max: Option<i64>, count: usi
         }
     };
     let mut out = Vec::with_capacity(count);
-    if mode == 0 {
+    if mode == 0x00 {
         for i in 0..count {
             out.push(decoded_int(min, max, from_form(read_uleb(r)?), &format!("{path}[{i}]"))?);
+        }
+        return Ok(out);
+    }
+    if mode == 0x02 {
+        let base = unzigzag(read_uleb(r)?) as i128;
+        let width = r.u8()?;
+        let packed = unpack_bits(r, count, width, path)?;
+        for (i, p) in packed.iter().enumerate() {
+            let value = (base + *p as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            out.push(decoded_int(min, max, value, &format!("{path}[{i}]"))?);
+        }
+        return Ok(out);
+    }
+    if mode == 0x03 {
+        let first = from_form(read_uleb(r)?);
+        let base = unzigzag(read_uleb(r)?) as i128;
+        let width = r.u8()?;
+        let packed = unpack_bits(r, count.saturating_sub(1), width, path)?;
+        let mut running = first as i128;
+        out.push(decoded_int(min, max, first, &format!("{path}[0]"))?);
+        for i in 1..count {
+            running += base + packed[i - 1] as i128;
+            let value = running.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            out.push(decoded_int(min, max, value, &format!("{path}[{i}]"))?);
         }
         return Ok(out);
     }
