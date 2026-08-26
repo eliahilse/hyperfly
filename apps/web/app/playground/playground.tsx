@@ -94,7 +94,7 @@ interface Row {
  */
 function findUnsafeInteger(text: string): string | null {
   const outsideStrings = text.replace(/"(?:[^"\\]|\\.)*"/g, '""');
-  const candidates = outsideStrings.match(/-?\d{16,}(?![\d.eE])/g);
+  const candidates = outsideStrings.match(/(?<![\d.])-?\d{16,}(?![\d.eE])/g);
   if (!candidates) return null;
   for (const c of candidates) {
     const abs = c.startsWith("-") ? c.slice(1) : c;
@@ -121,7 +121,15 @@ export function Playground() {
   const [state, setState] = useState<{ phase: "idle" } | { phase: "error"; error: InferError } | Done>({
     phase: "idle",
   });
+  /** last successful parse of a top-level array, kept through errors so the selector survives them */
+  const [arrayInfo, setArrayInfo] = useState<{ length: number } | null>(null);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelPending = () => {
+    if (debounce.current) {
+      clearTimeout(debounce.current);
+      debounce.current = null;
+    }
+  };
 
   const run = useCallback((input: string, chosen: Mode) => {
     if (input.trim() === "") {
@@ -151,6 +159,7 @@ export function Playground() {
       return;
     }
     const topLevelArray = Array.isArray(parsed) && (parsed as unknown[]).length > 0;
+    setArrayInfo(topLevelArray ? { length: (parsed as unknown[]).length } : null);
     const corpus =
       topLevelArray &&
       (chosen === "corpus" ||
@@ -179,17 +188,16 @@ export function Playground() {
     });
   }, []);
 
-  useEffect(() => () => {
-    if (debounce.current) clearTimeout(debounce.current);
-  }, []);
+  useEffect(() => () => cancelPending(), []);
 
   const onType = (value: string) => {
     setText(value);
-    if (debounce.current) clearTimeout(debounce.current);
+    cancelPending();
     debounce.current = setTimeout(() => run(value, mode), 250);
   };
 
   const loadExample = (make: () => unknown) => {
+    cancelPending();
     const pretty = JSON.stringify(make(), null, 2);
     setText(pretty);
     setMode("auto");
@@ -197,6 +205,7 @@ export function Playground() {
   };
 
   const chooseMode = (m: Mode) => {
+    cancelPending();
     setMode(m);
     run(text, m);
   };
@@ -235,19 +244,24 @@ export function Playground() {
           onChange={(e) => onType(e.target.value)}
         />
         <div className="play-meta">
-          {done?.topLevelArray ? (
+          {arrayInfo ? (
             <span className="play-toggle" role="radiogroup" aria-label="how to read the top-level array">
               <label>
                 <input
                   type="radio"
                   name="play-mode"
-                  checked={done.corpus}
+                  checked={done ? done.corpus : mode === "corpus"}
                   onChange={() => chooseMode("corpus")}
                 />
-                {`traffic — ${done.arrayLength} responses`}
+                {`traffic — ${arrayInfo.length} responses`}
               </label>
               <label>
-                <input type="radio" name="play-mode" checked={!done.corpus} onChange={() => chooseMode("single")} />
+                <input
+                  type="radio"
+                  name="play-mode"
+                  checked={done ? !done.corpus : mode !== "corpus"}
+                  onChange={() => chooseMode("single")}
+                />
                 one response
               </label>
             </span>
@@ -304,7 +318,11 @@ export function Playground() {
             </p>
           )}
 
-          {done.corpus && (
+          {done.corpus && done.result.messages < 2 && (
+            <p className="bench-note">one message is not traffic — training needs at least two responses</p>
+          )}
+
+          {done.corpus && (done.result.profiled !== undefined || done.result.trainedNothing) && (
             <div className="play-learned">
               <p className="play-learned-head">
                 what the profile learned
@@ -346,8 +364,9 @@ export function Playground() {
             )}
             <p className="footnote">
               Inferred from the payload alone — a real integration declares this in Zod or Pydantic. JSON is measured
-              minified with JavaScript parse semantics (duplicate keys keep the last value, −0 becomes 0); gzip at
-              level 6, the common edge default.
+              minified with JavaScript parse semantics: duplicate keys keep the last value, −0 becomes 0, and decimal
+              or exponent numbers carry ordinary IEEE 754 precision. Bare integers beyond ±(2^53−1) are rejected
+              rather than silently rounded. Gzip at level 6, the common edge default.
             </p>
           </details>
 

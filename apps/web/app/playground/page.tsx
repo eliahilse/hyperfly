@@ -40,7 +40,8 @@ export default function PlaygroundPage() {
             <p className="section-lead">
               Paste one response to see what the schema alone removes. Paste an array of responses
               from the same route and a profile trains on it right here — dictionaries, id grammars,
-              derived columns — exactly the pipeline the benchmarks run.
+              derived columns — through the same codec the benchmarks run, with an inferred schema
+              standing in for a declared one.
             </p>
           </div>
           <Playground />

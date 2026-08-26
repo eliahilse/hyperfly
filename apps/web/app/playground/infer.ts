@@ -104,7 +104,9 @@ function inferNode(values: unknown[], path: string, depth: number, ctx: InferCtx
   if (kind === "array") {
     const elements = (values as unknown[][]).flat();
     const nonNull = elements.filter((e) => e !== null);
-    const element = inferNode(nonNull, `${path}[]`, depth + 1, ctx);
+    // a nullable wrapper is its own node on the wire, so it costs a depth level too
+    const wrapped = nonNull.length < elements.length;
+    const element = inferNode(nonNull, `${path}[]`, depth + (wrapped ? 2 : 1), ctx);
     return {
       kind: "array",
       element: nonNull.length < elements.length ? { kind: "nullable", inner: element } : element,
@@ -121,7 +123,8 @@ function inferNode(values: unknown[], path: string, depth: number, ctx: InferCtx
     const present = objects.filter((o) => Object.prototype.hasOwnProperty.call(o, name));
     const observed = present.map((o) => o[name]);
     const nonNull = observed.filter((v) => v !== null);
-    const type = inferNode(nonNull, `${path}.${name}`, depth + 1, ctx);
+    const label = /[.[\]]/.test(name) ? JSON.stringify(name) : name;
+    const type = inferNode(nonNull, `${path}.${label}`, depth + 1, ctx);
     const field: { name: string; type: IRNode; optional?: boolean; nullable?: boolean } = { name, type };
     if (present.length < objects.length) field.optional = true;
     if (nonNull.length < observed.length) field.nullable = true;
