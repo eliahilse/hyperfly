@@ -149,6 +149,9 @@ export function hasPayload(node: IRNode): boolean {
   switch (node.kind) {
     case "literal":
       return false;
+    case "enum":
+      // a single member packs to width zero — the column carries nothing, like a literal
+      return node.members.length > 1;
     case "struct":
       return node.fields.some((f) => f.optional || f.nullable || hasPayload(f.type));
     case "array":
