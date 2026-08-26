@@ -44,12 +44,14 @@ same schema:
 const codec = compile(EventResponse, { plan: "columnar" });
 ```
 
-Timestamps become deltas, exact-decimal numbers travel as integer mantissas, enums
-become indices, booleans pack into bitmaps, and text columns deflate together.
+Timestamps become deltas, integers bit-pack against the narrowest frame the column
+needs, exact-decimal numbers travel as integer mantissas, enums become three-bit
+indices, booleans pack into bitmaps, and text columns deflate together.
 
 A **profile** adds what only traffic can teach: the values that recur across
-*different* responses, which a compressor never sees because it only ever holds
-one.
+*different* responses, the shape of machine-made ids (`evt_000a1_9fa3` becomes two
+small integers), and columns that are functions of other columns — none of which a
+compressor can see, because it only ever holds one response.
 
 ```ts
 import { train } from "hyperfly";
@@ -59,8 +61,8 @@ const codec = compile(EventResponse, { plan: "columnar", profile });
 ```
 
 The dictionary is an out-of-band artifact — it ships once, not per request. On an
-audit-log route in the repo's benchmark it costs 12 KB and pays for itself after
-ten requests.
+audit-log route in the repo's benchmark it costs 17 KB and pays for itself after
+twelve requests.
 
 ## Serving it
 
@@ -101,15 +103,16 @@ Bytes per message, averaged over 500-message corpora, from `apps/bench` in the r
 
 | route | JSON | JSON+Brotli | Protobuf | Hyperfly | + Brotli | Profiled |
 |---|---|---|---|---|---|---|
-| audit events | 12,687 | 2,512 | 7,190 | 2,109 | 2,054 | **823** |
-| device telemetry | 7,994 | 1,422 | 2,007 | 896 | 818 | **638** |
-| social feed | 6,863 | 2,294 | 4,396 | 1,908 | 1,902 | **1,535** |
-| single order | 782 | 408 | 388 | 271 | 273 | **188** |
-| OHLCV candles | 3,225 | 842 | 2,034 | 496 | **372** | 372 |
+| audit events | 12,687 | 2,512 | 7,190 | 2,013 | 1,974 | **574** |
+| device telemetry | 7,994 | 1,422 | 2,007 | 755 | 725 | **542** |
+| social feed | 6,863 | 2,294 | 4,396 | 1,871 | 1,868 | **1,466** |
+| single order | 782 | 408 | 388 | 271 | 273 | **180** |
+| OHLCV candles | 3,225 | 842 | 2,034 | 384 | **362** | 384 |
 
-Read the spread, not the best row. Profiles are worth 57% on audit logs, where the
-same user agents recur on every request, and nothing at all on candles, whose only
-string sits outside the array. The corpora are synthetic — shaped like real routes,
+Read the spread, not the best row. Profiles are worth 71% on audit logs, where the
+same actors recur on every request and the ids share one machine-made shape, and
+nothing at all on candles, whose only string sits outside the array. On the
+profiled stream, Brotli now loses bytes on four of five routes. The corpora are synthetic — shaped like real routes,
 but not captured from one — and no production traffic has been measured yet.
 
 ## Guarantees
@@ -118,8 +121,9 @@ but not captured from one — and no production traffic has been measured yet.
   fingerprint. A mismatch fails before the body is parsed; it never misreads.
 - **Canonical output.** Decode then re-encode returns identical bytes, so a
   response is reproducible.
-- **Bounded decoding.** Nesting, item counts and byte lengths are limited; a
-  declared count must be payable by the bytes still on the wire.
+- **Bounded decoding.** Nesting, item counts and byte lengths are limited, and an
+  amplification policy caps how many rows a hostile byte can demand — a bound
+  input length alone cannot provide once a constant column packs to zero bits.
 - **One wire format.** [TypeScript](https://github.com/eliahilse/hyperfly/tree/main/packages/hyperfly),
   [Python](https://github.com/eliahilse/hyperfly/tree/main/python) and
   [Rust](https://github.com/eliahilse/hyperfly/tree/main/rust) are verified against
@@ -139,7 +143,7 @@ but not captured from one — and no production traffic has been measured yet.
 
 The authorities are the specifications, not this implementation:
 [wire v0](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md),
-[columnar v3](https://github.com/eliahilse/hyperfly/blob/main/spec/plan-columnar-v3.md),
+[columnar v5](https://github.com/eliahilse/hyperfly/blob/main/spec/plan-columnar-v5.md),
 [negotiation v1](https://github.com/eliahilse/hyperfly/blob/main/spec/negotiation-v1.md).
 A future implementation ports against the
 [golden vectors](https://github.com/eliahilse/hyperfly/tree/main/spec/vectors), not
