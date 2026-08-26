@@ -1,11 +1,11 @@
-# Hyperfly plan `columnar` — v4
+# Hyperfly plan `columnar` — v5
 
 Status: draft. Extends `spec/wire-v0.md`; everything there (envelope, varints,
 bitmaps, scalar encodings, limits, canonical serialization) applies unchanged.
 The artifact is
-`{"wire":1,"plan":{"layout":"columnar","version":4},"ir":…,"profile":…}` — a
+`{"wire":1,"plan":{"layout":"columnar","version":5},"ir":…,"profile":…}` — a
 different fingerprint than the row plan for the same IR, so the two never mix
-on the wire. (v1 through v3 were never released; no artifact for any of them
+on the wire. (v1 through v4 were never released; no artifact for any of them
 exists in the wild.)
 
 ## 1. Scope
@@ -46,24 +46,33 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
 - The payload is exactly `⌈k·w/8⌉` bytes. Bits after the last value in the
   final byte MUST be zero, and a decoder MUST reject nonzero padding — without
   that rule one value would have several encodings.
+- `bitWidth(x)` is the smallest `w` with `x < 2^w`, so `bitWidth(0) = 0`.
+  Several modes derive their widths with it.
 
 `k` = participating row count.
 
 - **literal** — zero bytes.
-- **enum** — `uvarint` index per value.
+- **enum** — member indices bit-packed (§3.1) at width `w = bitWidth(m − 1)`
+  for `m` declared members, with no width byte: the width is a pure function
+  of the schema, so both sides derive it. A single-member enum packs to width
+  0 and carries nothing. An index at or beyond `m` MUST be rejected (such
+  indices are representable whenever `m − 1` is not `2^w − 1`).
 - **bytes** — `uvarint` length + bytes per value (as wire-v0).
-- **string** — one **flags** byte, then the payload it selects. Bit 0 selects
-  dictionary coding, bit 1 selects deflate. Bits 2–7 are reserved and MUST be
-  zero. v3 defines three values; `0x03` (dictionary + deflate) is reserved and
-  MUST be rejected until a later version defines it.
+- **string** — one **flags** byte, then the payload it selects. v5 defines
+  five values, `0x00`–`0x04`; any other MUST be rejected.
   - `0x00` plain: `uvarint` length + strict UTF-8 bytes per value.
   - `0x01` dictionary: requires a dictionary for this column in the artifact's
-    profile (§6); a decoder without one MUST reject the column. Per value a
-    `uvarint` code: `0` is a literal escape followed by `uvarint` length +
-    UTF-8 bytes, and `n > 0` selects `entries[n − 1]`. A code beyond the
-    dictionary MUST be rejected. An encoder MUST emit the
-    code for any value present in the dictionary and MUST NOT escape it, so one
-    value never has two encodings.
+    profile (§6); a decoder without one MUST reject the column. One width byte
+    `w` (`0 ≤ w ≤ 14`; larger MUST be rejected), then `k` codes bit-packed
+    (§3.1) at width `w`, then the escaped values. Code `0` is a literal escape
+    and `c > 0` selects `entries[c − 1]`; a code beyond the dictionary MUST be
+    rejected. Escaped values follow the packed codes in row order, one
+    `uvarint` length + UTF-8 bytes per zero code. An encoder MUST emit the
+    code for any value present in the dictionary and MUST NOT escape it, and
+    MUST set `w = bitWidth(highest code emitted)`, so one column never has
+    two encodings. Frequency-ordered dictionaries put the common values in
+    the low codes, so `w` usually sits well below `bitWidth(dictionary
+    size)`.
   - `0x02` deflate: `uvarint` byte length per value in row order, then a
     `uvarint` blob length and a raw-deflate (RFC 1951) stream of the
     concatenated UTF-8 bytes. The inflated size MUST equal the sum of the
@@ -71,10 +80,34 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
     lengths obey the decoder byte limits. A decoder without an inflate
     capability MUST reject deflate columns as unsupported (and the protocol
     layer falls back to JSON) rather than guess.
+  - `0x03` grammar: requires a grammar for this column in the profile (§6.3);
+    a decoder without one MUST reject the column. A `uvarint` escape count
+    `E` (`E ≤ k`, larger MUST be rejected); if `0 < E < k`, an escape bitmap
+    of `k` bits (set bit = escaped row) whose set-bit count MUST equal `E`;
+    then one **int lane** per numeric token of the grammar, in token order,
+    each encoded exactly as an int column payload (mode byte and all) whose
+    declared bounds are `min 0, max B^L − 1`, over the `k − E` matched rows
+    in row order; then the escaped values in row order, `uvarint` length +
+    UTF-8 bytes each. A matched row's string is
+    reconstructed by rendering the grammar (§6.3); a lane value at or beyond
+    `B^L` for its token MUST be rejected. An encoder MUST use the lanes for
+    every value the grammar matches and MUST NOT escape it.
+  - `0x04` derived: requires a derivation for this column in the profile
+    (§6.4); a decoder without one MUST reject the column. A `uvarint` escape
+    count `E` (`E ≤ k`, larger MUST be rejected); if `0 < E < k`, an escape
+    bitmap of `k` bits whose set-bit count MUST equal `E`; then the escaped
+    values in row order, `uvarint` length + UTF-8 bytes each. A non-escaped
+    row carries no bytes at all: its value is `values[i]` of the derivation,
+    where `i` is the index of the source row's value in the source
+    dictionary. For a non-escaped row the source MUST participate in that
+    row and its value MUST be in the source dictionary; a decoder MUST
+    reject otherwise. An encoder MUST NOT escape a conforming row (§6.4).
 
-  Bit 0 is the low bit deliberately: dictionary coding is fully deterministic
-  while deflate output is library-dependent, so "smallest, ties to the lowest
-  flags byte" (§4) also means "prefer the reproducible encoding".
+  Dictionary coding sits below deflate deliberately: it is fully
+  deterministic while deflate output is library-dependent, so "smallest,
+  ties to the lowest flags byte" (§4) also means "prefer the reproducible
+  encoding". Grammar and derived modes are deterministic too; in practice
+  they win on size, not on the tie rule.
 - **bool** — one bitmap of `k` bits (padding rules from wire-v0 §3.5).
 - **int** — one mode byte, then:
   - `0x00` raw: each value in its wire-v0 form (`uvarint(v - min)` when `min`
@@ -88,6 +121,16 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
   - `0x03` delta frame of reference: `svarint(v[0])`, `svarint(base)`, one
     width byte `w`, then `d[i] - base` bit-packed for `i` in `1..k-1`, where
     `d[i] = v[i] - v[i-1]` and `base` is the minimum difference.
+  - `0x04` patched frame of reference: `svarint(base)`, a low-width byte `L`
+    (`0 ≤ L ≤ 55`), a high-width byte `H` (`1 ≤ H`, `L + H ≤ 56`; anything
+    else MUST be rejected), an exception bitmap of `k` bits (set bit =
+    exception), the low `L` bits of `v[i] - base` for **all** `k` values
+    bit-packed (§3.1), then `(v[i] - base) >> L` for the exception rows only,
+    in row order, bit-packed at width `H`. `base` is the column minimum. A
+    non-exception row's high part is zero by construction; an exception
+    row's decoded high part MUST be non-zero — a zero high part would give
+    the value a second encoding, and a decoder MUST reject it, exactly as it
+    rejects nonzero padding.
   - Other mode bytes MUST be rejected. Declared bounds are validated per
     decoded value, after any accumulation.
 
@@ -95,7 +138,11 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
   ranging over four possible values costs eight bits each under `0x00` and two
   under `0x02`. The frame is per-column and self-describing, so it needs no
   profile — an untrained codec gets it — and it adapts to the values actually
-  present rather than the bounds the schema permits.
+  present rather than the bounds the schema permits. `0x04` handles the
+  column that is narrow except for outliers: a single large value under
+  `0x02` forces every row to the outlier's width, while under `0x04` the
+  outlier alone pays — one bitmap bit per row plus its own high bits — and
+  the common values keep their narrow width.
 - **float64** — one mode byte, then:
   - `0x00` raw: each value as 8 bytes LE (wire-v0 §4.5 rules per value).
   - `0x01` xor: first value as 8 bytes LE, then for each subsequent value a
@@ -126,11 +173,22 @@ which MUST be `0x00`; other columns emit nothing.
 
 ## 4. Encoder mode choice
 
-Encoders MUST pick the mode with the smaller encoded size; on a tie they MUST
-pick the lowest mode byte (`0x00` < `0x01` < `0x02` < `0x03`), so a
+Encoders MUST pick the mode with the smallest encoded size; on a tie they MUST
+pick the lowest mode or flags byte (`0x00` < `0x01` < … < `0x04`), so a
 decode → encode round trip is byte-identical and two conforming encoders agree.
 Decoders accept any valid mode — canonicality is an encoder obligation, checked
 by the re-encode property, not a decode-time recomputation.
+
+Inner choices are pinned the same way. The dictionary width is
+`bitWidth(highest code emitted)`. An int `0x04` candidate considers every low
+width `L` in `0 … w − 1`, where `w` is its own `0x02` width, takes the
+smallest total, ties to the lowest `L`, and sets
+`H = bitWidth(largest high part)`. A grammar lane is itself an int column and
+obeys this section recursively. Modes that need a profile — dictionary,
+grammar, derived — enter the comparison only when the profile supplies their
+column, and within grammar and derived modes the escape set is forced (a
+matching or conforming row MUST NOT escape), so the encoding is a pure
+function of schema, profile, and values.
 
 Two capabilities scope that obligation:
 
@@ -157,8 +215,10 @@ profile-trained dictionaries and entropy coding.
 
 ## 6. Profiles
 
-A **profile** carries knowledge learned from a route's traffic. v3 defines one
-kind: per-column string dictionaries.
+A **profile** carries knowledge learned from a route's traffic. v5 defines
+three kinds, all per string column: dictionaries (whole values that recur),
+grammars (the shape of machine-generated values), and derivations (one
+column functionally determined by another).
 
 ### 6.1 Column ordinals
 
@@ -182,40 +242,109 @@ The result numbers every columnar leaf in the whole schema `0 … N−1`.
 ### 6.2 Profile document
 
 ```
-{"version":1,"shared":{"columns":[{"leaf":N,"dict":["…","…"]}]},"hints":{…}}
+{"version":2,"shared":{"columns":[{"leaf":N,"dict":["…"],"grammar":[…],"derived":{…}}]},"hints":{…}}
 ```
 
 - `shared` is decode-critical: without the identical bytes a peer cannot read
-  the payload. It is embedded in the artifact (§6.3).
+  the payload. It is embedded in the artifact (§6.5).
 - `hints` is advisory encoder guidance that does not affect decodability. It is
   **not** part of the artifact and never changes the fingerprint, so an encoder
-  can adopt new hints without a fleet-wide cutover. v3 defines no hints.
+  can adopt new hints without a fleet-wide cutover. v5 defines no hints.
+- Version 1 documents (dictionary-only) remain valid input; version 2 adds
+  `grammar` and `derived`. A column entry carries at least one of the three
+  keys, in any combination — the encoder's mode choice (§4) arbitrates.
 
 Constraints, all validated at compile time:
 
 - `leaf` MUST identify a `string` leaf under §6.1 and MUST be unique across
   `columns`; `columns` MUST be sorted by ascending `leaf`.
-- A dictionary holds 1–16383 entries, the ceiling at which a code still fits two
-  `uvarint` bytes. Entries are ordered most-valuable-first so the shortest codes
-  land on the most frequent values: code length then depends only on position,
-  which keeps an encoder's cost model linear rather than self-referential.
+- A dictionary holds 1–16383 entries — the historical two-`uvarint`-byte
+  ceiling, kept so every code fits the 14-bit packed width of §3. Entries are
+  ordered most-valuable-first so the smallest codes land on the most frequent
+  values: the packed width then tracks how much of the dictionary a message
+  actually touches.
 - Entries MUST be unique and well-formed Unicode (§4.10 of wire-v0). Duplicate
   entries would give one value two codes and break canonicality.
 
-### 6.3 Artifact embedding
+### 6.3 Grammars
+
+A grammar describes the shape of a machine-generated string —
+`evt_00h2k4_9fa31c02` — as a token sequence, so the wire carries the few bits
+that vary instead of the many bytes that repeat.
+
+```
+"grammar":[{"lit":"evt_"},{"num":{"base":36,"len":6,"case":"lower"}},
+           {"lit":"_"},{"num":{"base":16,"len":8,"case":"lower"}}]
+```
+
+- A token is either `{"lit": s}` — a verbatim run, non-empty, well-formed
+  (wire-v0 §4.10) — or `{"num": {"base": B, "len": L, "case": C}}` — an
+  unsigned integer rendered in base `B ∈ {10, 16, 36}` as exactly `L` digits,
+  zero-padded, over the alphabet `0-9a-z` when `C` is `"lower"` and `0-9A-Z`
+  when `"upper"`. For base 10, `C` MUST be `"lower"`.
+- 1–8 tokens, at least one `num`, and no two adjacent `lit` tokens — two
+  splittings of the same text must not both be canonical.
+- `L` is capped so every lane value fits the wire-v0 integer domain:
+  `L ≤ 15` for base 10, `L ≤ 13` for base 16, `L ≤ 10` for base 36.
+
+A value **matches** the grammar iff consuming each token in order consumes the
+whole string exactly: each literal appears verbatim, and each numeric token's
+`L` characters all belong to its base and case. A digit of the wrong case is a
+non-match, not an error. Fixed widths make the scan unambiguous with no
+backtracking, and zero-padding makes parse-then-render the identity, so
+matching is a pure function of the value — both sides always agree, which is
+what makes the encoder's MUST-use rule (§3) enforceable.
+
+Matched values travel as one integer per numeric token in per-token lanes
+(§3 string mode `0x03`). Sequential ids meet the delta and frame-of-reference
+machinery there and often cost close to nothing; random hex costs its true
+bits — four bits per digit instead of eight.
+
+### 6.4 Derivations
+
+Traffic often repeats a functional dependency the schema cannot express:
+every row with one `actorId` also has the same `actorEmail`. A derivation
+records that mapping once, in the profile, and the dependent column then
+ships nothing at all for rows that obey it.
+
+```
+"derived":{"source":N,"values":["…",…]}
+```
+
+- `source` MUST be the ordinal of another string leaf of the **same eligible
+  array**, strictly less than this column's ordinal — columns decode in
+  order, so the source is already decoded — and the profile MUST hold a
+  dictionary for the source column. Chains through a derived source are
+  legal; the ordering rule makes cycles impossible.
+- `values` maps by position: a row whose source value is `dict[i]` derives
+  `values[i]`. Its length MUST equal the source dictionary's, and every
+  entry MUST be well-formed (wire-v0 §4.10). `values` entries need not be
+  unique — two actors may share an email domain-wide.
+
+A row **conforms** iff the source participates in that row, the source value
+is in the source dictionary, and `values[i]` equals the actual value. The
+encoder MUST NOT escape a conforming row; the decoder MUST reject a
+non-escaped row whose source is absent or out of dictionary (§3 string mode
+`0x04`). The mapping is by source *value*, not by the source column's wire
+mode — the source may itself arrive plain, deflated, dictionary-coded, via a
+grammar, or derived.
+
+### 6.5 Artifact embedding
 
 The canonical artifact gains one key, after `ir`, present only when a profile
 exists:
 
 ```
-{"wire":1,"plan":{"layout":"columnar","version":3},"ir":<node>,"profile":<shared>}
+{"wire":1,"plan":{"layout":"columnar","version":5},"ir":<node>,"profile":<shared>}
 ```
 
-serialized with the §5 rules and these fixed key orders:
+serialized with the §5 rules and these fixed key orders, absent keys omitted:
 
 ```
 shared    {"columns":[<column>,…]}
-column    {"leaf":N,"dict":[<string>,…]}
+column    {"leaf":N,"dict":[<string>,…],"grammar":[<token>,…],"derived":<derived>}
+token     {"lit":<string>} | {"num":{"base":B,"len":L,"case":<string>}}
+derived   {"source":N,"values":[<string>,…]}
 ```
 
 The **whole dictionary content** is embedded, not a hash or a name. A hash would
@@ -229,7 +358,7 @@ artifact from its own parsed IR and profile, and MUST NOT accept artifact text
 and hash it — a decoder could otherwise match a fingerprint for a plan or
 profile it cannot actually read.
 
-### 6.4 Rotation
+### 6.6 Rotation
 
 Retraining produces different dictionary bytes, therefore a different
 fingerprint, therefore a hard cutover: during a rolling deploy every request
@@ -237,7 +366,7 @@ between mismatched peers falls back to JSON. A decoder SHOULD keep a registry
 of codecs keyed by fingerprint and select per request, so old and new profiles
 are readable simultaneously and rotation is not a cliff.
 
-### 6.5 Training is non-normative
+### 6.7 Training is non-normative
 
 How a profile is produced is out of scope. Any document satisfying §6.2 is
 valid, and the artifact pins the exact bytes, so implementations need not agree
@@ -250,11 +379,11 @@ is UTF-16 code-unit order, which disagrees with UTF-8 byte order above the BMP:
 `U+FFFD` (`EF BF BD`) sorts before `U+10000` (`F0 90 80 80`) by bytes and by
 code point, but after it in JavaScript.
 
-### 6.6 Scope and cautions
+### 6.8 Scope and cautions
 
 Dictionaries apply only to **string columns of eligible arrays**. A string
 outside an array, or inside an array that falls back to the row encoding, gets
-nothing from a profile in v3.
+nothing from a profile in v5.
 
 Two operational cautions:
 
