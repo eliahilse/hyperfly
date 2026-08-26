@@ -3992,6 +3992,221 @@
           }
         },
         "error": "ir"
+      },
+      {
+        "name": "profile-v1-column-missing-dict-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-duplicate-leaf-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "x"
+                ]
+              },
+              {
+                "leaf": 0,
+                "dict": [
+                  "y"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-nine-tokens-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "lit": "s0"
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  },
+                  {
+                    "lit": "s1"
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  },
+                  {
+                    "lit": "s2"
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  },
+                  {
+                    "lit": "s3"
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  },
+                  {
+                    "lit": "end"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-empty-literal-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "lit": ""
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-case-mixed-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 16,
+                      "len": 2,
+                      "case": "mixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
       }
     ]
   }

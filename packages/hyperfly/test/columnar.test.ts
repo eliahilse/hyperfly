@@ -455,3 +455,21 @@ describe("profiles: aliased schema nodes", () => {
     expect(codec.decodeBody(codec.encodeBody(samples[0]!))).toEqual(samples[0]!);
   });
 });
+
+describe("dictionary entry ceiling", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+
+  test("16383 entries compile and 16384 are rejected", () => {
+    const at = Array.from({ length: 16383 }, (_, i) => `v${i}`);
+    const over = [...at, "one-more"];
+    expect(() =>
+      compileIR(IR, { plan: "columnar", profile: { version: 1, shared: { columns: [{ leaf: 0, dict: at }] } }, pack: false }),
+    ).not.toThrow();
+    expect(() =>
+      compileIR(IR, { plan: "columnar", profile: { version: 1, shared: { columns: [{ leaf: 0, dict: over }] } }, pack: false }),
+    ).toThrow("16383");
+  });
+});
