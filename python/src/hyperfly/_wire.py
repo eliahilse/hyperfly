@@ -42,6 +42,7 @@ class Limits:
     max_depth: int = 64
     max_items: int = 2**24
     max_byte_length: int = 2**28
+    max_amplification: int = 4096
 
 
 DEFAULT_LIMITS = Limits()

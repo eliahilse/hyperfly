@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from hyperfly import HyperflyError, Limits, compile_ir
-from hyperfly._codec import _default_inflate
+from hyperfly._codec import _default_inflate, _match_grammar
 from hyperfly.pydantic import compile, to_ir
 
 
@@ -193,6 +193,19 @@ def test_deflate_without_inflate_does_not_pack():
     assert codec.decode_body(codec.encode_body(rows)) == rows
 
 
+def test_deflate_candidate_above_total_byte_limit_is_not_emitted():
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "s", "type": {"kind": "string"}}]}}
+    codec = compile_ir(
+        ir,
+        plan="columnar",
+        limits=Limits(max_byte_length=3),
+        pack={"deflate": lambda _data: b"", "inflate": lambda _data, _size: b""},
+    )
+    body = codec.encode_body([{"s": "aa"}, {"s": "bb"}])
+    assert body[1] == 0x00
+    assert codec.decode_body(body) == [{"s": "aa"}, {"s": "bb"}]
+
+
 def test_aliased_array_nodes_get_distinct_ordinals():
     # A golden vector cannot express this: IR loaded from JSON always has distinct
     # objects, so only an in-memory schema reusing one node reaches the hazard.
@@ -207,7 +220,7 @@ def test_aliased_array_nodes_get_distinct_ordinals():
     }
     codec = compile_ir(ir, plan="columnar", profile=profile, pack=False)
     value = {"a": [{"s": "red"}], "b": [{"s": "red"}]}
-    assert codec.encode_body(value).hex() == "010101010102"
+    assert codec.encode_body(value).hex() == "0101010101010202"
     assert codec.decode_body(codec.encode_body(value)) == value
 
 
@@ -219,3 +232,126 @@ def test_codec_profile_is_isolated_from_mutation():
     codec.profile["shared"]["columns"][0]["dict"][0] = "HIJACKED"
     profile["shared"]["columns"][0]["dict"][0] = "HIJACKED"
     assert codec.decode_body(body) == [{"s": "online"}]
+
+
+def test_columnar_amplification_limit_is_configurable_on_encode_and_decode():
+    ir = {
+        "kind": "array",
+        "element": {
+            "kind": "struct",
+            "fields": [{"name": "e", "type": {"kind": "enum", "members": ["only"]}}],
+        },
+    }
+    rows = [{"e": "only"}, {"e": "only"}]
+    strict = compile_ir(ir, plan="columnar", limits=Limits(max_amplification=1), pack=False)
+    with pytest.raises(HyperflyError) as encoded:
+        strict.encode_body(rows)
+    assert encoded.value.code == "limit"
+    with pytest.raises(HyperflyError) as decoded:
+        strict.decode_body(b"\x02")
+    assert decoded.value.code == "limit"
+
+    exact = compile_ir(ir, plan="columnar", limits=Limits(max_amplification=2), pack=False)
+    assert exact.encode_body(rows) == b"\x02"
+    assert exact.decode_body(b"\x02") == rows
+
+
+def test_zero_payload_row_array_uses_amplification_limit():
+    ir = {"kind": "array", "element": {"kind": "literal", "value": 0}}
+    rows = [0] * 5
+    strict = compile_ir(ir, limits=Limits(max_amplification=4))
+    with pytest.raises(HyperflyError) as encoded:
+        strict.encode_body(rows)
+    assert encoded.value.code == "limit"
+    with pytest.raises(HyperflyError) as decoded:
+        strict.decode_body(b"\x05")
+    assert decoded.value.code == "limit"
+
+
+def test_profile_reconstructions_respect_max_byte_length():
+    ir = {
+        "kind": "array",
+        "element": {
+            "kind": "struct",
+            "fields": [{"name": "s", "type": {"kind": "string"}}],
+        },
+    }
+    cases = [
+        (
+            {"version": 1, "shared": {"columns": [{"leaf": 0, "dict": ["a-value-well-beyond-eight-bytes"]}]}},
+            [{"s": "a-value-well-beyond-eight-bytes"}],
+        ),
+        (
+            {
+                "version": 2,
+                "shared": {
+                    "columns": [
+                        {
+                            "leaf": 0,
+                            "grammar": [
+                                {"lit": "quite-a-long-prefix-"},
+                                {"num": {"base": 10, "len": 2, "case": "lower"}},
+                            ],
+                        }
+                    ]
+                },
+            },
+            [{"s": "quite-a-long-prefix-07"}],
+        ),
+    ]
+    for profile, value in cases:
+        lax = compile_ir(ir, plan="columnar", profile=profile, pack=False)
+        body = lax.encode_body(value)
+        tight = compile_ir(
+            ir,
+            plan="columnar",
+            profile=profile,
+            pack=False,
+            limits=Limits(max_byte_length=8),
+        )
+        with pytest.raises(HyperflyError) as err:
+            tight.decode_body(body)
+        assert err.value.code == "limit"
+
+
+def test_derived_reconstruction_respects_max_byte_length():
+    ir = {
+        "kind": "array",
+        "element": {
+            "kind": "struct",
+            "fields": [
+                {"name": "source", "type": {"kind": "string"}},
+                {"name": "target", "type": {"kind": "string"}},
+            ],
+        },
+    }
+    target = "a-derived-value-well-beyond-eight-bytes"
+    profile = {
+        "version": 2,
+        "shared": {
+            "columns": [
+                {"leaf": 0, "dict": ["u1"]},
+                {"leaf": 1, "derived": {"source": 0, "values": [target]}},
+            ]
+        },
+    }
+    value = [{"source": "u1", "target": target}]
+    lax = compile_ir(ir, plan="columnar", profile=profile, pack=False)
+    body = lax.encode_body(value)
+    tight = compile_ir(
+        ir,
+        plan="columnar",
+        profile=profile,
+        pack=False,
+        limits=Limits(max_byte_length=8),
+    )
+    with pytest.raises(HyperflyError) as err:
+        tight.decode_body(body)
+    assert err.value.code == "limit"
+
+
+def test_grammar_matching_uses_only_the_exact_ascii_alphabet():
+    lower_hex = [{"num": {"base": 16, "len": 2, "case": "lower"}}]
+    assert _match_grammar("af", lower_hex) == [175]
+    for value in ("AF", "+1", "1_", " 1", "１2", "1٢"):
+        assert _match_grammar(value, lower_hex) is None
