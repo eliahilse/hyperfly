@@ -5,8 +5,10 @@ bitmaps, scalar encodings, limits, canonical serialization) applies unchanged.
 The artifact is
 `{"wire":1,"plan":{"layout":"columnar","version":5},"ir":…,"profile":…}` — a
 different fingerprint than the row plan for the same IR, so the two never mix
-on the wire. (v1 through v4 were never released; no artifact for any of them
-exists in the wild.)
+on the wire. (v1 through v3 were never released; columnar@4 shipped, and a
+registry that retains a v4 codec keeps decoding v4 artifacts — the plan
+version is inside the fingerprint, so the two versions never mix on the
+wire.)
 
 ## 1. Scope
 
@@ -56,7 +58,9 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
   for `m` declared members, with no width byte: the width is a pure function
   of the schema, so both sides derive it. A single-member enum packs to width
   0 and carries nothing. An index at or beyond `m` MUST be rejected (such
-  indices are representable whenever `m − 1` is not `2^w − 1`).
+  indices are representable whenever `m − 1` is not `2^w − 1`). An enum wide
+  enough to derive `w > 56` MUST be rejected at compile time; no body can
+  carry it.
 - **bytes** — `uvarint` length + bytes per value (as wire-v0).
 - **string** — one **flags** byte, then the payload it selects. v5 defines
   five values, `0x00`–`0x04`; any other MUST be rejected.
@@ -90,18 +94,24 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
     in row order; then the escaped values in row order, `uvarint` length +
     UTF-8 bytes each. A matched row's string is
     reconstructed by rendering the grammar (§6.3); a lane value at or beyond
-    `B^L` for its token MUST be rejected. An encoder MUST use the lanes for
-    every value the grammar matches and MUST NOT escape it.
+    `B^L` for its token MUST be rejected. Bitmap position `j` names the
+    `j`-th row in which this column participates, in array-row order. An
+    encoder MUST escape a row iff its value does not match the grammar —
+    matched values ride the lanes, never the escapes.
   - `0x04` derived: requires a derivation for this column in the profile
     (§6.4); a decoder without one MUST reject the column. A `uvarint` escape
     count `E` (`E ≤ k`, larger MUST be rejected); if `0 < E < k`, an escape
     bitmap of `k` bits whose set-bit count MUST equal `E`; then the escaped
-    values in row order, `uvarint` length + UTF-8 bytes each. A non-escaped
-    row carries no bytes at all: its value is `values[i]` of the derivation,
-    where `i` is the index of the source row's value in the source
-    dictionary. For a non-escaped row the source MUST participate in that
-    row and its value MUST be in the source dictionary; a decoder MUST
-    reject otherwise. An encoder MUST NOT escape a conforming row (§6.4).
+    values in row order, `uvarint` length + UTF-8 bytes each. Bitmap
+    position `j` names the `j`-th row **in which this column participates**,
+    in array-row order; the source is consulted at that same array row, not
+    at position `j` of its own participant list — the two columns'
+    participation sets may differ. A non-escaped row carries no bytes at
+    all: its value is `values[i]` of the derivation, where `i` is the index
+    of the source row's value in the source dictionary. For a non-escaped
+    row the source MUST participate in that array row and its value MUST be
+    in the source dictionary; a decoder MUST reject otherwise. An encoder
+    MUST escape a row iff it does not conform (§6.4).
 
   Dictionary coding sits below deflate deliberately: it is fully
   deterministic while deflate output is library-dependent, so "smallest,
@@ -117,20 +127,31 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
     within 55 bits for domain-valid values, so the 8-byte uvarint cap holds.
   - `0x02` frame of reference: `svarint(base)`, one width byte `w`, then the
     values bit-packed (§3.1) as `v[i] - base`. `base` is the column minimum, so
-    every packed value is non-negative and fits `w` bits.
+    every packed value is non-negative and fits `w` bits. An encoder MUST set
+    `w = bitWidth(max(v[i] − base))` — "fits" alone would give one column a
+    second encoding at the same size.
   - `0x03` delta frame of reference: `svarint(v[0])`, `svarint(base)`, one
     width byte `w`, then `d[i] - base` bit-packed for `i` in `1..k-1`, where
-    `d[i] = v[i] - v[i-1]` and `base` is the minimum difference.
+    `d[i] = v[i] - v[i-1]` and `base` is the minimum difference. The mode
+    exists only for `k ≥ 2`: with a single value there is no difference to
+    frame, an encoder MUST NOT choose it and a decoder MUST reject it. An
+    encoder MUST set `w = bitWidth(max(d[i] − base))`.
   - `0x04` patched frame of reference: `svarint(base)`, a low-width byte `L`
     (`0 ≤ L ≤ 55`), a high-width byte `H` (`1 ≤ H`, `L + H ≤ 56`; anything
     else MUST be rejected), an exception bitmap of `k` bits (set bit =
     exception), the low `L` bits of `v[i] - base` for **all** `k` values
     bit-packed (§3.1), then `(v[i] - base) >> L` for the exception rows only,
-    in row order, bit-packed at width `H`. `base` is the column minimum. A
-    non-exception row's high part is zero by construction; an exception
-    row's decoded high part MUST be non-zero — a zero high part would give
-    the value a second encoding, and a decoder MUST reject it, exactly as it
-    rejects nonzero padding.
+    in row order, bit-packed at width `H`. `base` is the column minimum,
+    and the encoder MUST set a row's exception bit iff
+    `(v[i] - base) >> L` is non-zero. A non-exception row's high part is
+    zero by construction; an exception row's decoded high part MUST be
+    non-zero — a zero high part would give the value a second encoding, and
+    a decoder MUST reject it, exactly as it rejects nonzero padding.
+    Reconstruction is `v[i] = base + low[i] + high[i]·2^L` in exact integer
+    arithmetic — offsets legally exceed `2^53`, where binary64 rounds — and
+    the result MUST be inside the wire-v0 integer domain before any
+    conversion to a host numeric type, then checked against declared
+    bounds.
   - Other mode bytes MUST be rejected. Declared bounds are validated per
     decoded value, after any accumulation.
 
@@ -186,9 +207,10 @@ smallest total, ties to the lowest `L`, and sets
 `H = bitWidth(largest high part)`. A grammar lane is itself an int column and
 obeys this section recursively. Modes that need a profile — dictionary,
 grammar, derived — enter the comparison only when the profile supplies their
-column, and within grammar and derived modes the escape set is forced (a
-matching or conforming row MUST NOT escape), so the encoding is a pure
-function of schema, profile, and values.
+column, and within grammar and derived modes the escape set is forced in
+both directions: an encoder MUST escape a row iff its value does not match
+the grammar (`0x03`), or iff the row does not conform (`0x04`). The encoding
+is then a pure function of schema, profile, and values.
 
 Two capabilities scope that obligation:
 
@@ -253,6 +275,13 @@ The result numbers every columnar leaf in the whole schema `0 … N−1`.
 - Version 1 documents (dictionary-only) remain valid input; version 2 adds
   `grammar` and `derived`. A column entry carries at least one of the three
   keys, in any combination — the encoder's mode choice (§4) arbitrates.
+- The accepted domain is closed. A version other than `1` or `2` MUST be
+  rejected; a version-1 column MUST hold `leaf` and `dict` and nothing else;
+  unknown keys, `null` standing in for an absent key, wrong types, and
+  non-integer numeric fields MUST be rejected anywhere outside `hints`; a
+  token object holds exactly one of `lit` or `num`; `columns` MUST be
+  non-empty — a profile with nothing to say is expressed by having no
+  profile, not by an empty one, so one codec never has two artifacts.
 
 Constraints, all validated at compile time:
 
@@ -280,12 +309,16 @@ that vary instead of the many bytes that repeat.
 - A token is either `{"lit": s}` — a verbatim run, non-empty, well-formed
   (wire-v0 §4.10) — or `{"num": {"base": B, "len": L, "case": C}}` — an
   unsigned integer rendered in base `B ∈ {10, 16, 36}` as exactly `L` digits,
-  zero-padded, over the alphabet `0-9a-z` when `C` is `"lower"` and `0-9A-Z`
-  when `"upper"`. For base 10, `C` MUST be `"lower"`.
+  zero-padded. The digit alphabet is the first `B` symbols of
+  `0123456789abcdefghijklmnopqrstuvwxyz` when `C` is `"lower"` and of the
+  uppercase counterpart when `"upper"`; a digit's numeric value is its
+  position in that alphabet, matched as exact ASCII — no Unicode digit
+  recognition, no case folding. For base 10, `C` MUST be `"lower"`.
 - 1–8 tokens, at least one `num`, and no two adjacent `lit` tokens — two
   splittings of the same text must not both be canonical.
-- `L` is capped so every lane value fits the wire-v0 integer domain:
-  `L ≤ 15` for base 10, `L ≤ 13` for base 16, `L ≤ 10` for base 36.
+- `L` MUST be an integer with `1 ≤ L`, capped so every lane value fits the
+  wire-v0 integer domain: `L ≤ 15` for base 10, `L ≤ 13` for base 16,
+  `L ≤ 10` for base 36.
 
 A value **matches** the grammar iff consuming each token in order consumes the
 whole string exactly: each literal appears verbatim, and each numeric token's
