@@ -473,3 +473,18 @@ describe("dictionary entry ceiling", () => {
     ).toThrow("16383");
   });
 });
+
+describe("deflate candidacy respects the byte limit (python port finding)", () => {
+  test("a column whose concatenation exceeds maxByteLength encodes plain, not packed", () => {
+    const IR: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+    };
+    const limits = { maxByteLength: 8 } as never;
+    const codec = compileIR(IR, { plan: "columnar", limits });
+    const value = [{ s: "aaaa" }, { s: "aaaa" }, { s: "aaaa" }];
+    const body = codec.encodeBody(value);
+    expect(codec.decodeBody(body)).toEqual(value);
+    expect(body[1]).toBe(0x00);
+  });
+});
