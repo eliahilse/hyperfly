@@ -5,7 +5,8 @@
  * Inference is deliberately the schema a developer would plausibly declare —
  * ints get a zero floor when every observed value is non-negative, strings
  * upgrade to enums only under clear repetition — and the inferred schema is
- * shown verbatim, so nothing is hidden in the numbers.
+ * shown verbatim, so nothing is hidden in the numbers. Everything is measured
+ * in-sample and the UI says so.
  */
 import { gzipSync, deflateSync, inflateSync } from "fflate";
 import { compileIR, train, type IRNode } from "hyperfly";
@@ -16,12 +17,24 @@ export interface InferError {
 }
 
 const enc = new TextEncoder();
+const MAX_DEPTH = 64;
 
 export const packHooks = {
   deflate: (data: Uint8Array) => deflateSync(data, { level: 6 }),
+  // spec §4: exactly one complete stream — fflate ignores trailing bytes, so
+  // probe: a tight stream breaks when its last byte is dropped, a padded one does not
   inflate: (data: Uint8Array, maxOutputLength: number) => {
     const out = inflateSync(data);
     if (out.length > maxOutputLength) throw new Error("inflated beyond the declared size");
+    if (data.length > 0) {
+      let tight = false;
+      try {
+        inflateSync(data.subarray(0, data.length - 1));
+      } catch {
+        tight = true;
+      }
+      if (!tight) throw new Error("trailing bytes after the deflate stream");
+    }
     return out;
   },
 };
@@ -46,9 +59,20 @@ function kindOf(value: unknown, path: string): Kind {
   throw new Unsupported({ path, message: `cannot infer a schema for ${String(value)}` });
 }
 
+interface InferCtx {
+  /** paths where no value was ever observed, so the type is an assumption */
+  assumptions: string[];
+}
+
 /** Infer one node from every non-null observation of a position. */
-function inferNode(values: unknown[], path: string): IRNode {
-  if (values.length === 0) return { kind: "string" };
+function inferNode(values: unknown[], path: string, depth: number, ctx: InferCtx): IRNode {
+  if (depth > MAX_DEPTH) {
+    throw new Unsupported({ path, message: `nesting deeper than the codec's limit of ${MAX_DEPTH}` });
+  }
+  if (values.length === 0) {
+    ctx.assumptions.push(path);
+    return { kind: "string" };
+  }
   const kinds = new Set(values.map((v) => kindOf(v, path)));
   if (kinds.size > 1) {
     throw new Unsupported({
@@ -71,7 +95,7 @@ function inferNode(values: unknown[], path: string): IRNode {
   if (kind === "string") {
     const strs = values as string[];
     const distinct = new Set(strs);
-    if (strs.length >= 6 && distinct.size <= 8 && distinct.size * 2 <= strs.length) {
+    if (strs.length >= 6 && !distinct.has("") && distinct.size <= 8 && distinct.size * 2 <= strs.length) {
       return { kind: "enum", members: [...distinct] };
     }
     return { kind: "string" };
@@ -80,7 +104,7 @@ function inferNode(values: unknown[], path: string): IRNode {
   if (kind === "array") {
     const elements = (values as unknown[][]).flat();
     const nonNull = elements.filter((e) => e !== null);
-    const element = inferNode(nonNull, `${path}[]`);
+    const element = inferNode(nonNull, `${path}[]`, depth + 1, ctx);
     return {
       kind: "array",
       element: nonNull.length < elements.length ? { kind: "nullable", inner: element } : element,
@@ -97,7 +121,7 @@ function inferNode(values: unknown[], path: string): IRNode {
     const present = objects.filter((o) => Object.prototype.hasOwnProperty.call(o, name));
     const observed = present.map((o) => o[name]);
     const nonNull = observed.filter((v) => v !== null);
-    const type = inferNode(nonNull, `${path}.${name}`);
+    const type = inferNode(nonNull, `${path}.${name}`, depth + 1, ctx);
     const field: { name: string; type: IRNode; optional?: boolean; nullable?: boolean } = { name, type };
     if (present.length < objects.length) field.optional = true;
     if (nonNull.length < observed.length) field.nullable = true;
@@ -107,13 +131,14 @@ function inferNode(values: unknown[], path: string): IRNode {
   return { kind: "struct", fields };
 }
 
-export function inferIR(messages: unknown[]): { ir: IRNode } | { error: InferError } {
+export function inferIR(messages: unknown[]): { ir: IRNode; assumptions: string[] } | { error: InferError } {
   try {
     const nonNull = messages.filter((m) => m !== null);
     if (nonNull.length !== messages.length) {
       return { error: { path: "$", message: "a whole response cannot be null" } };
     }
-    return { ir: inferNode(messages, "$") };
+    const ctx: InferCtx = { assumptions: [] };
+    return { ir: inferNode(messages, "$", 0, ctx), assumptions: ctx.assumptions };
   } catch (err) {
     if (err instanceof Unsupported) return { error: err.detail };
     throw err;
@@ -128,12 +153,13 @@ export function inferIR(messages: unknown[]): { ir: IRNode } | { error: InferErr
 export function columnPaths(ir: IRNode): string[] {
   const out: string[] = [];
   const COLUMN_KINDS = new Set(["bool", "int", "float64", "string", "bytes", "enum", "literal"]);
+  const seg = (name: string) => (/[.[\]]/.test(name) ? JSON.stringify(name) : name);
 
   const flatten = (node: IRNode, prefix: string): string[] | null => {
     if (node.kind !== "struct" || node.fields.length === 0) return null;
     const leaves: string[] = [];
     for (const f of node.fields) {
-      const at = prefix ? `${prefix}.${f.name}` : f.name;
+      const at = prefix ? `${prefix}.${seg(f.name)}` : seg(f.name);
       if (f.type.kind === "struct") {
         if (f.optional || f.nullable) return null;
         const inner = flatten(f.type, at);
@@ -163,7 +189,7 @@ export function columnPaths(ir: IRNode): string[] {
         walk(node.inner, prefix);
         return;
       case "struct":
-        for (const f of node.fields) walk(f.type, prefix ? `${prefix}.${f.name}` : f.name);
+        for (const f of node.fields) walk(f.type, prefix ? `${prefix}.${seg(f.name)}` : seg(f.name));
         return;
       default:
         return;
@@ -171,6 +197,26 @@ export function columnPaths(ir: IRNode): string[] {
   };
   walk(ir, "");
   return out;
+}
+
+/** Structural equality with JSON semantics, indifferent to object key order. */
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (typeof a === "number" && typeof b === "number") return a === b; // 0 vs -0 both fine on the wire
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => deepEqual(v, b[i]));
+  }
+  if (typeof a === "object" && typeof b === "object" && a !== null && b !== null && !Array.isArray(a) && !Array.isArray(b)) {
+    const ka = Object.keys(a as object);
+    const kb = Object.keys(b as object);
+    if (ka.length !== kb.length) return false;
+    return ka.every(
+      (k) =>
+        Object.prototype.hasOwnProperty.call(b, k) &&
+        deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
+    );
+  }
+  return false;
 }
 
 export interface LearnedColumn {
@@ -184,8 +230,12 @@ export interface Measurement {
   gzip: number;
   hyperfly: number;
   profiled?: number;
+  /** corpus mode ran training but nothing was worth learning */
+  trainedNothing?: boolean;
   fingerprint: string;
-  profileBytes?: number;
+  /** full serialized codec artifacts a peer fetches once, uncompressed */
+  artifactBytes: number;
+  profiledArtifactBytes?: number;
   breakEven?: number;
   learned: LearnedColumn[];
   roundTripOk: boolean;
@@ -213,7 +263,7 @@ export function measure(ir: IRNode, messages: unknown[]): Measurement | { error:
     for (const m of messages) {
       const wire = plain.encode(m as never);
       hyperfly += wire.length;
-      if (JSON.stringify(plain.decode(wire)) !== JSON.stringify(m)) roundTripOk = false;
+      if (!deepEqual(plain.decode(wire), m)) roundTripOk = false;
     }
 
     const base: Measurement = {
@@ -222,49 +272,46 @@ export function measure(ir: IRNode, messages: unknown[]): Measurement | { error:
       gzip,
       hyperfly,
       fingerprint: plain.fingerprint,
+      artifactBytes: enc.encode(plain.artifact).length,
       learned: [],
       roundTripOk,
     };
     if (messages.length < 2) return base;
 
     const profile = train(ir, messages as never[]);
-    if (!profile) return base;
+    if (!profile) return { ...base, trainedNothing: true };
     const profiled = compileIR(ir, { plan: "columnar", profile, pack: packHooks });
     let profiledBytes = 0;
     for (const m of messages) {
       const wire = profiled.encode(m as never);
       profiledBytes += wire.length;
-      if (JSON.stringify(profiled.decode(wire)) !== JSON.stringify(m)) roundTripOk = false;
+      if (!deepEqual(profiled.decode(wire), m)) roundTripOk = false;
     }
 
     const paths = columnPaths(ir);
     const learned: LearnedColumn[] = [];
-    let profileBytes = 0;
     for (const column of profile.shared.columns) {
       const path = paths[column.leaf] ?? `column ${column.leaf}`;
-      if (column.dict) {
-        learned.push({ path, what: `dictionary · ${column.dict.length} values` });
-        for (const e of column.dict) profileBytes += enc.encode(e).length + 1;
-      }
-      if (column.grammar) {
-        learned.push({ path, what: `grammar ${renderGrammar(column.grammar)}` });
-        profileBytes += enc.encode(JSON.stringify(column.grammar)).length;
-      }
+      if (column.dict) learned.push({ path, what: `dictionary · ${column.dict.length} values` });
+      if (column.grammar) learned.push({ path, what: `grammar ${renderGrammar(column.grammar)}` });
       if (column.derived) {
         learned.push({
           path,
           what: `derived from ${paths[column.derived.source] ?? `column ${column.derived.source}`}`,
         });
-        for (const e of column.derived.values) profileBytes += enc.encode(e).length + 1;
       }
     }
 
-    const saved = hyperfly - profiledBytes;
+    const profiledArtifactBytes = enc.encode(profiled.artifact).length;
+    const savedPerMessage = (hyperfly - profiledBytes) / messages.length;
     return {
       ...base,
       profiled: profiledBytes,
-      profileBytes,
-      breakEven: saved > 0 ? Math.ceil(profileBytes / (saved / messages.length)) : undefined,
+      profiledArtifactBytes,
+      breakEven:
+        savedPerMessage > 0
+          ? Math.ceil((profiledArtifactBytes - base.artifactBytes) / savedPerMessage)
+          : undefined,
       learned,
       roundTripOk,
     };
@@ -281,8 +328,9 @@ export function renderIR(node: IRNode, indent = 0): string {
     case "struct": {
       const fields = node.fields
         .map((f) => {
-          const marks = `${f.optional ? "?" : ""}${f.nullable ? " | null" : ""}`;
-          return `${pad}  ${f.name}${marks ? marks : ""}: ${renderIR(f.type, indent + 1).trimStart()}`;
+          const name = `${f.name}${f.optional ? "?" : ""}`;
+          const type = `${renderIR(f.type, indent + 1).trimStart()}${f.nullable ? " | null" : ""}`;
+          return `${pad}  ${name}: ${type}`;
         })
         .join("\n");
       return `${pad}{\n${fields}\n${pad}}`;

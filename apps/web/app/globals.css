@@ -1016,7 +1016,7 @@ h3 {
     border-right: 0;
   }
 
-  .nav-links a:not(:last-child) {
+  .nav-links a:not(:nth-last-child(-n + 2)) {
     display: none;
   }
 
@@ -1223,4 +1223,16 @@ h3 {
   line-height: 1.55;
   color: var(--muted);
   overflow-x: auto;
+}
+
+.play-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 16px;
+  cursor: pointer;
+}
+
+.play-disclosure {
+  color: var(--faint);
 }
