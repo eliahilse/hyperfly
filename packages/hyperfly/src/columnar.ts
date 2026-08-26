@@ -1,5 +1,5 @@
-import { decodeNode, readBitmap, type Inflate } from "./decode.js";
-import { encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
+import { boundAmplification, decodeNode, readBitmap, type Inflate } from "./decode.js";
+import { checkAmplification, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import type { IRField, IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
@@ -950,6 +950,7 @@ export function encodeColumnarArray(
   } else {
     writeUleb(w, BigInt(value.length));
   }
+  const payloadStart = w.size;
 
   const rows = value.map((row, i) => {
     if (typeof row !== "object" || row === null || Array.isArray(row)) {
@@ -1061,6 +1062,8 @@ export function encodeColumnarArray(
         }
     }
   }
+
+  checkAmplification(rows.length, w.size - payloadStart, ctx, path);
 }
 
 export function decodeColumnarArray(
@@ -1092,12 +1095,7 @@ export function decodeColumnarArray(
   // caps the work a hostile byte can demand instead, and row objects materialize
   // only after every column payload has decoded, so truncated input never
   // triggers the large allocation.
-  if (count > (r.remaining() + 1) * r.limits.maxAmplification) {
-    throw new DecodeError(
-      "limit",
-      `${path}: ${count} rows from ${r.remaining()} remaining byte(s) exceeds the amplification limit`,
-    );
-  }
+  boundAmplification(r, count, path);
 
   const leaves = flattenLeaves(element)!;
 

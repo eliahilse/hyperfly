@@ -3185,13 +3185,21 @@
                       "len": 2,
                       "case": "lower"
                     }
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
                   }
                 ]
               }
             ]
           }
         },
-        "error": "ir"
+        "error": "ir",
+        "description": "a token holds exactly one of lit or num; a second valid numeric token keeps this from being masked by the at-least-one-lane rule"
       },
       {
         "name": "profile-empty-columns-rejected",
@@ -3413,6 +3421,572 @@
                     "only-one"
                   ]
                 }
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-missing-shared-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-v2-column-with-no-feature-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-leaf-not-a-string-column-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "n",
+                "type": {
+                  "kind": "int"
+                }
+              },
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "x"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-duplicate-dict-entry-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "x",
+                  "x"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-adjacent-literals-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "lit": "a"
+                  },
+                  {
+                    "lit": "b"
+                  },
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-base-eight-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 8,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-base10-upper-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "upper"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-len-fractional-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2.5,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-len-over-base-cap-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 36,
+                      "len": 11,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-no-numeric-token-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "lit": "only"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-derived-source-other-array-rejected",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "array",
+                "element": {
+                  "kind": "struct",
+                  "fields": [
+                    {
+                      "name": "a",
+                      "type": {
+                        "kind": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "name": "y",
+              "type": {
+                "kind": "array",
+                "element": {
+                  "kind": "struct",
+                  "fields": [
+                    {
+                      "name": "b",
+                      "type": {
+                        "kind": "string"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "u"
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "v"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-derived-source-without-dict-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "v"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-derived-self-source-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 1,
+                "dict": [
+                  "u"
+                ],
+                "derived": {
+                  "source": 1,
+                  "values": [
+                    "v"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-leaf-out-of-range-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 5,
+                "dict": [
+                  "x"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-dict-lone-surrogate-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  {
+                    "$surrogate": "d800"
+                  }
+                ]
               }
             ]
           }

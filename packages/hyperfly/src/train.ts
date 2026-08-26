@@ -1,4 +1,5 @@
 import { columnarEligible, flattenLeaves, intColumnEncodedLength, matchGrammar } from "./columnar.js";
+import { defaultPackHooks } from "./pack.js";
 import { hasLoneSurrogate, type IRNode } from "./ir.js";
 import {
   MAX_DICT_ENTRIES,
@@ -134,6 +135,32 @@ function collect(
     default:
       return;
   }
+}
+
+/**
+ * What the packed encoder would pay for these values under deflate. Estimated with
+ * the same hooks the codec uses, so an induced grammar is kept only when the real
+ * encoder would actually choose it — without this a compressible column trains a
+ * grammar that mode choice then ignores, wasting artifact bytes on every rotation.
+ */
+function deflateModeCost(batches: readonly string[][]): number {
+  const deflate = defaultPackHooks().deflate;
+  if (!deflate) return Infinity;
+  let cost = 0;
+  for (const batch of batches) {
+    if (batch.length === 0) continue;
+    const bytes = batch.map((value) => encoder.encode(value));
+    const total = bytes.reduce((n, b) => n + b.length, 0);
+    const concat = new Uint8Array(total);
+    let offset = 0;
+    for (const b of bytes) {
+      concat.set(b, offset);
+      offset += b.length;
+    }
+    const packed = deflate(concat);
+    cost += bytes.reduce((n, b) => n + ulebLen(b.length), 0) + ulebLen(packed.length) + packed.length;
+  }
+  return cost;
 }
 
 function plainModeCost(batches: readonly string[][]): number {
@@ -380,7 +407,8 @@ function induceGrammar(
   const grammarCost = grammarModeCost(grammar, batches);
   const plainCost = plainModeCost(batches);
   const dictCost = dict ? dictionaryModeCost(dict, batches) : Infinity;
-  return grammarCost < Math.min(plainCost, dictCost) ? grammar : undefined;
+  const packedCost = deflateModeCost(batches);
+  return grammarCost < Math.min(plainCost, dictCost, packedCost) ? grammar : undefined;
 }
 
 function detectDerivation(

@@ -352,10 +352,20 @@ describe("profiled golden vectors", () => {
   }
 
   // the accepted profile domain is closed: these documents must fail compilation
+  const reviveDeep = (value: unknown): unknown => {
+    if (value && typeof value === "object" && "$surrogate" in (value as object)) {
+      return String.fromCharCode(parseInt((value as { $surrogate: string }).$surrogate, 16));
+    }
+    if (Array.isArray(value)) return value.map(reviveDeep);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([k, val]) => [k, reviveDeep(val)]));
+    }
+    return value;
+  };
   for (const v of vectors.profiled.invalidProfile) {
     test(v.name, () => {
       try {
-        compileIR(v.ir as IRNode, { plan: "columnar", profile: v.profile as never, pack: false });
+        compileIR(v.ir as IRNode, { plan: "columnar", profile: reviveDeep(v.profile) as never, pack: false });
         throw new Error("expected failure");
       } catch (err) {
         expect(err).toBeInstanceOf(HyperflyError);
