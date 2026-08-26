@@ -82,6 +82,7 @@ export default function Home() {
         <nav className="nav-links">
           <a href="#size">size</a>
           <a href="#pipeline">pipeline</a>
+          <Link href="/playground">playground</Link>
           <a href={GITHUB} target="_blank" rel="noopener noreferrer">
             github
           </a>
@@ -327,9 +328,9 @@ export default function Home() {
                 github
                 <span aria-hidden="true">↗</span>
               </a>
-              <span className="button ghost" aria-disabled="true">
-                benchmark playground — soon
-              </span>
+              <Link className="button ghost" href="/playground">
+                benchmark playground
+              </Link>
             </div>
           </Reveal>
         </section>
