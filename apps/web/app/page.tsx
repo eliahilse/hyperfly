@@ -32,8 +32,8 @@ const STAGES = [
   {
     index: "03",
     name: "Planner",
-    body: "A Rust planner picks a codec per field: entropy coding, dictionary, delta, columnar layout, or raw bytes when nothing beats raw bytes.",
-    artifact: "plan · 7 columns · 4 codecs",
+    body: "The planner picks a codec per column: dictionary, delta, frame-of-reference bit packing, grammar lanes for machine-made ids, one column derived from another — or raw, when nothing beats raw.",
+    artifact: "plan · 12 columns · 5 codecs",
   },
   {
     index: "04",
