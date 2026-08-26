@@ -87,9 +87,14 @@ interface Row {
   kind: "baseline" | "generic" | "hyperfly" | "full";
 }
 
-/** An integer literal JSON.parse would silently round. */
+/**
+ * An integer literal JSON.parse would silently round. String literals are
+ * stripped first so digits inside values ("id": "12345678901234567890")
+ * never trip the check — only bare number tokens can.
+ */
 function findUnsafeInteger(text: string): string | null {
-  const candidates = text.match(/-?\d{16,}(?![\d.eE])/g);
+  const outsideStrings = text.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  const candidates = outsideStrings.match(/-?\d{16,}(?![\d.eE])/g);
   if (!candidates) return null;
   for (const c of candidates) {
     const abs = c.startsWith("-") ? c.slice(1) : c;
