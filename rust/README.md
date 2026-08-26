@@ -2,7 +2,7 @@
 
 Rust implementation of the [hyperfly](https://hyperfly.dev) wire format.
 
-The authorities are `spec/wire-v0.md`, `spec/plan-columnar-v3.md` and the golden
+The authorities are `spec/wire-v0.md`, `spec/plan-columnar-v5.md` and the golden
 vectors in `spec/vectors/`. This crate is verified against those vectors, the same
 ones the TypeScript and Python implementations run, so all three agree byte-for-byte.
 

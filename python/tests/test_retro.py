@@ -355,3 +355,26 @@ def test_grammar_matching_uses_only_the_exact_ascii_alphabet():
     assert _match_grammar("af", lower_hex) == [175]
     for value in ("AF", "+1", "1_", " 1", "１2", "1٢"):
         assert _match_grammar(value, lower_hex) is None
+
+
+def test_deflate_hook_never_sees_a_disqualified_aggregate():
+    """A column whose concatenation exceeds max_byte_length is not a deflate
+    candidate, so the hook must not be invoked with it at all (PR gate)."""
+    calls = []
+
+    def counting_deflate(data: bytes) -> bytes:
+        calls.append(len(data))
+        return b""
+
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "s", "type": {"kind": "string"}}]}}
+    codec = compile_ir(
+        ir,
+        plan="columnar",
+        limits=Limits(max_byte_length=3),
+        pack={"deflate": counting_deflate, "inflate": lambda _data, _size: b""},
+    )
+    value = [{"s": "aa"}, {"s": "aa"}]
+    body = codec.encode_body(value)
+    assert codec.decode_body(body) == value
+    assert body[1] == 0x00
+    assert calls == []

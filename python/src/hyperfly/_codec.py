@@ -663,12 +663,13 @@ def _encode_string_column(
 
     packed = None
     packed_cost = math.inf
-    if ctx.deflate is not None and ctx.inflate is not None:
-        total = sum(len(value) for value in encoded)
+    total = sum(len(value) for value in encoded)
+    # A packed column's aggregate and blob lengths are decoder-limited even when
+    # every individual string is small. A disqualified aggregate never reaches
+    # the hook at all — custom hooks must not observe unencodable input.
+    if ctx.deflate is not None and ctx.inflate is not None and total <= ctx.max_byte_length:
         candidate = ctx.deflate(b"".join(encoded))
-        # A packed column's aggregate and blob lengths are decoder-limited even
-        # when every individual string is small. Exclude an unreadable candidate.
-        if total <= ctx.max_byte_length and len(candidate) <= ctx.max_byte_length:
+        if len(candidate) <= ctx.max_byte_length:
             packed = candidate
             packed_cost = (
                 sum(uleb_len(len(value)) for value in encoded)
