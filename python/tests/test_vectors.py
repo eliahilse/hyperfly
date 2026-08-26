@@ -11,7 +11,7 @@ def deep_eq(a, b) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is bool and type(b) is bool and a == b
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return float(a) == float(b)
+        return a == b
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(deep_eq(a[k], b[k]) for k in a)
     if isinstance(a, list) and isinstance(b, list):
@@ -35,6 +35,10 @@ def run_invalid_decode(vector, plan):
 def revive(value):
     if isinstance(value, dict) and "$surrogate" in value:
         return chr(int(value["$surrogate"], 16))
+    if isinstance(value, dict):
+        return {key: revive(inner) for key, inner in value.items()}
+    if isinstance(value, list):
+        return [revive(inner) for inner in value]
     return value
 
 
@@ -112,4 +116,22 @@ def test_profiled_requires_profile(vector):
     codec = compile_ir(vector["ir"], plan="columnar", pack=False)
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(bytes.fromhex(vector["hex"]))
+    assert err.value.code == vector["error"], vector["name"]
+
+
+@pytest.mark.parametrize("vector", PROFILED["decodeOnly"], ids=lambda v: v["name"])
+def test_profiled_decode_only(vector):
+    codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+
+
+@pytest.mark.parametrize("vector", PROFILED["invalidProfile"], ids=lambda v: v["name"])
+def test_profiled_invalid_profile(vector):
+    with pytest.raises(HyperflyError) as err:
+        compile_ir(
+            vector["ir"],
+            plan="columnar",
+            profile=revive(vector["profile"]),
+            pack=False,
+        )
     assert err.value.code == vector["error"], vector["name"]
