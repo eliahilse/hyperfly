@@ -62,7 +62,10 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
-    Err(Error { code, message: message.into() })
+    Err(Error {
+        code,
+        message: message.into(),
+    })
 }
 
 pub const INT_MIN: i64 = -((1i64 << 53) - 1);
@@ -75,11 +78,17 @@ pub struct Limits {
     pub max_depth: u32,
     pub max_items: u64,
     pub max_byte_length: u64,
+    pub max_amplification: u64,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_depth: 64, max_items: 1 << 24, max_byte_length: 1 << 28 }
+        Limits {
+            max_depth: 64,
+            max_items: 1 << 24,
+            max_byte_length: 1 << 28,
+            max_amplification: 4096,
+        }
     }
 }
 
@@ -91,7 +100,11 @@ pub struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8], limits: Limits) -> Self {
-        Reader { buf, pos: 0, limits }
+        Reader {
+            buf,
+            pos: 0,
+            limits,
+        }
     }
 
     pub fn u8(&mut self) -> Result<u8> {
@@ -104,11 +117,17 @@ impl<'a> Reader<'a> {
     }
 
     pub fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.pos + n > self.buf.len() {
+        let Some(end) = self.pos.checked_add(n) else {
+            return err(
+                ErrorCode::Truncated,
+                "requested byte length overflows the host size domain",
+            );
+        };
+        if end > self.buf.len() {
             return err(ErrorCode::Truncated, "unexpected end of input");
         }
-        let out = &self.buf[self.pos..self.pos + n];
-        self.pos += n;
+        let out = &self.buf[self.pos..end];
+        self.pos = end;
         Ok(out)
     }
 
@@ -118,7 +137,10 @@ impl<'a> Reader<'a> {
 
     pub fn expect_end(&self) -> Result<()> {
         if self.pos != self.buf.len() {
-            return err(ErrorCode::Trailing, format!("{} trailing byte(s) after body", self.buf.len() - self.pos));
+            return err(
+                ErrorCode::Trailing,
+                format!("{} trailing byte(s) after body", self.buf.len() - self.pos),
+            );
         }
         Ok(())
     }
@@ -126,7 +148,10 @@ impl<'a> Reader<'a> {
 
 pub fn write_uleb(out: &mut Vec<u8>, value: u64) -> Result<()> {
     if value > ULEB_DOMAIN_MAX {
-        return err(ErrorCode::Range, format!("uvarint out of v0 domain: {value}"));
+        return err(
+            ErrorCode::Range,
+            format!("uvarint out of v0 domain: {value}"),
+        );
     }
     let mut v = value;
     loop {
@@ -155,7 +180,10 @@ pub fn read_uleb(r: &mut Reader) -> Result<u64> {
         }
         shift += 7;
     }
-    err(ErrorCode::Varint, format!("uvarint longer than {MAX_ULEB_BYTES} bytes"))
+    err(
+        ErrorCode::Varint,
+        format!("uvarint longer than {MAX_ULEB_BYTES} bytes"),
+    )
 }
 
 pub fn uleb_len(value: u64) -> usize {
