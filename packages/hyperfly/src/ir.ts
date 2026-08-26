@@ -90,6 +90,13 @@ export function validateIR(node: IRNode, path = "$"): void {
     }
     case "enum": {
       if (node.members.length === 0) fail(path, "enum needs at least one member");
+      let width = 0;
+      let highest = BigInt(node.members.length - 1);
+      while (highest > 0n) {
+        highest >>= 1n;
+        width++;
+      }
+      if (width > 56) fail(path, "enum member count requires a column width above 56 bits");
       const seen = new Set<string>();
       for (const m of node.members) {
         if (typeof m !== "string" || m.length === 0) fail(path, "enum members must be non-empty strings");

@@ -274,7 +274,7 @@ describe("profiles: dictionary columns", () => {
     const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
     const value = [{ s: "online" }, { s: "novel" }, { s: "offline" }];
     const body = codec.encodeBody(value);
-    expect(toHex(body)).toBe("03010100056e6f76656c02");
+    expect(toHex(body)).toBe("03010221056e6f76656c");
     expect(codec.decodeBody(body)).toEqual(value);
   });
 
@@ -295,7 +295,7 @@ describe("profiles: dictionary columns", () => {
 
   test("an out-of-range code is rejected", () => {
     const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
-    expect(() => codec.decodeBody(fromHex("010109"))).toThrow("out of range");
+    expect(() => codec.decodeBody(fromHex("01010203"))).toThrow("out of range");
   });
 
   test("invalid profiles are rejected at compile", () => {
@@ -372,7 +372,7 @@ describe("profiles: aliased schema nodes", () => {
     const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
     const value = { a: [{ s: "red" }], b: [{ s: "red" }] };
     // "red" is code 1 under leaf 0 and code 2 under leaf 1
-    expect(toHex(codec.encodeBody(value))).toBe("010101010102");
+    expect(toHex(codec.encodeBody(value))).toBe("0101010101010202");
     expect(codec.decodeBody(codec.encodeBody(value))).toEqual(value);
   });
 

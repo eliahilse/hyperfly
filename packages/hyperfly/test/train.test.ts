@@ -20,7 +20,7 @@ describe("reference trainer", () => {
 
   test("orders by frequency so the shortest codes reach the most common values", () => {
     const profile = train(ROWS, samples([["rare", "rare", "common", "common", "common", "common"]]));
-    expect(profile?.shared.columns[0]!.dict[0]).toBe("common");
+    expect(profile?.shared.columns[0]!.dict![0]).toBe("common");
   });
 
   test("a trained profile shrinks held-out data and round-trips", () => {
@@ -36,7 +36,7 @@ describe("reference trainer", () => {
   test("output always compiles, including at the entry ceiling", () => {
     const many = Array.from({ length: MAX_DICT_ENTRIES + 50 }, (_, i) => `v${i}`);
     const profile = train(ROWS, samples([many, many]));
-    expect(profile!.shared.columns[0]!.dict.length).toBeLessThanOrEqual(MAX_DICT_ENTRIES);
+    expect(profile!.shared.columns[0]!.dict!.length).toBeLessThanOrEqual(MAX_DICT_ENTRIES);
     expect(() => compileIR(ROWS, { plan: "columnar", profile })).not.toThrow();
   });
 

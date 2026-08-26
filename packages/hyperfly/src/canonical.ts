@@ -1,5 +1,5 @@
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
-import type { SharedProfile } from "./profile.js";
+import type { Derivation, GrammarToken, SharedProfile } from "./profile.js";
 import { sha256 } from "./sha256.js";
 
 /** Spec §5: not generic JSON canonicalization — key order and escaping are fixed here. */
@@ -60,12 +60,25 @@ export function serializeNode(node: IRNode): string {
 
 export type PlanLayout = "row" | "columnar";
 
-const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 4 };
+const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 5 };
+
+function serializeToken(token: GrammarToken): string {
+  if ("lit" in token) return `{"lit":${escapeString(token.lit)}}`;
+  return `{"num":{"base":${token.num.base},"len":${token.num.len},"case":${escapeString(token.num.case)}}}`;
+}
+
+function serializeDerived(derived: Derivation): string {
+  return `{"source":${derived.source},"values":[${derived.values.map(escapeString).join(",")}]}`;
+}
 
 export function serializeShared(shared: SharedProfile): string {
-  const columns = shared.columns.map(
-    (c) => `{"leaf":${c.leaf},"dict":[${c.dict.map(escapeString).join(",")}]}`,
-  );
+  const columns = shared.columns.map((column) => {
+    let out = `{"leaf":${column.leaf}`;
+    if (column.dict) out += `,"dict":[${column.dict.map(escapeString).join(",")}]`;
+    if (column.grammar) out += `,"grammar":[${column.grammar.map(serializeToken).join(",")}]`;
+    if (column.derived) out += `,"derived":${serializeDerived(column.derived)}`;
+    return out + "}";
+  });
   return `{"columns":[${columns.join(",")}]}`;
 }
 
