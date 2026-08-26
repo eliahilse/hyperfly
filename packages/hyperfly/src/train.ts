@@ -1,4 +1,4 @@
-import { columnarEligible, flattenLeaves, intColumnEncodedLength } from "./columnar.js";
+import { columnarEligible, flattenLeaves, intColumnEncodedLength, matchGrammar } from "./columnar.js";
 import { hasLoneSurrogate, type IRNode } from "./ir.js";
 import {
   MAX_DICT_ENTRIES,
@@ -7,6 +7,7 @@ import {
   type Derivation,
   type GrammarBase,
   type GrammarCase,
+  type GrammarNum,
   type GrammarToken,
   type Profile,
   type ProfileColumn,
@@ -220,7 +221,7 @@ function induceDictionary(
 }
 
 interface RawToken {
-  kind: "lit" | "num";
+  kind: "alnum" | "delim";
   text: string;
 }
 
@@ -233,17 +234,12 @@ function asciiAlphanumeric(char: string): boolean {
   );
 }
 
-function containsDecimalDigit(value: string): boolean {
-  for (const char of value) {
-    const code = char.charCodeAt(0);
-    if (code >= 0x30 && code <= 0x39) return true;
-  }
-  return false;
-}
-
 /**
- * Non-normative grammar tokenizer: maximal ASCII alphanumeric runs containing a
- * decimal digit are numeric candidates; everything else is coalesced literally.
+ * Non-normative grammar tokenizer: maximal ASCII alphanumeric runs against
+ * everything else. Whether an alphanumeric run is a literal or a numeric lane
+ * is decided per aligned slot across the whole sample, not per value — a
+ * classifier that looks at one value at a time misclassifies the occasional
+ * all-letter hex segment and loses the grammar for the entire column.
  */
 function tokenize(value: string): RawToken[] {
   const out: RawToken[] = [];
@@ -252,11 +248,7 @@ function tokenize(value: string): RawToken[] {
     const alnum = asciiAlphanumeric(value[offset]!);
     let end = offset + 1;
     while (end < value.length && asciiAlphanumeric(value[end]!) === alnum) end++;
-    const text = value.slice(offset, end);
-    const kind: RawToken["kind"] = alnum && containsDecimalDigit(text) ? "num" : "lit";
-    const previous = out[out.length - 1];
-    if (kind === "lit" && previous?.kind === "lit") previous.text += text;
-    else out.push({ kind, text });
+    out.push({ kind: alnum ? "alnum" : "delim", text: value.slice(offset, end) });
     offset = end;
   }
   return out;
@@ -301,11 +293,6 @@ function chooseBase(maxDigit: number, len: number): GrammarBase | undefined {
   return undefined;
 }
 
-function parseLane(text: string, base: GrammarBase, grammarCase: GrammarCase): bigint {
-  let value = 0n;
-  for (const char of text) value = value * BigInt(base) + BigInt(digitValue(char, grammarCase));
-  return value;
-}
 
 function grammarModeCost(grammar: readonly GrammarToken[], batches: readonly string[][]): number {
   const numeric = grammar.filter((token): token is Extract<GrammarToken, { num: unknown }> => "num" in token);
@@ -315,14 +302,9 @@ function grammarModeCost(grammar: readonly GrammarToken[], batches: readonly str
     cost += 1; // E = 0, so there is no conditional bitmap
     const lanes = numeric.map(() => [] as bigint[]);
     for (const value of batch) {
-      const raw = tokenize(value);
-      let numericIndex = 0;
-      for (const token of raw) {
-        if (token.kind !== "num") continue;
-        const spec = numeric[numericIndex]!;
-        lanes[numericIndex]!.push(parseLane(token.text, spec.num.base, spec.num.case));
-        numericIndex++;
-      }
+      const parsed = matchGrammar(value, grammar);
+      if (!parsed) return Infinity; // induced from these values, so a miss means the grammar is wrong
+      parsed.forEach((lane, i) => lanes[i]!.push(lane));
     }
     for (let lane = 0; lane < numeric.length; lane++) {
       const token = numeric[lane]!;
@@ -333,7 +315,13 @@ function grammarModeCost(grammar: readonly GrammarToken[], batches: readonly str
   return cost;
 }
 
-/** Induce one shared token sequence, then keep it only when its exact sample cost wins. */
+/**
+ * Induce one shared token sequence, then keep it only when its exact sample
+ * cost wins. Alignment first: every value must split into the same run shape
+ * (same kinds, identical delimiters, equal alphanumeric lengths). Each aligned
+ * alphanumeric slot is then classified across the whole sample — identical
+ * text everywhere is a literal, anything that varies is a numeric lane.
+ */
 function induceGrammar(
   batches: readonly string[][],
   dict: readonly string[] | undefined,
@@ -342,30 +330,33 @@ function induceGrammar(
   if (values.length === 0) return undefined;
   const tokenized = values.map(tokenize);
   const shape = tokenized[0]!;
-  if (shape.length < 1 || shape.length > 8 || !shape.some((token) => token.kind === "num")) return undefined;
+  if (shape.length < 1) return undefined;
   for (const tokens of tokenized.slice(1)) {
     if (tokens.length !== shape.length) return undefined;
     for (let i = 0; i < shape.length; i++) {
       if (tokens[i]!.kind !== shape[i]!.kind) return undefined;
-      if (shape[i]!.kind === "lit" && tokens[i]!.text !== shape[i]!.text) return undefined;
-      if (shape[i]!.kind === "num" && tokens[i]!.text.length !== shape[i]!.text.length) return undefined;
+      if (shape[i]!.kind === "delim" && tokens[i]!.text !== shape[i]!.text) return undefined;
+      if (shape[i]!.kind === "alnum" && tokens[i]!.text.length !== shape[i]!.text.length) return undefined;
     }
   }
 
-  const grammar: GrammarToken[] = [];
+  const raw: ({ lit: string } | { num: GrammarNum })[] = [];
   for (let tokenIndex = 0; tokenIndex < shape.length; tokenIndex++) {
     const token = shape[tokenIndex]!;
-    if (token.kind === "lit") {
-      if (token.text.length === 0) return undefined;
-      grammar.push({ lit: token.text });
+    if (token.kind === "delim") {
+      raw.push({ lit: token.text });
       continue;
     }
     const observed = tokenized.map((tokens) => tokens[tokenIndex]!.text);
+    if (observed.every((text) => text === observed[0])) {
+      raw.push({ lit: observed[0]! });
+      continue;
+    }
     const digitClass = grammarCaseAndMax(observed);
     if (!digitClass) return undefined;
     const base = chooseBase(digitClass.max, token.text.length);
     if (!base) return undefined;
-    grammar.push({
+    raw.push({
       num: {
         base,
         len: token.text.length,
@@ -373,6 +364,18 @@ function induceGrammar(
       },
     });
   }
+
+  // adjacent literals merge into one token, which §6.3 requires
+  const grammar: GrammarToken[] = [];
+  for (const token of raw) {
+    const previous = grammar[grammar.length - 1];
+    if ("lit" in token && previous && "lit" in previous) {
+      grammar[grammar.length - 1] = { lit: previous.lit + token.lit };
+    } else {
+      grammar.push(token);
+    }
+  }
+  if (grammar.length > 8 || !grammar.some((token) => "num" in token)) return undefined;
 
   const grammarCost = grammarModeCost(grammar, batches);
   const plainCost = plainModeCost(batches);

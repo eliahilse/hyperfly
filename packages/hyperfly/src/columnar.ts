@@ -525,7 +525,7 @@ function grammarDigit(char: string, token: Extract<GrammarToken, { num: unknown 
 }
 
 /** Exact ASCII grammar match and lane parse; null means the row must escape. */
-function matchGrammar(value: string, grammar: readonly GrammarToken[]): bigint[] | null {
+export function matchGrammar(value: string, grammar: readonly GrammarToken[]): bigint[] | null {
   let offset = 0;
   const lanes: bigint[] = [];
   for (const token of grammar) {
