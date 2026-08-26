@@ -82,6 +82,7 @@ export default function Home() {
         <nav className="nav-links">
           <a href="#size">size</a>
           <a href="#pipeline">pipeline</a>
+          <Link href="/playground">playground</Link>
           <a href={GITHUB} target="_blank" rel="noopener noreferrer">
             github
           </a>
