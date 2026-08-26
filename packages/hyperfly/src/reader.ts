@@ -4,12 +4,22 @@ export interface DecodeLimits {
   maxDepth: number;
   maxItems: number;
   maxByteLength: number;
+  /**
+   * Width-zero columns legitimately encode any number of rows in a handful of
+   * bytes, so input length cannot bound a columnar row count. This caps the
+   * work a byte of hostile input can demand instead: a count above
+   * maxAmplification * (remaining bytes + 1) is rejected. Local decode
+   * policy, like every other limit — raise it for routes that really ship
+   * millions of constant rows.
+   */
+  maxAmplification: number;
 }
 
 export const DEFAULT_LIMITS: DecodeLimits = {
   maxDepth: 64,
   maxItems: 2 ** 24,
   maxByteLength: 2 ** 28,
+  maxAmplification: 4096,
 };
 
 export class Reader {

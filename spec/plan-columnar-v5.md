@@ -33,6 +33,13 @@ always agree.
    c. The column payload over **participating** rows (present and not
       bitmap-null), in row order.
 
+The row count is bounded by `maxItems` and the `maxAmplification` policy of
+wire-v0 §6 — deliberately not by the remaining input: a width-zero column
+(§3.1) encodes any number of rows in a handful of bytes, and that is the
+point of the plan, not an attack. Implementations SHOULD also defer row
+materialization until every column payload has decoded, so truncated input
+fails before any allocation proportional to the count.
+
 ## 3. Column payloads
 
 ### 3.1 Bit packing

@@ -608,7 +608,7 @@
     },
     {
       "name": "col-int-pfor-outlier",
-      "description": "seven values inside seven bits and one outlier: patched frame packs everyone at L=6 and the outlier alone pays its high bits (14 B vs delta 15, raw 17, frame 19)",
+      "description": "values inside seven bits with one large outlier: patched frame wins at L=6 (a 14-byte tie among L=6,7,8 resolves to the lowest), where 70 and 59350 both carry high bits",
       "ir": {
         "kind": "array",
         "element": {
@@ -725,6 +725,385 @@
         }
       ],
       "hex": "03"
+    },
+    {
+      "name": "col-int-for-constant-width-zero-large-count",
+      "description": "one hundred identical rows in four bytes: the count is bounded by maxItems, not by remaining input, because a width-zero column legitimately costs nothing per row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "d",
+              "type": {
+                "kind": "int",
+                "min": 0
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        },
+        {
+          "d": 7
+        }
+      ],
+      "hex": "64020e00"
+    },
+    {
+      "name": "col-int-pfor-span-over-2-pow-53",
+      "description": "offsets legally exceed 2^53: the largest here is 2^54-3, which binary64 cannot represent, so any float arithmetic in packing or reconstruction produces different bytes",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "d",
+              "type": {
+                "kind": "int"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "d": -9007199254740991
+        },
+        {
+          "d": -9007199254740990
+        },
+        {
+          "d": -9007199254740989
+        },
+        {
+          "d": -9007199254740988
+        },
+        {
+          "d": -9007199254740991
+        },
+        {
+          "d": -9007199254740990
+        },
+        {
+          "d": -9007199254740989
+        },
+        {
+          "d": -9007199254740988
+        },
+        {
+          "d": -9007199254740991
+        },
+        {
+          "d": -9007199254740990
+        },
+        {
+          "d": -9007199254740989
+        },
+        {
+          "d": 9007199254740990
+        }
+      ],
+      "hex": "0c04fdffffffffffff1f02340008e4e464ffffffffffff0f"
     }
   ],
   "invalidDecode": [
@@ -1106,6 +1485,27 @@
       },
       "hex": "0103",
       "error": "marker"
+    },
+    {
+      "name": "col-int-pfor-widths-sum-over-56",
+      "description": "L + H beyond 56 could reconstruct offsets outside any representable frame",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "d",
+              "type": {
+                "kind": "int",
+                "min": 0
+              }
+            }
+          ]
+        }
+      },
+      "hex": "010400301b",
+      "error": "marker"
     }
   ],
   "invalidEncode": [
@@ -1399,7 +1799,7 @@
       },
       {
         "name": "dict-two-byte-codes",
-        "description": "codes past 127 take two uvarint bytes, which the cost model must charge",
+        "description": "a dictionary large enough that v4 spent two uvarint bytes per high code; v5 packs every code at the width of the highest one actually used",
         "ir": {
           "kind": "array",
           "element": {
@@ -1997,6 +2397,128 @@
           }
         ],
         "hex": "03010219040102037a7a7a"
+      },
+      {
+        "name": "grammar-wrong-case-forced-escape",
+        "description": "AF is not af: a lower-case hex token matches exact ASCII, so the upper-case value escapes rather than lane-coding — a case-folding parser diverges here",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "lit": "x"
+                  },
+                  {
+                    "num": {
+                      "base": 16,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "id": "xaf"
+          },
+          {
+            "id": "xAF"
+          },
+          {
+            "id": "x0f"
+          },
+          {
+            "id": "xff"
+          }
+        ],
+        "hex": "0403010200af010fff0103784146"
+      },
+      {
+        "name": "derived-row-aligned-different-participation",
+        "description": "source and target participation differ: bitmap position j is the j-th participating target row, and the source is consulted at that array row — an absent source forces the escape",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                },
+                "optional": true
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                },
+                "optional": true
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "u1",
+                  "u2"
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "x@a",
+                    "y@b"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "value": [
+          {
+            "a": "u1"
+          },
+          {
+            "a": "u2",
+            "b": "y@b"
+          },
+          {
+            "b": "x@a"
+          },
+          {
+            "a": "u1",
+            "b": "x@a"
+          }
+        ],
+        "hex": "040b0102190e04010203784061"
       }
     ],
     "invalidDecode": [
@@ -2265,6 +2787,58 @@
         },
         "hex": "01010f",
         "error": "marker"
+      },
+      {
+        "name": "derived-source-absent-nonescaped",
+        "description": "a non-escaped derived row whose source does not participate in that array row cannot be reconstructed",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                },
+                "optional": true
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                },
+                "optional": true
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "u1",
+                  "u2"
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "x@a",
+                    "y@b"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hex": "040b0102190e0400",
+        "error": "range"
       }
     ],
     "requiresProfile": [
@@ -2286,6 +2860,564 @@
         },
         "hex": "01010101",
         "error": "unsupported"
+      },
+      {
+        "name": "grammar-without-profile",
+        "description": "a decoder without the grammar cannot read the column",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "0103",
+        "error": "unsupported"
+      },
+      {
+        "name": "derived-without-profile",
+        "description": "a decoder without the derivation cannot read the column",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "u1",
+                  "u2"
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "x@a",
+                    "y@b"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hex": "010002753104",
+        "error": "unsupported"
+      }
+    ],
+    "decodeOnly": [
+      {
+        "name": "grammar-all-escape-decodes",
+        "description": "E = k is valid input with no bitmap and empty lanes; a canonical encoder would have chosen plain, so this decodes but does not re-encode to itself",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "010301000141",
+        "value": [
+          {
+            "id": "A"
+          }
+        ]
+      },
+      {
+        "name": "derived-all-escape-decodes",
+        "description": "E = k derived input decodes without consulting the source at all",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "u1",
+                  "u2"
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "x@a",
+                    "y@b"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "hex": "0100027a7a040103796262",
+        "value": [
+          {
+            "a": "zz",
+            "b": "ybb"
+          }
+        ]
+      }
+    ],
+    "invalidProfile": [
+      {
+        "name": "profile-version-3-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 3,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "x"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-v1-with-grammar-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 1,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "x"
+                ],
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-unknown-key-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "x"
+                ],
+                "extra": 1
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-token-with-both-keys-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "lit": "a",
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-empty-columns-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": []
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-unsorted-columns-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 1,
+                "dict": [
+                  "x"
+                ]
+              },
+              {
+                "leaf": 0,
+                "dict": [
+                  "y"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-derived-source-after-target-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "derived": {
+                  "source": 1,
+                  "values": [
+                    "x"
+                  ]
+                }
+              },
+              {
+                "leaf": 1,
+                "dict": [
+                  "u"
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-null-dict-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": null
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-grammar-len-zero-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 0,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "error": "ir"
+      },
+      {
+        "name": "profile-derived-length-mismatch-rejected",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "string"
+                }
+              },
+              {
+                "name": "b",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "dict": [
+                  "u1",
+                  "u2"
+                ]
+              },
+              {
+                "leaf": 1,
+                "derived": {
+                  "source": 0,
+                  "values": [
+                    "only-one"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "error": "ir"
       }
     ]
   }

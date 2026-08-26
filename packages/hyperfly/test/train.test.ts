@@ -72,3 +72,96 @@ describe("reference trainer", () => {
     expect(profile?.shared.columns[0]!.dict).toEqual(["ok"]);
   });
 });
+
+describe("trainer grammar induction", () => {
+  test("induces through an all-letter hex segment", () => {
+    const profile = train(
+      ROWS,
+      samples([
+        ["id_00af", "id_beef"],
+        ["id_cafe", "id_12ff"],
+      ]),
+    );
+    expect(profile?.shared.columns[0]?.grammar).toEqual([
+      { lit: "id_" },
+      { num: { base: 16, len: 4, case: "lower" } },
+    ]);
+    const codec = compileIR(ROWS, { plan: "columnar", profile, pack: false });
+    const holdout = [{ s: "id_0123" }, { s: "id_dead" }, { s: "id_zzzz" }];
+    expect(codec.decodeBody(codec.encodeBody(holdout))).toEqual(holdout);
+  });
+
+  test("mixed case within a slot yields no grammar", () => {
+    const profile = train(
+      ROWS,
+      samples([
+        ["id_00AF", "id_00af"],
+        ["id_12Ff", "id_34aa"],
+      ]),
+    );
+    expect(profile?.shared.columns[0]?.grammar).toBeUndefined();
+  });
+
+  test("a constant slot becomes a literal, not a lane", () => {
+    const profile = train(
+      ROWS,
+      samples([
+        ["v2-0001-x", "v2-0002-x"],
+        ["v2-0003-x", "v2-0004-x"],
+      ]),
+    );
+    expect(profile?.shared.columns[0]?.grammar).toEqual([
+      { lit: "v2-" },
+      { num: { base: 10, len: 4, case: "lower" } },
+      { lit: "-x" },
+    ]);
+  });
+});
+
+describe("trainer derivations", () => {
+  const PAIR: IRNode = {
+    kind: "array",
+    element: {
+      kind: "struct",
+      fields: [
+        { name: "a", type: { kind: "string" } },
+        { name: "b", type: { kind: "string" }, optional: true },
+      ],
+    },
+  };
+
+  test("emits the mapping when every source entry has an observed target", () => {
+    const rows = [
+      [{ a: "u1", b: "kim@x.io" }, { a: "u2", b: "lee@x.io" }],
+      [{ a: "u1", b: "kim@x.io" }, { a: "u2", b: "lee@x.io" }],
+    ];
+    const profile = train(PAIR, rows);
+    const column = profile?.shared.columns.find((c) => c.derived);
+    expect(column?.derived?.source).toBe(0);
+    expect(column?.derived?.values).toEqual(["kim@x.io", "lee@x.io"]);
+    const codec = compileIR(PAIR, { plan: "columnar", profile, pack: false });
+    expect(codec.decodeBody(codec.encodeBody(rows[0]!))).toEqual(rows[0]!);
+  });
+
+  test("an unobserved source entry blocks the derivation", () => {
+    const rows = [
+      [{ a: "u1", b: "kim@x.io" }, { a: "u2" }],
+      [{ a: "u1", b: "kim@x.io" }, { a: "u2" }],
+    ];
+    const profile = train(PAIR, rows);
+    for (const column of profile?.shared.columns ?? []) {
+      expect(column.derived).toBeUndefined();
+    }
+  });
+
+  test("a contradicted mapping blocks the derivation", () => {
+    const rows = [
+      [{ a: "u1", b: "kim@x.io" }, { a: "u1", b: "other@x.io" }],
+      [{ a: "u1", b: "kim@x.io" }, { a: "u1", b: "kim@x.io" }],
+    ];
+    const profile = train(PAIR, rows);
+    for (const column of profile?.shared.columns ?? []) {
+      expect(column.derived).toBeUndefined();
+    }
+  });
+});

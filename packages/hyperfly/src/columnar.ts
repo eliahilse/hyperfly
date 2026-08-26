@@ -1,4 +1,4 @@
-import { boundByInput, decodeNode, readBitmap, type Inflate } from "./decode.js";
+import { decodeNode, readBitmap, type Inflate } from "./decode.js";
 import { encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import type { IRField, IRNode } from "./ir.js";
@@ -1086,47 +1086,53 @@ export function decodeColumnarArray(
   if (count > r.limits.maxItems) {
     throw new DecodeError("limit", `${path}: array count ${count} exceeds limit ${r.limits.maxItems}`);
   }
-  boundByInput(r, count, element, path);
+  // A width-zero column legitimately encodes any number of rows in a handful of
+  // bytes — that is what compression is — so input length cannot bound the count
+  // the way the row plan's one-bit-per-row floor does. The amplification limit
+  // caps the work a hostile byte can demand instead, and row objects materialize
+  // only after every column payload has decoded, so truncated input never
+  // triggers the large allocation.
+  if (count > (r.remaining() + 1) * r.limits.maxAmplification) {
+    throw new DecodeError(
+      "limit",
+      `${path}: ${count} rows from ${r.remaining()} remaining byte(s) exceeds the amplification limit`,
+    );
+  }
 
-  const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
   const leaves = flattenLeaves(element)!;
 
-  const containerOf = (row: Record<string, unknown>, segs: readonly string[]): Record<string, unknown> => {
-    let obj = row;
-    for (let d = 0; d < segs.length - 1; d++) {
-      const seg = segs[d]!;
-      if (!Object.prototype.hasOwnProperty.call(obj, seg)) obj[seg] = {};
-      obj = obj[seg] as Record<string, unknown>;
-    }
-    return obj;
-  };
+  interface DecodedLeaf {
+    slots: number[];
+    values: readonly unknown[];
+    nullRows: number[];
+  }
+  const decoded: DecodedLeaf[] = [];
 
   const sourceValue: SourceValue = (ordinal, row) => {
-    const leaf = leaves[ordinal - ordinalBase];
-    let value: unknown = out[row];
-    if (!leaf) return undefined;
-    for (const seg of leaf.segs) {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-      if (!Object.prototype.hasOwnProperty.call(value, seg)) return undefined;
-      value = (value as Record<string, unknown>)[seg];
+    const entry = decoded[ordinal - ordinalBase];
+    if (!entry) return undefined;
+    // slots ascend, so the participant index of an array row is a binary search away
+    let lo = 0;
+    let hi = entry.slots.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const slot = entry.slots[mid]!;
+      if (slot === row) return entry.values[mid];
+      if (slot < row) lo = mid + 1;
+      else hi = mid - 1;
     }
-    return value;
+    return undefined;
   };
 
   for (const [leafIndex, leaf] of leaves.entries()) {
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const fieldPath = `${path}[].${leaf.segs.join(".")}`;
-    // nested structs are required and non-nullable: materialize the container chain at
-    // this leaf's declared position for every row, so an all-absent nested struct still
-    // round-trips and keys stay in declared order across implementations
-    if (leaf.segs.length > 1) {
-      for (let i = 0; i < count; i++) containerOf(out[i]!, leaf.segs);
-    }
     const presence = field.optional ? readBitmap(r, count, fieldPath) : null;
     const nulls = field.nullable ? readBitmap(r, count, fieldPath) : null;
 
     const slots: number[] = [];
+    const nullRows: number[] = [];
     for (let i = 0; i < count; i++) {
       const present = presence ? presence[i]! : true;
       const isNull = nulls ? nulls[i]! : false;
@@ -1135,7 +1141,7 @@ export function decodeColumnarArray(
         continue;
       }
       if (isNull) {
-        containerOf(out[i]!, leaf.segs)[leafName] = null;
+        nullRows.push(i);
         continue;
       }
       slots.push(i);
@@ -1151,35 +1157,57 @@ export function decodeColumnarArray(
     switch (field.type.kind) {
       case "int": {
         const values = decodeIntColumn(r, nodeBounds(field.type as IntNode), slots.length, fieldPath);
-        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = Number(values[j]!)));
+        decoded[leafIndex] = { slots, values: values.map((v) => Number(v)), nullRows };
         break;
       }
-      case "float64": {
-        const values = decodeFloatColumn(r, slots.length, fieldPath);
-        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
+      case "float64":
+        decoded[leafIndex] = { slots, values: decodeFloatColumn(r, slots.length, fieldPath), nullRows };
         break;
-      }
-      case "bool": {
-        const values = readBitmap(r, slots.length, fieldPath);
-        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
+      case "bool":
+        decoded[leafIndex] = { slots, values: readBitmap(r, slots.length, fieldPath), nullRows };
         break;
-      }
-      case "string": {
-        const values = decodeStringColumn(r, slots, sourceValue, fieldPath, inflate, profile, ordinalBase + leafIndex);
-        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
+      case "string":
+        decoded[leafIndex] = {
+          slots,
+          values: decodeStringColumn(r, slots, sourceValue, fieldPath, inflate, profile, ordinalBase + leafIndex),
+          nullRows,
+        };
         break;
-      }
-      case "enum": {
-        const values = decodeEnumColumn(r, field.type, slots.length, fieldPath);
-        slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = values[j]!));
+      case "enum":
+        decoded[leafIndex] = { slots, values: decodeEnumColumn(r, field.type, slots.length, fieldPath), nullRows };
         break;
-      }
       default: {
-        for (const row of slots) {
-          containerOf(out[row]!, leaf.segs)[leafName] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex);
-        }
+        const values = slots.map((row) =>
+          decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex),
+        );
+        decoded[leafIndex] = { slots, values, nullRows };
       }
     }
+  }
+
+  const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
+
+  const containerOf = (row: Record<string, unknown>, segs: readonly string[]): Record<string, unknown> => {
+    let obj = row;
+    for (let d = 0; d < segs.length - 1; d++) {
+      const seg = segs[d]!;
+      if (!Object.prototype.hasOwnProperty.call(obj, seg)) obj[seg] = {};
+      obj = obj[seg] as Record<string, unknown>;
+    }
+    return obj;
+  };
+
+  for (const [leafIndex, leaf] of leaves.entries()) {
+    const leafName = leaf.segs[leaf.segs.length - 1]!;
+    // nested structs are required and non-nullable: materialize the container chain at
+    // this leaf's declared position for every row, so an all-absent nested struct still
+    // round-trips and keys stay in declared order across implementations
+    if (leaf.segs.length > 1) {
+      for (let i = 0; i < count; i++) containerOf(out[i]!, leaf.segs);
+    }
+    const entry = decoded[leafIndex]!;
+    for (const row of entry.nullRows) containerOf(out[row]!, leaf.segs)[leafName] = null;
+    entry.slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = entry.values[j]));
   }
 
   return out;

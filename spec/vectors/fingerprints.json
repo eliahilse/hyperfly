@@ -274,6 +274,71 @@
       "fingerprint": "2532cac9c4f7e5641223d471247a1b81"
     },
     {
+      "name": "profiled-v2-all-keys",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "u1",
+                "u2"
+              ]
+            },
+            {
+              "leaf": 1,
+              "dict": [
+                "k\"9"
+              ],
+              "grammar": [
+                {
+                  "lit": "id_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ],
+              "derived": {
+                "source": 0,
+                "values": [
+                  "x@a",
+                  "y🚀"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":5},\"ir\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":{\"kind\":\"string\"}},{\"name\":\"b\",\"type\":{\"kind\":\"string\"}}]}},\"profile\":{\"columns\":[{\"leaf\":0,\"dict\":[\"u1\",\"u2\"]},{\"leaf\":1,\"dict\":[\"k\\\"9\"],\"grammar\":[{\"lit\":\"id_\"},{\"num\":{\"base\":16,\"len\":4,\"case\":\"lower\"}}],\"derived\":{\"source\":0,\"values\":[\"x@a\",\"y🚀\"]}}]}}",
+      "fingerprint": "942ba0b39b5416a3b324805c501bedac"
+    },
+    {
       "name": "profiled-two-arrays",
       "plan": "columnar",
       "ir": {

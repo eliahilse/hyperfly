@@ -486,6 +486,29 @@
       },
       "hex": "81808008",
       "error": "limit"
+    },
+    {
+      "name": "row-single-enum-truncated-count",
+      "description": "row encoding spends at least one byte per single-member-enum row, so a declared count with no payload behind it is rejected before any allocation",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "e",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "only"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "hex": "64",
+      "error": "limit"
     }
   ],
   "invalidEncode": [

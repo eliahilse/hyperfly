@@ -342,6 +342,61 @@ describe("profiled golden vectors", () => {
       }
     });
   }
+
+  // decode-only: valid input a canonical encoder would never produce (E = k)
+  for (const v of vectors.profiled.decodeOnly) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar", profile: v.profile as never, pack: false });
+      expect(codec.decodeBody(fromHex(v.hex))).toEqual(v.value);
+    });
+  }
+
+  // the accepted profile domain is closed: these documents must fail compilation
+  for (const v of vectors.profiled.invalidProfile) {
+    test(v.name, () => {
+      try {
+        compileIR(v.ir as IRNode, { plan: "columnar", profile: v.profile as never, pack: false });
+        throw new Error("expected failure");
+      } catch (err) {
+        expect(err).toBeInstanceOf(HyperflyError);
+        expect((err as HyperflyError).code as string).toBe(v.error);
+      }
+    });
+  }
+});
+
+describe("profile reconstructions respect the decoder byte limit", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+  const limits = { maxByteLength: 8 } as never;
+
+  test("a dictionary entry beyond maxByteLength is rejected at decode", () => {
+    const profile = {
+      version: 1 as const,
+      shared: { columns: [{ leaf: 0, dict: ["a-value-well-beyond-eight-bytes"] }] },
+    };
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const body = codec.encodeBody([{ s: "a-value-well-beyond-eight-bytes" }]);
+    const tight = compileIR(IR, { plan: "columnar", profile, pack: false, limits });
+    expect(() => tight.decodeBody(body)).toThrow("limit");
+  });
+
+  test("a grammar rendering beyond maxByteLength is rejected at decode", () => {
+    const profile = {
+      version: 2 as const,
+      shared: {
+        columns: [
+          { leaf: 0, grammar: [{ lit: "quite-a-long-prefix-" }, { num: { base: 10 as const, len: 2, case: "lower" as const } }] },
+        ],
+      },
+    };
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const body = codec.encodeBody([{ s: "quite-a-long-prefix-07" }]);
+    const tight = compileIR(IR, { plan: "columnar", profile, pack: false, limits });
+    expect(() => tight.decodeBody(body)).toThrow("limit");
+  });
 });
 
 describe("profiles: aliased schema nodes", () => {

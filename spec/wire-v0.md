@@ -190,7 +190,14 @@ Implementations MUST enforce configurable limits with these v0 defaults:
 
 - `maxDepth` 64 (structs, arrays, nullable all count),
 - `maxItems` 2^24 per array,
-- `maxByteLength` 2^28 per string/bytes value.
+- `maxByteLength` 2^28 per string/bytes value,
+- `maxAmplification` 4096: an array count above
+  `maxAmplification × (remaining bytes + 1)` is rejected. Compressed layouts
+  can legitimately describe many rows with almost no bytes, so input length
+  alone cannot bound a count; this caps the work one hostile byte can demand
+  instead. Row-encoded arrays satisfy a stricter bound for free — every row
+  consumes at least one bit, so a count beyond the remaining bits is
+  unpayable and MUST be rejected.
 
 Truncation anywhere is an error. Errors are errors — never best-effort
 partial values.
