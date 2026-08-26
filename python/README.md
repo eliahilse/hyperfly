@@ -79,7 +79,7 @@ pip install ./python[test] && pytest python/tests -q
 ```
 
 - [wire v0](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md)
-- [columnar v3](https://github.com/eliahilse/hyperfly/blob/main/spec/plan-columnar-v3.md)
+- [columnar v5](https://github.com/eliahilse/hyperfly/blob/main/spec/plan-columnar-v5.md)
 - [negotiation v1](https://github.com/eliahilse/hyperfly/blob/main/spec/negotiation-v1.md)
 
 ## License

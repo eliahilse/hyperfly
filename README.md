@@ -16,16 +16,19 @@ Bytes per message, averaged over 500-message corpora (`bun run bench`):
 
 | route | JSON | JSON+Brotli | Protobuf | Hyperfly | + Brotli | Profiled |
 |---|---|---|---|---|---|---|
-| audit events | 12,687 | 2,512 | 7,190 | 2,109 | 2,054 | **823** |
-| device telemetry | 7,994 | 1,422 | 2,007 | 896 | 818 | **638** |
-| social feed | 6,863 | 2,294 | 4,396 | 1,908 | 1,902 | **1,535** |
-| single order | 782 | 408 | 388 | 271 | 273 | **188** |
-| OHLCV candles | 3,225 | 842 | 2,034 | 496 | **372** | 372 |
+| audit events | 12,687 | 2,512 | 7,190 | 2,013 | 1,974 | **574** |
+| device telemetry | 7,994 | 1,422 | 2,007 | 755 | 725 | **542** |
+| social feed | 6,863 | 2,294 | 4,396 | 1,871 | 1,868 | **1,466** |
+| single order | 782 | 408 | 388 | 271 | 273 | **180** |
+| OHLCV candles | 3,225 | 842 | 2,034 | 384 | **362** | 384 |
 
-Read the spread rather than the best row. Training is worth 57% on audit logs, where
-the same user agents recur on every request, and nothing at all on candles, whose
-only string sits outside the array. The corpora are synthetic — shaped like real
-routes, not captured from one — and no production traffic has been measured yet.
+Read the spread rather than the best row. Training is worth 71% on audit logs —
+recurring values become dictionary codes, machine-made ids travel as grammar
+lanes, one column derives from another — and nothing at all on candles, whose
+only string sits outside the array. Note the Brotli column: on the profiled
+stream it now loses bytes on four of five routes. The corpora are synthetic —
+shaped like real routes, not captured from one — and no production traffic has
+been measured yet.
 
 ## Repository
 
@@ -46,8 +49,9 @@ code.
 
 - [wire v0](spec/wire-v0.md) — envelope, varints, bitmaps, node encodings, canonical
   artifacts, decoder limits
-- [plan columnar v3](spec/plan-columnar-v3.md) — column layout, delta and XOR and
-  scaled-decimal numerics, packed text, trained dictionaries
+- [plan columnar v5](spec/plan-columnar-v5.md) — column layout, frame-of-reference
+  bit packing, scaled-decimal and XOR numerics, packed text, trained dictionaries,
+  grammar lanes, derived columns
 - [negotiation v1](spec/negotiation-v1.md) — how peers agree on binary, how a client
   bootstraps, how a profile rotates without a cutover
 

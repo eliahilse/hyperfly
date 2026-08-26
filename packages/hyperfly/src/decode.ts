@@ -49,13 +49,29 @@ export type Inflate = (data: Uint8Array, maxOutputLength: number) => Uint8Array;
 /**
  * A declared count must be payable by the bytes still on the wire: every element that
  * carries any payload costs at least one bit, so a truncated body can never make a
- * decoder allocate for millions of rows it will never read.
+ * decoder allocate for millions of rows it will never read. Elements with no payload
+ * at all (literals, structs of literals) escape that floor, so they fall back to the
+ * amplification policy of wire-v0 §6, exactly as columnar arrays do.
  */
 export function boundByInput(r: Reader, count: number, element: IRNode, path: string): void {
-  if (count === 0 || !hasPayload(element)) return;
-  const affordable = r.remaining() * 8;
-  if (count > affordable) {
-    throw new DecodeError("limit", `${path}: declared ${count} items but only ${r.remaining()} byte(s) remain`);
+  if (count === 0) return;
+  if (hasPayload(element)) {
+    const affordable = r.remaining() * 8;
+    if (count > affordable) {
+      throw new DecodeError("limit", `${path}: declared ${count} items but only ${r.remaining()} byte(s) remain`);
+    }
+    return;
+  }
+  boundAmplification(r, count, path);
+}
+
+/** Wire-v0 §6: cap the rows one hostile byte can demand when input length cannot. */
+export function boundAmplification(r: Reader, count: number, path: string): void {
+  if (count > (r.remaining() + 1) * r.limits.maxAmplification) {
+    throw new DecodeError(
+      "limit",
+      `${path}: ${count} rows from ${r.remaining()} remaining byte(s) exceeds the amplification limit`,
+    );
   }
 }
 

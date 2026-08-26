@@ -8,6 +8,10 @@ export class Writer {
     this.view = new DataView(this.buf.buffer);
   }
 
+  get size(): number {
+    return this.len;
+  }
+
   private ensure(extra: number): void {
     if (this.len + extra <= this.buf.length) return;
     let next = this.buf.length * 2;

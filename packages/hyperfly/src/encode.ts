@@ -28,11 +28,24 @@ export interface EncodeCtx {
   maxDepth: number;
   maxItems: number;
   maxByteLength: number;
+  maxAmplification: number;
   columnar: boolean;
   deflate?: (data: Uint8Array) => Uint8Array;
   /** packing is only canonical when the same codec can also inflate what it wrote */
   canInflate: boolean;
   profile: ProfileIndex;
+}
+
+/**
+ * Mirror of the decoder's wire-v0 §6 amplification policy, using the array's own
+ * payload as a lower bound of what the decoder will see remaining. The encoder is
+ * therefore the stricter side: what it accepts, its decoder accepts. A route that
+ * really ships this many near-free rows raises maxAmplification on both peers.
+ */
+export function checkAmplification(count: number, payloadBytes: number, ctx: EncodeCtx, path: string): void {
+  if (count > (payloadBytes + 1) * ctx.maxAmplification) {
+    fail("limit", path, `${count} rows in ${payloadBytes} payload byte(s) exceeds the amplification limit`);
+  }
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
@@ -139,9 +152,11 @@ export function encodeNode(
       } else {
         writeUleb(w, BigInt(value.length));
       }
+      const payloadStart = w.size;
       for (let i = 0; i < value.length; i++) {
         encodeNode(w, node.element, value[i], `${path}[${i}]`, depth + 1, ctx, column);
       }
+      checkAmplification(value.length, w.size - payloadStart, ctx, path);
       return;
     }
     case "struct": {

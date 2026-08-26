@@ -88,10 +88,13 @@ export function measureCorpus(suite: CorpusSuite): CorpusResult {
   const n = suite.corpus.length;
   const mean = (total: number) => Math.round(total / n);
 
-  const dictBytes = columns.reduce(
-    (sum, c) => sum + c.dict.reduce((m, e) => m + enc.encode(e).length + 1, 0),
-    0,
-  );
+  const dictBytes = columns.reduce((sum, c) => {
+    let bytes = 0;
+    for (const e of c.dict ?? []) bytes += enc.encode(e).length + 1;
+    for (const e of c.derived?.values ?? []) bytes += enc.encode(e).length + 1;
+    if (c.grammar) bytes += enc.encode(JSON.stringify(c.grammar)).length;
+    return sum + bytes;
+  }, 0);
   const savedPerMessage = mean(col) - mean(prof);
 
   return {
@@ -105,7 +108,7 @@ export function measureCorpus(suite: CorpusSuite): CorpusResult {
     columnarBrotli: mean(colBr),
     profiled: mean(prof),
     full: mean(full),
-    dictEntries: columns.reduce((sum, c) => sum + c.dict.length, 0),
+    dictEntries: columns.reduce((sum, c) => sum + (c.dict?.length ?? 0) + (c.derived?.values.length ?? 0), 0),
     dictBytes,
     breakEven: savedPerMessage > 0 ? Math.ceil(dictBytes / savedPerMessage) : null,
   };

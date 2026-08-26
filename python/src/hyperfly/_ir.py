@@ -6,7 +6,7 @@ from typing import Any
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
 LEAF_KINDS = frozenset({"bool", "int", "float64", "string", "bytes", "enum", "literal"})
-_PLAN_VERSION = {"row": 1, "columnar": 4}
+_PLAN_VERSION = {"row": 1, "columnar": 5}
 
 
 def _fail(path: str, message: str) -> None:
@@ -63,6 +63,8 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
         members = node.get("members") or []
         if not members:
             _fail(path, "enum needs at least one member")
+        if (len(members) - 1).bit_length() > 56:
+            _fail(path, "enum member index width exceeds 56 bits")
         seen: set[str] = set()
         for m in members:
             if type(m) is not str or not m:
@@ -170,10 +172,38 @@ MAX_DICT_ENTRIES = 16383
 
 
 def serialize_shared(shared: dict[str, Any]) -> str:
-    columns = [
-        '{"leaf":' + str(c["leaf"]) + ',"dict":[' + ",".join(_esc(e) for e in c["dict"]) + "]}"
-        for c in shared["columns"]
-    ]
+    columns = []
+    for column in shared["columns"]:
+        out = '{"leaf":' + str(column["leaf"])
+        if "dict" in column:
+            out += ',"dict":[' + ",".join(_esc(entry) for entry in column["dict"]) + "]"
+        if "grammar" in column:
+            tokens = []
+            for token in column["grammar"]:
+                if "lit" in token:
+                    tokens.append('{"lit":' + _esc(token["lit"]) + "}")
+                else:
+                    num = token["num"]
+                    tokens.append(
+                        '{"num":{"base":'
+                        + str(num["base"])
+                        + ',"len":'
+                        + str(num["len"])
+                        + ',"case":'
+                        + _esc(num["case"])
+                        + "}}"
+                    )
+            out += ',"grammar":[' + ",".join(tokens) + "]"
+        if "derived" in column:
+            derived = column["derived"]
+            out += (
+                ',"derived":{"source":'
+                + str(derived["source"])
+                + ',"values":['
+                + ",".join(_esc(value) for value in derived["values"])
+                + "]}"
+            )
+        columns.append(out + "}")
     return '{"columns":[' + ",".join(columns) + "]}"
 
 
@@ -187,8 +217,18 @@ def serialize_artifact(ir: dict[str, Any], layout: str = "row", profile: dict[st
 
 def enumerate_columns(ir: dict[str, Any]) -> list[str]:
     """Spec 6.1: the kind of every columnar leaf in the schema, in ordinal order."""
-    out: list[str] = []
-    _walk_columns(ir, out, None)
+    return [kind for kind, _array in _enumerate_column_refs(ir)]
+
+
+def _enumerate_column_refs(ir: dict[str, Any]) -> list[tuple[str, int]]:
+    """Column kind plus identity of its owning eligible array.
+
+    Array identities are positional rather than based on object identity: one aliased
+    schema node used at two positions still denotes two distinct arrays.
+    """
+    out: list[tuple[str, int]] = []
+    next_array = [0]
+    _walk_column_refs(ir, out, next_array)
     return out
 
 
@@ -212,7 +252,9 @@ def column_count(node: dict[str, Any]) -> int:
     return 0
 
 
-def _walk_columns(node: dict[str, Any], out: list[str], bases: None = None) -> None:
+def _walk_column_refs(
+    node: dict[str, Any], out: list[tuple[str, int]], next_array: list[int]
+) -> None:
     from ._codec import _columnar_eligible, _flatten_leaves
 
     kind = node["kind"]
@@ -220,17 +262,19 @@ def _walk_columns(node: dict[str, Any], out: list[str], bases: None = None) -> N
         if _columnar_eligible(node):
             leaves = _flatten_leaves(node["element"])
             if leaves is not None:
+                array = next_array[0]
+                next_array[0] += 1
                 for _segs, field in leaves:
-                    out.append(field["type"]["kind"])
+                    out.append((field["type"]["kind"], array))
                 return
-        _walk_columns(node["element"], out, bases)
+        _walk_column_refs(node["element"], out, next_array)
         return
     if kind == "nullable":
-        _walk_columns(node["inner"], out, bases)
+        _walk_column_refs(node["inner"], out, next_array)
         return
     if kind == "struct":
         for f in node["fields"]:
-            _walk_columns(f["type"], out, bases)
+            _walk_column_refs(f["type"], out, next_array)
         return
 
 
@@ -238,30 +282,174 @@ def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
     def fail(message: str) -> None:
         raise HyperflyError("ir", f"profile: {message}")
 
-    if profile.get("version") != 1:
-        fail(f"unsupported profile version {profile.get('version')}")
-    kinds = enumerate_columns(ir)
+    def record(value: Any, path: str) -> dict[str, Any]:
+        if type(value) is not dict:
+            fail(f"{path} must be an object")
+        return value
+
+    def check_keys(
+        value: dict[str, Any], path: str, allowed: set[str], required: set[str]
+    ) -> None:
+        for key in value:
+            if key not in allowed:
+                fail(f"{path}: unknown key {key}")
+        for key in required:
+            if key not in value:
+                fail(f"{path}: missing key {key}")
+
+    def portable_string(value: Any, path: str) -> str:
+        if type(value) is not str:
+            fail(f"{path} must be a string")
+        if _has_lone_surrogate(value):
+            fail(f"{path} contains a lone surrogate and has no portable encoding")
+        return value
+
+    root = record(profile, "document")
+    check_keys(root, "document", {"version", "shared", "hints"}, {"version", "shared"})
+    version = root["version"]
+    if type(version) is not int or version not in (1, 2):
+        fail(f"unsupported profile version {version}")
+    if "hints" in root and type(root["hints"]) is not dict:
+        fail("hints must be an object when present")
+
+    shared = record(root["shared"], "shared")
+    check_keys(shared, "shared", {"columns"}, {"columns"})
+    raw_columns = shared["columns"]
+    if type(raw_columns) is not list:
+        fail("shared.columns must be an array")
+    if not raw_columns:
+        fail("shared.columns must be non-empty")
+
+    refs = _enumerate_column_refs(ir)
+    parsed: list[dict[str, Any]] = []
     previous = -1
-    for column in profile["shared"]["columns"]:
-        leaf = column["leaf"]
-        if type(leaf) is not int or leaf < 0 or leaf >= len(kinds):
+
+    for column_index, raw_column in enumerate(raw_columns):
+        path = f"shared.columns[{column_index}]"
+        raw = record(raw_column, path)
+        if version == 1:
+            check_keys(raw, path, {"leaf", "dict"}, {"leaf", "dict"})
+        else:
+            check_keys(raw, path, {"leaf", "dict", "grammar", "derived"}, {"leaf"})
+            if not any(key in raw for key in ("dict", "grammar", "derived")):
+                fail(f"{path} must carry at least one of dict, grammar, or derived")
+
+        leaf = raw["leaf"]
+        if type(leaf) is not int:
+            fail(f"{path}.leaf must be an integer")
+        if leaf < 0 or leaf >= len(refs):
             fail(f"leaf {leaf} is not a column in this schema")
         if leaf <= previous:
             fail("columns must be sorted by ascending leaf and unique")
         previous = leaf
-        if kinds[leaf] != "string":
+        if refs[leaf][0] != "string":
             fail(f"leaf {leaf} is not a string column")
-        entries = column["dict"]
-        if not entries or len(entries) > MAX_DICT_ENTRIES:
-            fail(f"leaf {leaf}: a dictionary holds 1 to {MAX_DICT_ENTRIES} entries")
-        seen: set[str] = set()
-        for entry in entries:
-            if type(entry) is not str:
-                fail(f"leaf {leaf}: entries must be strings")
-            _check_string(entry, f"leaf {leaf}", "dictionary entry")
-            if entry in seen:
-                fail(f"leaf {leaf}: duplicate entry gives one value two codes")
-            seen.add(entry)
+
+        column: dict[str, Any] = {"leaf": leaf}
+        if "dict" in raw:
+            entries = raw["dict"]
+            if type(entries) is not list:
+                fail(f"leaf {leaf}: dict must be an array")
+            if not entries or len(entries) > MAX_DICT_ENTRIES:
+                fail(f"leaf {leaf}: a dictionary holds 1 to {MAX_DICT_ENTRIES} entries")
+            seen: set[str] = set()
+            parsed_entries = []
+            for entry_index, entry in enumerate(entries):
+                parsed_entry = portable_string(entry, f"{path}.dict[{entry_index}]")
+                if parsed_entry in seen:
+                    fail(f"leaf {leaf}: duplicate entry gives one value two codes")
+                seen.add(parsed_entry)
+                parsed_entries.append(parsed_entry)
+            column["dict"] = parsed_entries
+
+        if "grammar" in raw:
+            raw_grammar = raw["grammar"]
+            if type(raw_grammar) is not list:
+                fail(f"leaf {leaf}: grammar must be an array")
+            if not 1 <= len(raw_grammar) <= 8:
+                fail(f"leaf {leaf}: grammar must hold 1 to 8 tokens")
+            grammar = []
+            numeric = 0
+            previous_literal = False
+            for token_index, raw_token in enumerate(raw_grammar):
+                token_path = f"{path}.grammar[{token_index}]"
+                token = record(raw_token, token_path)
+                if len(token) != 1 or next(iter(token), None) not in ("lit", "num"):
+                    fail(f"{token_path} must hold exactly one of lit or num")
+                if "lit" in token:
+                    literal = portable_string(token["lit"], f"{token_path}.lit")
+                    if not literal:
+                        fail(f"{token_path}.lit must be non-empty")
+                    if previous_literal:
+                        fail(f"leaf {leaf}: grammar cannot contain adjacent literal tokens")
+                    grammar.append({"lit": literal})
+                    previous_literal = True
+                    continue
+
+                num_path = f"{token_path}.num"
+                num = record(token["num"], num_path)
+                check_keys(num, num_path, {"base", "len", "case"}, {"base", "len", "case"})
+                base = num["base"]
+                if type(base) is not int or base not in (10, 16, 36):
+                    fail(f"{num_path}.base must be 10, 16, or 36")
+                length = num["len"]
+                if type(length) is not int:
+                    fail(f"{num_path}.len must be an integer")
+                cap = 15 if base == 10 else 13 if base == 16 else 10
+                if length < 1 or length > cap:
+                    fail(f"{num_path}.len must be between 1 and {cap} for base {base}")
+                case = num["case"]
+                if type(case) is not str or case not in ("lower", "upper"):
+                    fail(f"{num_path}.case must be lower or upper")
+                if base == 10 and case != "lower":
+                    fail(f"{num_path}.case must be lower for base 10")
+                grammar.append({"num": {"base": base, "len": length, "case": case}})
+                numeric += 1
+                previous_literal = False
+            if numeric == 0:
+                fail(f"leaf {leaf}: grammar needs at least one numeric token")
+            column["grammar"] = grammar
+
+        if "derived" in raw:
+            derived_path = f"{path}.derived"
+            derived = record(raw["derived"], derived_path)
+            check_keys(derived, derived_path, {"source", "values"}, {"source", "values"})
+            source = derived["source"]
+            if type(source) is not int:
+                fail(f"{derived_path}.source must be an integer")
+            raw_values = derived["values"]
+            if type(raw_values) is not list:
+                fail(f"{derived_path}.values must be an array")
+            column["derived"] = {
+                "source": source,
+                "values": [
+                    portable_string(value, f"{derived_path}.values[{value_index}]")
+                    for value_index, value in enumerate(raw_values)
+                ],
+            }
+
+        parsed.append(column)
+
+    by_leaf = {column["leaf"]: column for column in parsed}
+    for column in parsed:
+        derived = column.get("derived")
+        if derived is None:
+            continue
+        leaf = column["leaf"]
+        source = derived["source"]
+        if source < 0 or source >= len(refs) or refs[source][0] != "string":
+            fail(f"leaf {leaf}: derived source {source} is not a string column")
+        if source >= leaf:
+            fail(f"leaf {leaf}: derived source must be earlier than the target")
+        if refs[source][1] != refs[leaf][1]:
+            fail(f"leaf {leaf}: derived source must belong to the same eligible array")
+        source_dict = by_leaf.get(source, {}).get("dict")
+        if source_dict is None:
+            fail(f"leaf {leaf}: derived source {source} must have a dictionary in the profile")
+        if len(derived["values"]) != len(source_dict):
+            fail(
+                f"leaf {leaf}: derived values length must equal source dictionary length {len(source_dict)}"
+            )
 
 
 def fingerprint_of(artifact: str) -> bytes:

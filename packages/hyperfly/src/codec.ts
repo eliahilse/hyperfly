@@ -73,6 +73,7 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
       maxDepth: limits.maxDepth,
       maxItems: limits.maxItems,
       maxByteLength: limits.maxByteLength,
+      maxAmplification: limits.maxAmplification,
       columnar,
       deflate: pack.deflate,
       canInflate: pack.inflate !== undefined,

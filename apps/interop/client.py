@@ -37,10 +37,12 @@ def main() -> int:
 
     _, _, artifact_text = get(f"/.well-known/hyperfly/{offered}")
     artifact = json.loads(artifact_text)
-    codec = compile_ir(artifact["ir"], plan=artifact["plan"]["layout"], profile=artifact.get("profile") and {
-        "version": 1,
-        "shared": artifact["profile"],
-    })
+    shared = artifact.get("profile")
+    profile = None
+    if shared:
+        v2 = any("grammar" in c or "derived" in c for c in shared["columns"])
+        profile = {"version": 2 if v2 else 1, "shared": shared}
+    codec = compile_ir(artifact["ir"], plan=artifact["plan"]["layout"], profile=profile)
     assert codec.fingerprint == offered, "a client must verify what it was handed"
     registry.add(codec)
     print(f"2. fetched artifact, derived fingerprint matches: {codec.fingerprint[:8]}")

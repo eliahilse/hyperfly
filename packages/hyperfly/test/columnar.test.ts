@@ -274,7 +274,7 @@ describe("profiles: dictionary columns", () => {
     const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
     const value = [{ s: "online" }, { s: "novel" }, { s: "offline" }];
     const body = codec.encodeBody(value);
-    expect(toHex(body)).toBe("03010100056e6f76656c02");
+    expect(toHex(body)).toBe("03010221056e6f76656c");
     expect(codec.decodeBody(body)).toEqual(value);
   });
 
@@ -295,7 +295,7 @@ describe("profiles: dictionary columns", () => {
 
   test("an out-of-range code is rejected", () => {
     const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
-    expect(() => codec.decodeBody(fromHex("010109"))).toThrow("out of range");
+    expect(() => codec.decodeBody(fromHex("01010203"))).toThrow("out of range");
   });
 
   test("invalid profiles are rejected at compile", () => {
@@ -342,6 +342,71 @@ describe("profiled golden vectors", () => {
       }
     });
   }
+
+  // decode-only: valid input a canonical encoder would never produce (E = k)
+  for (const v of vectors.profiled.decodeOnly) {
+    test(v.name, () => {
+      const codec = compileIR(v.ir as IRNode, { plan: "columnar", profile: v.profile as never, pack: false });
+      expect(codec.decodeBody(fromHex(v.hex))).toEqual(v.value);
+    });
+  }
+
+  // the accepted profile domain is closed: these documents must fail compilation
+  const reviveDeep = (value: unknown): unknown => {
+    if (value && typeof value === "object" && "$surrogate" in (value as object)) {
+      return String.fromCharCode(parseInt((value as { $surrogate: string }).$surrogate, 16));
+    }
+    if (Array.isArray(value)) return value.map(reviveDeep);
+    if (value && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([k, val]) => [k, reviveDeep(val)]));
+    }
+    return value;
+  };
+  for (const v of vectors.profiled.invalidProfile) {
+    test(v.name, () => {
+      try {
+        compileIR(v.ir as IRNode, { plan: "columnar", profile: reviveDeep(v.profile) as never, pack: false });
+        throw new Error("expected failure");
+      } catch (err) {
+        expect(err).toBeInstanceOf(HyperflyError);
+        expect((err as HyperflyError).code as string).toBe(v.error);
+      }
+    });
+  }
+});
+
+describe("profile reconstructions respect the decoder byte limit", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+  const limits = { maxByteLength: 8 } as never;
+
+  test("a dictionary entry beyond maxByteLength is rejected at decode", () => {
+    const profile = {
+      version: 1 as const,
+      shared: { columns: [{ leaf: 0, dict: ["a-value-well-beyond-eight-bytes"] }] },
+    };
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const body = codec.encodeBody([{ s: "a-value-well-beyond-eight-bytes" }]);
+    const tight = compileIR(IR, { plan: "columnar", profile, pack: false, limits });
+    expect(() => tight.decodeBody(body)).toThrow("limit");
+  });
+
+  test("a grammar rendering beyond maxByteLength is rejected at decode", () => {
+    const profile = {
+      version: 2 as const,
+      shared: {
+        columns: [
+          { leaf: 0, grammar: [{ lit: "quite-a-long-prefix-" }, { num: { base: 10 as const, len: 2, case: "lower" as const } }] },
+        ],
+      },
+    };
+    const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
+    const body = codec.encodeBody([{ s: "quite-a-long-prefix-07" }]);
+    const tight = compileIR(IR, { plan: "columnar", profile, pack: false, limits });
+    expect(() => tight.decodeBody(body)).toThrow("limit");
+  });
 });
 
 describe("profiles: aliased schema nodes", () => {
@@ -372,7 +437,7 @@ describe("profiles: aliased schema nodes", () => {
     const codec = compileIR(IR, { plan: "columnar", profile, pack: false });
     const value = { a: [{ s: "red" }], b: [{ s: "red" }] };
     // "red" is code 1 under leaf 0 and code 2 under leaf 1
-    expect(toHex(codec.encodeBody(value))).toBe("010101010102");
+    expect(toHex(codec.encodeBody(value))).toBe("0101010101010202");
     expect(codec.decodeBody(codec.encodeBody(value))).toEqual(value);
   });
 
@@ -388,5 +453,38 @@ describe("profiles: aliased schema nodes", () => {
     ]);
     const codec = compileIR(IR, { plan: "columnar", profile: trained, pack: false });
     expect(codec.decodeBody(codec.encodeBody(samples[0]!))).toEqual(samples[0]!);
+  });
+});
+
+describe("dictionary entry ceiling", () => {
+  const IR: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+
+  test("16383 entries compile and 16384 are rejected", () => {
+    const at = Array.from({ length: 16383 }, (_, i) => `v${i}`);
+    const over = [...at, "one-more"];
+    expect(() =>
+      compileIR(IR, { plan: "columnar", profile: { version: 1, shared: { columns: [{ leaf: 0, dict: at }] } }, pack: false }),
+    ).not.toThrow();
+    expect(() =>
+      compileIR(IR, { plan: "columnar", profile: { version: 1, shared: { columns: [{ leaf: 0, dict: over }] } }, pack: false }),
+    ).toThrow("16383");
+  });
+});
+
+describe("deflate candidacy respects the byte limit (python port finding)", () => {
+  test("a column whose concatenation exceeds maxByteLength encodes plain, not packed", () => {
+    const IR: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+    };
+    const limits = { maxByteLength: 8 } as never;
+    const codec = compileIR(IR, { plan: "columnar", limits });
+    const value = [{ s: "aaaa" }, { s: "aaaa" }, { s: "aaaa" }];
+    const body = codec.encodeBody(value);
+    expect(codec.decodeBody(body)).toEqual(value);
+    expect(body[1]).toBe(0x00);
   });
 });

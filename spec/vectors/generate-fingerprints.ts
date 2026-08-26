@@ -34,11 +34,41 @@ const CASES: { name: string; ir: IRNode }[] = [
   { name: "escaping", ir: { kind: "literal", value: 'a"b\\c' } },
 ];
 
-const PROFILED: { name: string; ir: IRNode; profile: { version: 1; shared: { columns: { leaf: number; dict: string[] }[] } } }[] = [
+import type { Profile } from "../../packages/hyperfly/src/index.js";
+
+const PROFILED: { name: string; ir: IRNode; profile: Profile }[] = [
   {
     name: "profiled-single",
     ir: { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } },
     profile: { version: 1, shared: { columns: [{ leaf: 0, dict: ['a"q', "b\\s", "c\u0001", "🚀"] }] } },
+  },
+  {
+    name: "profiled-v2-all-keys",
+    ir: {
+      kind: "array",
+      element: {
+        kind: "struct",
+        fields: [
+          { name: "a", type: { kind: "string" } },
+          { name: "b", type: { kind: "string" } },
+        ],
+      },
+    },
+    // pins the §6.5 key orders: leaf, dict, grammar, derived; num token base, len, case
+    profile: {
+      version: 2,
+      shared: {
+        columns: [
+          { leaf: 0, dict: ["u1", "u2"] },
+          {
+            leaf: 1,
+            dict: ['k"9'],
+            grammar: [{ lit: "id_" }, { num: { base: 16, len: 4, case: "lower" } }],
+            derived: { source: 0, values: ["x@a", "y🚀"] },
+          },
+        ],
+      },
+    },
   },
   {
     name: "profiled-two-arrays",
