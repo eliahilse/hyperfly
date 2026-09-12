@@ -172,8 +172,8 @@ export default function Home() {
             <p className="footnote">
               Bytes per message, averaged over 500 independent responses per route, measured
               with the TypeScript reference implementation — reproduce with `bun run bench`. Each
-              Hyperfly row adds exactly one thing: schema-compiled layout, then generic
-              compression on top of it, then a dictionary trained on the route&apos;s own traffic.
+              Hyperfly row adds exactly one thing: schema-compiled layout, then a dictionary
+              trained on the route&apos;s own traffic.
               That dictionary is an out-of-band artifact; the repo reports its size and how many
               requests it takes to pay for itself — ten for events, thirty-five for orders. The
               Brotli rows are q4, the level edges actually run on dynamic responses. Protobuf
