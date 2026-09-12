@@ -6,7 +6,7 @@ import { useInView } from "./reveal";
 type Row = {
   label: string;
   bytes: number;
-  kind?: "baseline" | "generic" | "binary" | "hyperfly" | "profile" | "full";
+  kind?: "baseline" | "generic" | "binary" | "hyperfly" | "full";
 };
 
 type Payload = {
@@ -26,10 +26,9 @@ const PAYLOADS: Payload[] = [
       { label: "JSON + Brotli — edge q4", bytes: 2512, kind: "generic" },
       { label: "Protobuf", bytes: 7190, kind: "binary" },
       { label: "Hyperfly", bytes: 2013, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 1974, kind: "profile" },
       { label: "Hyperfly Profiled", bytes: 574, kind: "full" },
     ],
-    note: "An audit log repeats itself across requests, not within one — the same actors, the same user agents, request after request — and its ids are machine-made: evt_, a sequence number, eight hex digits. The profile learns the recurring values as a dictionary, the id shape as a grammar whose lanes ship the sequence as deltas and the hex at four bits a digit, and actorEmail as a function of actorId, which then costs nothing at all. Brotli takes 39 bytes off this route; the profile takes 1 439. Adding Brotli on top of the profiled stream makes it four bytes larger — at this density there is nothing left for it to find.",
+    note: "An audit log repeats itself across requests, not within one — the same actors, the same user agents, request after request — and its ids are machine-made: evt_, a sequence number, eight hex digits. The profile learns the recurring values as a dictionary, the id shape as a grammar whose lanes ship the sequence as deltas and the hex at four bits a digit, and actorEmail as a function of actorId, which then costs nothing at all. The profile takes 1 439 bytes off this route.",
   },
   {
     route: "GET /v1/devices",
@@ -40,7 +39,6 @@ const PAYLOADS: Payload[] = [
       { label: "JSON + Brotli — edge q4", bytes: 1422, kind: "generic" },
       { label: "Protobuf", bytes: 2007, kind: "binary" },
       { label: "Hyperfly", bytes: 755, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 725, kind: "profile" },
       { label: "Hyperfly Profiled", bytes: 542, kind: "full" },
     ],
     note: "An enum with six members is three bits, not a string and not a byte. Integers ship bit-packed against the narrowest frame the column needs, outliers pay for themselves alone, and booleans pack into bitmaps — that is the first row, before anything has been learned. The profile then learns the fleet: the device ids that recur on every page.",
@@ -54,10 +52,9 @@ const PAYLOADS: Payload[] = [
       { label: "JSON + Brotli — edge q4", bytes: 408, kind: "generic" },
       { label: "Protobuf", bytes: 388, kind: "binary" },
       { label: "Hyperfly", bytes: 271, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 273, kind: "profile" },
       { label: "Hyperfly Profiled", bytes: 180, kind: "full" },
     ],
-    note: "The single-entity response, and the case a general compressor handles worst: under a kilobyte there is nothing yet to build a window from. Brotli actually costs two bytes here rather than saving any — at this size its framing outweighs what it finds. What does work is knowing the catalogue in advance.",
+    note: "The single-entity response, and the case a general compressor handles worst: under a kilobyte there is nothing yet to build a window from. What does work is knowing the catalogue in advance.",
   },
   {
     route: "GET /v1/feed",
@@ -68,7 +65,6 @@ const PAYLOADS: Payload[] = [
       { label: "JSON + Brotli — edge q4", bytes: 2294, kind: "generic" },
       { label: "Protobuf", bytes: 4396, kind: "binary" },
       { label: "Hyperfly", bytes: 1871, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 1868, kind: "profile" },
       { label: "Hyperfly Profiled", bytes: 1466, kind: "full" },
     ],
     note: "Prose is the hard case: the bodies are genuinely new every time and nothing can invent redundancy that is not there. What does recur are the authors, so that is what the profile takes. This is the narrowest margin on the page, and it is the honest one to look at first.",
@@ -82,10 +78,9 @@ const PAYLOADS: Payload[] = [
       { label: "JSON + Brotli — edge q4", bytes: 842, kind: "generic" },
       { label: "Protobuf", bytes: 2034, kind: "binary" },
       { label: "Hyperfly", bytes: 384, kind: "hyperfly" },
-      { label: "Hyperfly + Brotli", bytes: 362, kind: "profile" },
       { label: "Hyperfly Profiled", bytes: 384, kind: "full" },
     ],
-    note: "Timestamps arrive at a constant stride, so the differences between them are identical and pack to a width of zero bits — the column carries its first value and nothing else. Exact-decimal prices travel as integer mantissas bit-packed to the span actually present. The profiled row matches the base row exactly, and is left in to show it: this route's only string sits outside the array, so training buys nothing at all — here the honest win still belongs to Brotli's 22 bytes.",
+    note: "Timestamps arrive at a constant stride, so the differences between them are identical and pack to a width of zero bits — the column carries its first value and nothing else. Exact-decimal prices travel as integer mantissas bit-packed to the span actually present. The profiled row matches the base row exactly, and is left in to show it: this route's only string sits outside the array, so training buys nothing at all.",
   },
 ];
 
