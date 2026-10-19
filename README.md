@@ -12,7 +12,7 @@ and nothing is stable.
 
 ## What it costs on the wire
 
-Bytes per message, averaged over 500-message corpora (`bun run bench`):
+Bytes per message, averaged over 500-message corpora (`cd apps/bench && bun run bench`):
 
 | route | JSON | JSON+Brotli | Protobuf | Hyperfly | Profiled |
 |---|---|---|---|---|---|
