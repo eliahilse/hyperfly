@@ -30,10 +30,16 @@ def parse_accept(header: str | None) -> list[str]:
     start = 0
     for _ in range(_MAX_ACCEPTED):
         end = header.find(",", start)
-        part = header[start:] if end == -1 else header[start:end]
-        value = part.strip(" \t")
-        if _FINGERPRINT.fullmatch(value) and value not in out:
-            out.append(value)
+        stop = len(header) if end == -1 else end
+        lo, hi = start, stop
+        while lo < hi and header[lo] in " \t":
+            lo += 1
+        while hi > lo and header[hi - 1] in " \t":
+            hi -= 1
+        if hi - lo == 32:
+            value = header[lo:hi]
+            if _FINGERPRINT.fullmatch(value) and value not in out:
+                out.append(value)
         if end == -1:
             break
         start = end + 1
