@@ -83,7 +83,14 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
     };
     let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), true).unwrap();
 
-    for blob in [&[0xff][..], &[0x03, 0x00][..], &[0x01][..]] {
+    let mut expands_then_fails = miniz_oxide::deflate::compress_to_vec(&vec![0u8; 1 << 20], 6);
+    expands_then_fails.pop();
+    for blob in [
+        &[0xff][..],
+        &[0x03, 0x00][..],
+        &[0x01][..],
+        &expands_then_fails[..],
+    ] {
         let body = packed_body((1 << 28) - 1, blob);
         let baseline = CURRENT.load(Ordering::SeqCst);
         PEAK.store(baseline, Ordering::SeqCst);
@@ -93,8 +100,16 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
         assert!(peak < 16 * 1024 * 1024, "decode allocated {peak} bytes");
     }
 
-    for len in [0, 1, 64 * 1024, 64 * 1024 + 1, 300_000] {
-        let text = "x".repeat(len);
+    let prefix: String = (0..4096)
+        .map(|i| char::from(b'a' + (i * 7 % 26) as u8))
+        .collect();
+    let far_reference = format!("{prefix}{}{prefix}", "-".repeat(70 * 1024));
+    let texts = [0, 1, 64 * 1024, 64 * 1024 + 1, 300_000]
+        .map(|len| "x".repeat(len))
+        .into_iter()
+        .chain([far_reference]);
+    for text in texts {
+        let len = text.len();
         let blob = miniz_oxide::deflate::compress_to_vec(text.as_bytes(), 6);
         let body = packed_body(len, &blob);
         let value = string_row(text);
