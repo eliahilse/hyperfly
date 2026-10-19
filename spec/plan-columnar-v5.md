@@ -137,9 +137,10 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
     every packed value is non-negative and fits `w` bits. An encoder MUST set
     `w = bitWidth(max(v[i] − base))` — "fits" alone would give one column a
     second encoding at the same size.
-  - `0x03` delta frame of reference: `svarint(v[0])`, `svarint(base)`, one
-    width byte `w`, then `d[i] - base` bit-packed for `i` in `1..k-1`, where
-    `d[i] = v[i] - v[i-1]` and `base` is the minimum difference. The mode
+  - `0x03` delta frame of reference: the first value in its wire-v0 form, then
+    `svarint(base)`, one width byte `w`, then `d[i] - base` bit-packed for `i`
+    in `1..k-1`, where `d[i] = v[i] - v[i-1]` and `base` is the minimum
+    difference. The mode
     exists only for `k ≥ 2`: with a single value there is no difference to
     frame, an encoder MUST NOT choose it and a decoder MUST reject it. An
     encoder MUST set `w = bitWidth(max(d[i] − base))`.
