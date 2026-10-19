@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import acceptVectors from "../../../spec/vectors/accept.json" with { type: "json" };
 import { z } from "zod";
 import { CodecRegistry, type IRNode } from "../src/index.js";
 import { compileIR } from "../src/index.js";
@@ -26,20 +27,20 @@ const codecB = compile(Schema, { plan: "columnar" });
 const value = { id: "abc", n: 7 };
 
 describe("parseAccept", () => {
-  test("keeps order, lowercases, drops junk and duplicates", () => {
-    const a = "A".repeat(32);
-    const parsed = parseAccept(`${a}, not-a-fingerprint, ${a.toLowerCase()}, ${"b".repeat(32)}`);
-    expect(parsed).toEqual(["a".repeat(32), "b".repeat(32)]);
+  test.each(acceptVectors)("$name", ({ header, expected }) => {
+    expect(parseAccept(header)).toEqual(expected);
   });
 
   test("absent or empty header yields nothing", () => {
     expect(parseAccept(null)).toEqual([]);
+    expect(parseAccept(undefined)).toEqual([]);
     expect(parseAccept("")).toEqual([]);
   });
 
   test("a hostile header is bounded, not fatal", () => {
     const flood = Array.from({ length: 5000 }, (_, i) => i.toString(16).padStart(32, "0")).join(",");
     expect(parseAccept(flood).length).toBeLessThanOrEqual(32);
+    expect(parseAccept(",".repeat(1024 * 1024))).toEqual([]);
   });
 });
 
