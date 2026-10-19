@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/vectors.json" with { type: "json" };
+import ir from "../../../spec/vectors/ir.json" with { type: "json" };
 import { compileIR, toHex, type IRNode } from "../src/index.js";
 import { HyperflyError } from "../src/errors.js";
 
@@ -7,8 +8,21 @@ function revive(value: unknown): unknown {
   if (value && typeof value === "object" && "$surrogate" in value) {
     return String.fromCharCode(parseInt((value as { $surrogate: string }).$surrogate, 16));
   }
+  if (Array.isArray(value)) return value.map(revive);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, revive(inner)]));
+  }
   return value;
 }
+
+describe("golden vectors: IR acceptance", () => {
+  for (const v of ir.invalid) {
+    test(v.name, () => expect(() => compileIR(revive(v.ir) as IRNode)).toThrow());
+  }
+  for (const v of ir.valid) {
+    test(v.name, () => expect(() => compileIR(revive(v.ir) as IRNode)).not.toThrow());
+  }
+});
 
 function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);

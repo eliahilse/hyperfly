@@ -1,0 +1,621 @@
+{
+  "description": "IR that every implementation MUST reject at compile time (wire-v0 §4). Values marked {\"$surrogate\": \"d800\"} are lone UTF-16 surrogates; revive them as in vectors.json invalidEncode. The valid rows are near misses that every implementation MUST accept.",
+  "invalid": [
+    {
+      "name": "int-min-null",
+      "ir": {
+        "kind": "int",
+        "min": null
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-max-null",
+      "ir": {
+        "kind": "int",
+        "max": null
+      },
+      "error": "ir"
+    },
+    {
+      "name": "array-length-null",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        },
+        "length": null
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-min-exceeds-max",
+      "ir": {
+        "kind": "int",
+        "min": 2,
+        "max": 1
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-min-below-domain",
+      "ir": {
+        "kind": "int",
+        "min": -9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-max-above-domain",
+      "ir": {
+        "kind": "int",
+        "max": 9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-min-above-domain",
+      "ir": {
+        "kind": "int",
+        "min": 9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-max-below-domain",
+      "ir": {
+        "kind": "int",
+        "max": -9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-min-non-integer",
+      "ir": {
+        "kind": "int",
+        "min": 1.5
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-max-non-integer",
+      "ir": {
+        "kind": "int",
+        "max": 1.5
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-min-boolean",
+      "ir": {
+        "kind": "int",
+        "min": true
+      },
+      "error": "ir"
+    },
+    {
+      "name": "int-max-string",
+      "ir": {
+        "kind": "int",
+        "max": "1"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "array-length-negative",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        },
+        "length": -1
+      },
+      "error": "ir"
+    },
+    {
+      "name": "array-length-non-integer",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        },
+        "length": 1.5
+      },
+      "error": "ir"
+    },
+    {
+      "name": "array-length-unsafe-integer",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        },
+        "length": 9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "array-length-boolean",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        },
+        "length": true
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-non-integer",
+      "ir": {
+        "kind": "literal",
+        "value": 1.5
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-unsafe-integer",
+      "ir": {
+        "kind": "literal",
+        "value": 9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-negative-unsafe-integer",
+      "ir": {
+        "kind": "literal",
+        "value": -9007199254740992
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-object",
+      "ir": {
+        "kind": "literal",
+        "value": {}
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-array",
+      "ir": {
+        "kind": "literal",
+        "value": []
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-negative-zero",
+      "ir": {
+        "kind": "literal",
+        "value": -0.0
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-empty",
+      "ir": {
+        "kind": "enum",
+        "members": []
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-empty-member",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          ""
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-duplicate-member",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "x",
+          "x"
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-lone-high-surrogate",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          {
+            "$surrogate": "d800"
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-lone-low-surrogate",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          {
+            "$surrogate": "dc00"
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-non-string-member",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          1
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-lone-high-surrogate",
+      "ir": {
+        "kind": "literal",
+        "value": {
+          "$surrogate": "d800"
+        }
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-lone-low-surrogate",
+      "ir": {
+        "kind": "literal",
+        "value": {
+          "$surrogate": "dc00"
+        }
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-lone-high-surrogate",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": {
+              "$surrogate": "d800"
+            },
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-lone-low-surrogate",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": {
+              "$surrogate": "dc00"
+            },
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-empty-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-non-string-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": 1,
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-duplicate-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            }
+          },
+          {
+            "name": "x",
+            "type": {
+              "kind": "int"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-proto-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "__proto__",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-zero-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "0",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-last-array-index-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "4294967294",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "nullable-nullable",
+      "ir": {
+        "kind": "nullable",
+        "inner": {
+          "kind": "nullable",
+          "inner": {
+            "kind": "bool"
+          }
+        }
+      },
+      "error": "ir"
+    },
+    {
+      "name": "nullable-literal-null",
+      "ir": {
+        "kind": "nullable",
+        "inner": {
+          "kind": "literal",
+          "value": null
+        }
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-nullable-flag-over-nullable",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "nullable",
+              "inner": {
+                "kind": "bool"
+              }
+            },
+            "nullable": true
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-nullable-flag-over-literal-null",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "literal",
+              "value": null
+            },
+            "nullable": true
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "unknown-kind",
+      "ir": {
+        "kind": "unknown"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "missing-kind",
+      "ir": {},
+      "error": "ir"
+    },
+    {
+      "name": "array-missing-element",
+      "ir": {
+        "kind": "array"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "nullable-missing-inner",
+      "ir": {
+        "kind": "nullable"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "literal-missing-value",
+      "ir": {
+        "kind": "literal"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "enum-missing-members",
+      "ir": {
+        "kind": "enum"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "struct-missing-fields",
+      "ir": {
+        "kind": "struct"
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-missing-type",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x"
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-missing-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "error": "ir"
+    }
+  ],
+  "valid": [
+    {
+      "name": "field-first-non-array-index-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "4294967295",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "field-leading-zero-name",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "01",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "int-min-equals-max",
+      "ir": {
+        "kind": "int",
+        "min": 1,
+        "max": 1
+      }
+    },
+    {
+      "name": "enum-one-member",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "x"
+        ]
+      }
+    },
+    {
+      "name": "literal-null",
+      "ir": {
+        "kind": "literal",
+        "value": null
+      }
+    },
+    {
+      "name": "literal-zero",
+      "ir": {
+        "kind": "literal",
+        "value": 0
+      }
+    },
+    {
+      "name": "literal-false",
+      "ir": {
+        "kind": "literal",
+        "value": false
+      }
+    },
+    {
+      "name": "nullable-literal-string",
+      "ir": {
+        "kind": "nullable",
+        "inner": {
+          "kind": "literal",
+          "value": "x"
+        }
+      }
+    }
+  ]
+}

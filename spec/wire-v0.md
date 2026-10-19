@@ -220,3 +220,4 @@ partial values.
 `spec/vectors/vectors.json` — valid encode/decode pairs and invalid inputs
 (both directions), body bytes only. `spec/vectors/fingerprints.json` — IR →
 canonical text → fingerprint, locking §5. Every implementation runs both.
+`spec/vectors/ir.json` — invalid IR and valid near misses, locking §4 acceptance.
