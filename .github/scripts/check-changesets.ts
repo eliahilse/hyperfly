@@ -46,6 +46,9 @@ export function parseChangeset(text: string): Changeset {
   const frontmatter = lines.slice(1, end).join("\n")
   const releases: unknown = frontmatter.trim() ? Bun.YAML.parse(frontmatter) : {}
   if (releases === null || typeof releases !== "object" || Array.isArray(releases)) throw new Error("frontmatter is not a map of package names to bump types")
+  // the parser keeps the last of duplicate keys, which Changesets rejects; every entry is one top-level line
+  const entries = frontmatter.split("\n").filter(line => /^[^\s#-]/.test(line)).length
+  if (entries !== Object.keys(releases).length) throw new Error("frontmatter names a package more than once")
   for (const [name, bump] of Object.entries(releases)) {
     if (typeof bump !== "string" || !BUMPS.has(bump)) throw new Error(`${name}: bump type ${JSON.stringify(bump)} is not one of ${[...BUMPS].join(", ")}`)
   }

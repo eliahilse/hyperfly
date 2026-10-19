@@ -27,6 +27,9 @@ describe("parseChangeset", () => {
       body: "Adds `encodeStream`.",
     })
   })
+  test("ignores comments and blank lines", () => {
+    expect(parseChangeset("---\n# bumps\nhyperfly: patch\n\n---\nFaster.\n").packages).toEqual(["hyperfly"])
+  })
   test("reads an empty changeset", () => expect(parseChangeset("---\n---\n")).toEqual({ packages: [], body: "" }))
   test("reads quoted bump types and CRLF files", () => {
     expect(parseChangeset(`---\r\n"hyperfly": "patch"\r\n---\r\n\r\nFaster.\r\n`)).toEqual({ packages: ["hyperfly"], body: "Faster." })
@@ -36,6 +39,7 @@ describe("parseChangeset", () => {
     expect(() => parseChangeset("---\nhyperfly\n---\n")).toThrow("not a map")
     expect(() => parseChangeset("---\n- hyperfly\n---\n")).toThrow("not a map")
     expect(() => parseChangeset("---\n@hyperfly/rust: patch\n---\n")).toThrow()
+    expect(() => parseChangeset("---\nhyperfly: minor\n\"hyperfly\": patch\n---\n")).toThrow("more than once")
   })
   test("rejects a file without frontmatter", () => {
     expect(() => parseChangeset("Adds a thing.\n")).toThrow("missing frontmatter")
