@@ -8,20 +8,33 @@ export const OFFER_HEADER = "hyperfly-offer";
 export const WELL_KNOWN_PREFIX = "/.well-known/hyperfly/";
 
 /** Negotiation §6: client-controlled input, so parsing is bounded. */
-const MAX_ACCEPTED = 32;
+const MAX_ENTRIES = 32;
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 
-/**
- * Fingerprints the client says it can decode, in its order of preference.
- * Malformed entries are dropped rather than failing the request.
- */
+/** Client fingerprints in preference order, ignoring malformed entries and duplicates. */
 export function parseAccept(header: string | null | undefined): string[] {
   if (!header) return [];
   const out: string[] = [];
-  for (const part of header.split(",")) {
-    if (out.length >= MAX_ACCEPTED) break;
-    const value = part.trim().toLowerCase();
-    if (FINGERPRINT.test(value) && !out.includes(value)) out.push(value);
+  let pos = 0;
+  for (let count = 0; count < MAX_ENTRIES && pos <= header.length; count++) {
+    const comma = header.indexOf(",", pos);
+    let start = pos;
+    let end = comma === -1 ? header.length : comma;
+    pos = end + 1;
+    while (start < end && (header.charCodeAt(start) === 0x20 || header.charCodeAt(start) === 0x09)) start++;
+    while (end > start && (header.charCodeAt(end - 1) === 0x20 || header.charCodeAt(end - 1) === 0x09)) end--;
+    if (end - start !== 32) continue;
+    let valid = true;
+    for (let i = start; i < end; i++) {
+      const code = header.charCodeAt(i);
+      if (!((code >= 0x30 && code <= 0x39) || (code >= 0x61 && code <= 0x66))) {
+        valid = false;
+        break;
+      }
+    }
+    if (!valid) continue;
+    const value = header.slice(start, end);
+    if (!out.includes(value)) out.push(value);
   }
   return out;
 }
