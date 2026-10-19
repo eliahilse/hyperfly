@@ -1,6 +1,7 @@
 {
   "name": "@hyperfly/lb",
   "version": "0.1.0",
+  "private": true,
   "description": "Legacy: global load balancer on Cloudflare Workers. Geo-aware routing with automatic read/write separation.",
   "type": "module",
   "license": "Apache-2.0",
