@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -75,10 +76,24 @@ def negotiate(
     return Negotiation("json", headers)
 
 
+def _json_value(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        value = model_dump(mode="json")
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
 def encode_for(decision: Negotiation, value: Any) -> tuple[bytes, dict[str, str]]:
     if decision.kind == "hyperfly" and decision.codec is not None:
         return decision.codec.encode(value), decision.headers
-    return json.dumps(value, separators=(",", ":")).encode("utf-8"), decision.headers
+    text = json.dumps(_json_value(value), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    return text.encode("utf-8"), decision.headers
 
 
 @dataclass(frozen=True)
@@ -121,7 +136,11 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     """
     if not (content_type or "").lower().startswith(HYPERFLY_MEDIA_TYPE):
         text = body.decode("utf-8") if isinstance(body, bytes) else body
-        return "json", json.loads(text)
+
+        def reject_constant(value: str) -> Any:
+            raise json.JSONDecodeError(f"invalid JSON constant {value}", text, 0)
+
+        return "json", json.loads(text, parse_constant=reject_constant)
     data = body.encode("utf-8") if isinstance(body, str) else body
     fingerprint = data[3:19].hex()
     codec = registry.get(fingerprint)
