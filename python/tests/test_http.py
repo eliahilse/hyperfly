@@ -1,6 +1,6 @@
 import json
 import math
-from enum import Enum
+from enum import Enum, IntEnum
 
 import pytest
 from pydantic import BaseModel
@@ -162,6 +162,19 @@ def test_json_fallback_replaces_nested_non_finite_values_without_mutation():
     assert value["values"] is nested
     assert math.isnan(nested[0])
     assert nested[1] == {"positive": math.inf, "negative": -math.inf}
+
+
+def test_json_fallback_writes_enum_values_and_keys():
+    class Color(Enum):
+        red = "red"
+        ratio = 0.5
+
+    class Level(IntEnum):
+        high = 3
+
+    value = {"color": Color.red, "levels": [Level.high, Color.ratio], Color.red: 1, Level.high: 2, math.inf: 3}
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert body == b'{"color":"red","levels":[3,0.5],"red":1,"3":2,"Infinity":3}'
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
