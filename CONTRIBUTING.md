@@ -29,15 +29,3 @@ writes them into `pyproject.toml` (as PEP 440, `1.0.0-alpha.1` becomes
 The repository is in prerelease mode (`.changeset/pre.json`, tag `alpha`), so
 every bump produces an `-alpha.N` version. `bun changeset pre exit` leaves it
 before the first stable release.
-
-## Releasing
-
-1. Merged changesets collect on `main`. On every push to `main` the release
-   workflow opens or updates a `chore: release` PR that applies them: versions,
-   changelogs, `pyproject.toml`, `Cargo.toml`.
-2. A maintainer reviews and merges that PR.
-3. The merge publishes every package whose version is not yet on its registry:
-   npm with provenance through trusted publishing, PyPI through trusted
-   publishing, crates.io. Prerelease versions go to the npm `next` dist-tag.
-   Each published version is tagged and gets a GitHub release with its
-   changelog section.

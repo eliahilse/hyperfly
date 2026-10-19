@@ -35,17 +35,21 @@ export function touchedPackages(files: string[]): string[] {
 
 export type Changeset = { packages: string[]; body: string }
 
-/** the frontmatter package names and the body of a changeset file */
+const BUMPS = new Set(["major", "minor", "patch", "none"])
+
+/** the frontmatter package names and the body of a changeset file; throws on frontmatter Changesets would reject */
 export function parseChangeset(text: string): Changeset {
   const lines = text.split(/\r?\n/)
   if (lines[0]?.trim() !== "---") throw new Error("missing frontmatter")
   const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---")
   if (end < 0) throw new Error("unterminated frontmatter")
-  const packages = lines
-    .slice(1, end)
-    .map(line => /^\s*["']?([^"':]+)["']?\s*:\s*(major|minor|patch)\s*$/.exec(line)?.[1])
-    .filter((name): name is string => name !== undefined)
-  return { packages, body: lines.slice(end + 1).join("\n").trim() }
+  const frontmatter = lines.slice(1, end).join("\n")
+  const releases: unknown = frontmatter.trim() ? Bun.YAML.parse(frontmatter) : {}
+  if (releases === null || typeof releases !== "object" || Array.isArray(releases)) throw new Error("frontmatter is not a map of package names to bump types")
+  for (const [name, bump] of Object.entries(releases)) {
+    if (typeof bump !== "string" || !BUMPS.has(bump)) throw new Error(`${name}: bump type ${JSON.stringify(bump)} is not one of ${[...BUMPS].join(", ")}`)
+  }
+  return { packages: Object.keys(releases), body: lines.slice(end + 1).join("\n").trim() }
 }
 
 /** what is wrong with a changeset body, if anything */

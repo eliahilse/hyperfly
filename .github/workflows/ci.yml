@@ -32,6 +32,28 @@ jobs:
 
       - run: bun run test
 
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun run build --filter=hyperfly
+
+      - name: publint
+        working-directory: packages/hyperfly
+        run: bunx publint@0.3.25
+
+      - name: are the types wrong
+        working-directory: packages/hyperfly
+        run: bunx @arethetypeswrong/cli@0.18.5 --pack --profile esm-only
+
   release-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10

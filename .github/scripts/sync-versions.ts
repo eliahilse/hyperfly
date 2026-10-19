@@ -17,24 +17,35 @@ export function pep440(version: string): string {
   return `${release}${id}${n}`
 }
 
+const eol = (source: string) => (source.includes("\r\n") ? "\r\n" : "\n")
+
+/** the line index of a top-level string key in a TOML table; throws when the table or the key is missing */
+function tomlLine(lines: string[], table: string, key: string): number {
+  const header = `[${table}]`
+  const start = lines.findIndex(line => line.trim() === header)
+  if (start < 0) throw new Error(`no ${header} table`)
+  for (let i = start + 1; i < lines.length && !lines[i]!.trim().startsWith("["); i++) {
+    if (new RegExp(`^${key}\\s*=\\s*"[^"]*"\\s*$`).test(lines[i]!)) return i
+  }
+  throw new Error(`${header} has no ${key}`)
+}
+
+/** a top-level string value of a TOML table */
+export function tomlString(source: string, table: string, key: string): string {
+  const lines = source.split(eol(source))
+  return /"([^"]*)"/.exec(lines[tomlLine(lines, table, key)]!)![1]!
+}
+
 /** the version line of a TOML table, replaced; throws when the table or its version is missing */
 export function setTomlVersion(source: string, table: string, version: string): string {
-  const header = `[${table}]`
-  const start = source.split("\n").findIndex(line => line.trim() === header)
-  if (start < 0) throw new Error(`no ${header} table`)
-  const lines = source.split("\n")
-  for (let i = start + 1; i < lines.length && !lines[i]!.trim().startsWith("["); i++) {
-    if (/^version\s*=/.test(lines[i]!)) {
-      lines[i] = `version = "${version}"`
-      return lines.join("\n")
-    }
-  }
-  throw new Error(`${header} has no version`)
+  const lines = source.split(eol(source))
+  lines[tomlLine(lines, table, "version")] = `version = "${version}"`
+  return lines.join(eol(source))
 }
 
 /** Cargo.lock with the version of one package replaced */
 export function setLockVersion(source: string, name: string, version: string): string {
-  const pattern = new RegExp(`(\\[\\[package\\]\\]\\nname = "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\nversion = ")[^"]+(")`)
+  const pattern = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\r?\\nversion = ")[^"]+(")`)
   if (!pattern.test(source)) throw new Error(`Cargo.lock has no ${name} package`)
   return source.replace(pattern, `$1${version}$2`)
 }

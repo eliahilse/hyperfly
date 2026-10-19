@@ -22,12 +22,21 @@ describe("touchedPackages", () => {
 
 describe("parseChangeset", () => {
   test("reads quoted and bare package names", () => {
-    expect(parseChangeset(`---\n"hyperfly": minor\n'@hyperfly/rust': patch\n@hyperfly/python: major\n---\n\nAdds \`encodeStream\`.\n`)).toEqual({
+    expect(parseChangeset(`---\nhyperfly: minor\n'@hyperfly/rust': patch\n"@hyperfly/python": major\n---\n\nAdds \`encodeStream\`.\n`)).toEqual({
       packages: ["hyperfly", "@hyperfly/rust", "@hyperfly/python"],
       body: "Adds `encodeStream`.",
     })
   })
   test("reads an empty changeset", () => expect(parseChangeset("---\n---\n")).toEqual({ packages: [], body: "" }))
+  test("reads quoted bump types and CRLF files", () => {
+    expect(parseChangeset(`---\r\n"hyperfly": "patch"\r\n---\r\n\r\nFaster.\r\n`)).toEqual({ packages: ["hyperfly"], body: "Faster." })
+  })
+  test("rejects frontmatter Changesets would reject", () => {
+    expect(() => parseChangeset("---\nhyperfly: patc\n---\n")).toThrow('bump type "patc"')
+    expect(() => parseChangeset("---\nhyperfly\n---\n")).toThrow("not a map")
+    expect(() => parseChangeset("---\n- hyperfly\n---\n")).toThrow("not a map")
+    expect(() => parseChangeset("---\n@hyperfly/rust: patch\n---\n")).toThrow()
+  })
   test("rejects a file without frontmatter", () => {
     expect(() => parseChangeset("Adds a thing.\n")).toThrow("missing frontmatter")
     expect(() => parseChangeset("---\nhyperfly: patch\n")).toThrow("unterminated")
