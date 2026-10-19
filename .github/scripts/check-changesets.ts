@@ -2,6 +2,7 @@
 //   every published package the PR changes is named in a changeset it adds (an empty changeset opts out)
 //   every pending changeset is a short tl;dr: at most two sentences and 45 words, no em dashes
 // usage: bun .github/scripts/check-changesets.ts <base ref>
+import { parseChangesetFile } from "@changesets/parse"
 import { $ } from "bun"
 import { readdir } from "node:fs/promises"
 import { join } from "node:path"
@@ -35,24 +36,10 @@ export function touchedPackages(files: string[]): string[] {
 
 export type Changeset = { packages: string[]; body: string }
 
-const BUMPS = new Set(["major", "minor", "patch", "none"])
-
-/** the frontmatter package names and the body of a changeset file; throws on frontmatter Changesets would reject */
+/** the package names and the summary of a changeset file, read by Changesets' own parser */
 export function parseChangeset(text: string): Changeset {
-  const lines = text.split(/\r?\n/)
-  if (lines[0]?.trim() !== "---") throw new Error("missing frontmatter")
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---")
-  if (end < 0) throw new Error("unterminated frontmatter")
-  const frontmatter = lines.slice(1, end).join("\n")
-  const releases: unknown = frontmatter.trim() ? Bun.YAML.parse(frontmatter) : {}
-  if (releases === null || typeof releases !== "object" || Array.isArray(releases)) throw new Error("frontmatter is not a map of package names to bump types")
-  // the parser keeps the last of duplicate keys, which Changesets rejects; every entry is one top-level line
-  const entries = frontmatter.split("\n").filter(line => /^[^\s#-]/.test(line)).length
-  if (entries !== Object.keys(releases).length) throw new Error("frontmatter names a package more than once")
-  for (const [name, bump] of Object.entries(releases)) {
-    if (typeof bump !== "string" || !BUMPS.has(bump)) throw new Error(`${name}: bump type ${JSON.stringify(bump)} is not one of ${[...BUMPS].join(", ")}`)
-  }
-  return { packages: Object.keys(releases), body: lines.slice(end + 1).join("\n").trim() }
+  const { releases, summary } = parseChangesetFile(text)
+  return { packages: releases.map(release => release.name), body: summary.trim() }
 }
 
 /** what is wrong with a changeset body, if anything */

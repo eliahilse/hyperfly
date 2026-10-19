@@ -34,16 +34,13 @@ describe("parseChangeset", () => {
   test("reads quoted bump types and CRLF files", () => {
     expect(parseChangeset(`---\r\n"hyperfly": "patch"\r\n---\r\n\r\nFaster.\r\n`)).toEqual({ packages: ["hyperfly"], body: "Faster." })
   })
+  test("reads indented entries", () => expect(parseChangeset("---\n  hyperfly: patch\n---\nFaster.\n").packages).toEqual(["hyperfly"]))
   test("rejects frontmatter Changesets would reject", () => {
-    expect(() => parseChangeset("---\nhyperfly: patc\n---\n")).toThrow('bump type "patc"')
-    expect(() => parseChangeset("---\nhyperfly\n---\n")).toThrow("not a map")
-    expect(() => parseChangeset("---\n- hyperfly\n---\n")).toThrow("not a map")
+    expect(() => parseChangeset("---\nhyperfly: patc\n---\n")).toThrow('invalid version type "patc"')
+    expect(() => parseChangeset("---\nhyperfly: minor\n\"hyperfly\": patch\n---\n")).toThrow()
+    expect(() => parseChangeset("---\n{hyperfly: minor, hyperfly: patch}\n---\n")).toThrow()
     expect(() => parseChangeset("---\n@hyperfly/rust: patch\n---\n")).toThrow()
-    expect(() => parseChangeset("---\nhyperfly: minor\n\"hyperfly\": patch\n---\n")).toThrow("more than once")
-  })
-  test("rejects a file without frontmatter", () => {
-    expect(() => parseChangeset("Adds a thing.\n")).toThrow("missing frontmatter")
-    expect(() => parseChangeset("---\nhyperfly: patch\n")).toThrow("unterminated")
+    expect(() => parseChangeset("Adds a thing.\n")).toThrow("missing or invalid frontmatter")
   })
 })
 
