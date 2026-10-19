@@ -79,7 +79,7 @@ def negotiate(
 def _json_value(value: Any) -> Any:
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        value = model_dump(mode="json")
+        value = model_dump(mode="json", by_alias=True)
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
@@ -93,7 +93,8 @@ def encode_for(decision: Negotiation, value: Any) -> tuple[bytes, dict[str, str]
     if decision.kind == "hyperfly" and decision.codec is not None:
         return decision.codec.encode(value), decision.headers
     text = json.dumps(_json_value(value), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    return text.encode("utf-8"), decision.headers
+    # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
+    return text.encode("utf-8", "backslashreplace"), decision.headers
 
 
 @dataclass(frozen=True)

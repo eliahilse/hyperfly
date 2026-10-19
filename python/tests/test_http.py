@@ -145,8 +145,8 @@ def test_json_fallback_serializes_models_in_json_mode():
 
 def test_json_fallback_uses_model_dump_without_pydantic():
     class Response:
-        def model_dump(self, *, mode):
-            assert mode == "json"
+        def model_dump(self, *, mode, by_alias):
+            assert mode == "json" and by_alias
             return {"value": math.inf}
 
     body, _ = encode_for(negotiate(None, CodecRegistry()), Response())
@@ -203,3 +203,20 @@ def test_model_codec_negotiation_and_artifact_discovery():
     served = serve_artifact(f"/.well-known/hyperfly/{codec.fingerprint}", registry)
     assert served.status == 200
     assert served.body == codec.artifact
+
+
+def test_json_fallback_uses_wire_aliases():
+    from pydantic import Field
+
+    class Response(BaseModel):
+        internal: str = Field(alias="external")
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(external="hello"))
+    assert body == b'{"external":"hello"}'
+    assert Response.model_validate_json(body) == Response(external="hello")
+
+
+def test_json_fallback_escapes_lone_surrogates():
+    body, _ = encode_for(negotiate(None, CodecRegistry()), {"v": "\ud800", "w": "é"})
+    assert body == '{"v":"\\ud800","w":"é"}'.encode("utf-8")
+    assert json.loads(body) == {"v": "\ud800", "w": "é"}
