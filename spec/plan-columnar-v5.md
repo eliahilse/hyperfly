@@ -140,10 +140,9 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
   - `0x03` delta frame of reference: the first value in its wire-v0 form, then
     `svarint(base)`, one width byte `w`, then `d[i] - base` bit-packed for `i`
     in `1..k-1`, where `d[i] = v[i] - v[i-1]` and `base` is the minimum
-    difference. The mode
-    exists only for `k ≥ 2`: with a single value there is no difference to
-    frame, an encoder MUST NOT choose it and a decoder MUST reject it. An
-    encoder MUST set `w = bitWidth(max(d[i] − base))`.
+    difference. The mode exists only for `k ≥ 2`: with a single value there is
+    no difference to frame, an encoder MUST NOT choose it and a decoder MUST
+    reject it. An encoder MUST set `w = bitWidth(max(d[i] − base))`.
   - `0x04` patched frame of reference: `svarint(base)`, a low-width byte `L`
     (`0 ≤ L ≤ 55`), a high-width byte `H` (`1 ≤ H`, `L + H ≤ 56`; anything
     else MUST be rejected), an exception bitmap of `k` bits (set bit =
