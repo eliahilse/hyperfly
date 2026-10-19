@@ -27,12 +27,16 @@ def parse_accept(header: str | None) -> list[str]:
     if not header:
         return []
     out: list[str] = []
-    for part in header.split(","):
-        if len(out) >= _MAX_ACCEPTED:
-            break
-        value = part.strip().lower()
-        if _FINGERPRINT.match(value) and value not in out:
+    start = 0
+    for _ in range(_MAX_ACCEPTED):
+        end = header.find(",", start)
+        part = header[start:] if end == -1 else header[start:end]
+        value = part.strip(" \t")
+        if _FINGERPRINT.fullmatch(value) and value not in out:
             out.append(value)
+        if end == -1:
+            break
+        start = end + 1
     return out
 
 
@@ -110,7 +114,7 @@ def serve_artifact(pathname: str, registry: CodecRegistry) -> ArtifactResponse |
 
 
 def accept_header(fingerprints: list[str]) -> str:
-    return ", ".join(fingerprints)
+    return ", ".join(fingerprint for fingerprint in fingerprints if _FINGERPRINT.fullmatch(fingerprint))
 
 
 def decode_response(content_type: str | None, body: bytes | str, registry: CodecRegistry) -> tuple[str, Any]:
