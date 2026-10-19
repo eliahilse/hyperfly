@@ -191,13 +191,31 @@ Implementations MUST enforce configurable limits with these v0 defaults:
 - `maxDepth` 64 (structs, arrays, nullable all count),
 - `maxItems` 2^24 per array,
 - `maxByteLength` 2^28 per string/bytes value,
-- `maxAmplification` 4096: an array count above
+- `maxAmplification` 32: an array count above
   `maxAmplification × (remaining bytes + 1)` is rejected. Compressed layouts
   can legitimately describe many rows with almost no bytes, so input length
   alone cannot bound a count; this caps the work one hostile byte can demand
   instead. Row-encoded arrays satisfy a stricter bound for free — every row
   consumes at least one bit, so a count beyond the remaining bits is
   unpayable and MUST be rejected.
+- `maxTotalItems` 2^24 per message, and the **item budget**: the sum of the
+  element counts of every array in one body (fixed and variable, row and
+  columnar, at every depth) MUST NOT exceed
+  `min(maxTotalItems, maxAmplification × (body length + 1))`, where body
+  length is the number of bytes after the envelope header (§2). A decoder
+  charges each count against the budget as soon as the count is known (on
+  entry, for a fixed-length array), before reading any element or allocating
+  anything proportional to the count, and rejects with `limit` once the sum
+  exceeds the budget. Per-array checks bound one count; the budget bounds
+  their product, which nesting otherwise multiplies.
+
+Limits are compared in this order for each array: `maxItems`, the
+per-array amplification bound, then the item budget, so every implementation
+reports the same failure for the same input. An encoder MUST refuse with
+`limit` to produce a body that a decoder holding the same limits would
+reject, so that the encoder is never the more permissive side. A route that
+legitimately ships denser payloads (long runs of width-zero columns, arrays
+of literals) raises the limits on both peers.
 
 Truncation anywhere is an error. Errors are errors — never best-effort
 partial values.
@@ -219,4 +237,6 @@ partial values.
 
 `spec/vectors/vectors.json` — valid encode/decode pairs and invalid inputs
 (both directions), body bytes only. `spec/vectors/fingerprints.json` — IR →
-canonical text → fingerprint, locking §5. Every implementation runs both.
+canonical text → fingerprint, locking §5. `spec/vectors/limits.json` — each
+§6 limit just at and just past its bound, for decoders and encoders. Every
+implementation runs all three.

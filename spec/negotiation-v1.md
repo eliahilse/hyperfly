@@ -42,12 +42,19 @@ so preference belongs to the client. This matters during rotation: a client
 that lists a new profile before an old one moves itself over without the server
 tracking who has what.
 
+A client opts out of binary through standard content negotiation as well: if
+`Accept` lists `application/vnd.hyperfly` with `q=0`, the server MUST NOT
+answer in binary, whatever `Hyperfly-Accept` says. Media types are compared
+by essence (type and subtype, case-insensitive, parameters ignored), here and
+in `Content-Type`; `application/vnd.hyperfly-x` is not a match.
+
 ## 2. Fallback
 
 The server answers JSON when any of these hold, and none of them is an error:
 
 - the request carries no `Hyperfly-Accept`,
 - no advertised fingerprint matches a codec the server holds,
+- `Accept` refuses `application/vnd.hyperfly` with `q=0` (§1),
 - the server chooses not to (load, a disabled route, an operator switch).
 
 ```
@@ -106,6 +113,21 @@ A server that does not hold that fingerprint MUST answer `415 Unsupported
 Media Type` with `Hyperfly-Offer` naming what it does hold, rather than
 guessing. Unlike responses, there is no safe fallback for a body already sent
 in a format the peer cannot read.
+
+A server MUST bound the request body before decoding it, counting bytes as
+they arrive rather than trusting `Content-Length`, and answers
+`413 Content Too Large` once the bound is exceeded. It answers
+`400 Bad Request` when:
+
+- the body is shorter than the envelope header or its magic or major is wrong
+  (wire-v0 §2) — malformed, not an unknown codec;
+- `Hyperfly-Codec` is present and differs from the fingerprint in the
+  envelope;
+- the body fails to decode under the codec's limits (wire-v0 §6).
+
+The `415` above applies only to a well-formed envelope whose fingerprint the
+server does not hold, or to a `Content-Type` that is neither hyperfly nor
+JSON.
 
 ## 5. Rotation
 
