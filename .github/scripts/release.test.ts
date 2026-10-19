@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { changelogSection, distTag, needsRelease, publishedCommit, repositoryMatches, vcsInfoCommit, withGitHead } from "./release"
+import { changelogSection, distTag, needsRelease, publishedCommit, pythonDists, repositoryMatches, vcsInfoCommit, withGitHead } from "./release"
 
 const sha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -33,6 +33,11 @@ test("a version with no recorded commit is never tagged on a guess", () => {
   for (const missing of [undefined, "", "HEAD", sha.slice(0, 12)]) {
     expect(() => publishedCommit("hyperfly@1.2.3", missing, "npm's gitHead")).toThrow("hyperfly@1.2.3: npm's gitHead names no commit")
   }
+})
+
+test("PyPI file names use the normalized distribution name", () => {
+  expect(pythonDists("hyperfly", "1.0.0a1")).toEqual(["hyperfly-1.0.0a1-py3-none-any.whl", "hyperfly-1.0.0a1.tar.gz"])
+  expect(pythonDists("Hyperfly.Py-Core", "2.0.0")).toEqual(["hyperfly_py_core-2.0.0-py3-none-any.whl", "hyperfly_py_core-2.0.0.tar.gz"])
 })
 
 test("provenance needs the manifest to name this repository", () => {

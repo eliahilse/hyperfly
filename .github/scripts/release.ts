@@ -1,18 +1,20 @@
 // Release steps for .github/workflows/release.yml.
 //   npm-preflight    public packages whose version is not on npm: build, pack, check, npm publish --dry-run
 //   npm-publish      the same packages: pack, publish with provenance, then tag and create a GitHub release
-//   pypi-preflight   python/ when its version is not on PyPI: build the sdist and wheel into python/dist, twine check
-//   pypi-tag         after the PyPI upload: confirm the version is visible, then tag and create a GitHub release
+//   pypi-preflight   python/ when its sdist or wheel is not on PyPI: build both into python/dist, twine check
+//   pypi-tag         before the PyPI upload: tag this commit, since PyPI records no commit to tag later
+//   pypi-release     after the PyPI upload: confirm both files are visible, then create the GitHub release
 //   crates-preflight rust/ when its version is not on crates.io: cargo publish --dry-run
 //   crates-publish   the same crate: cargo publish, then tag and create a GitHub release
-// Preflights write the pending count to $GITHUB_OUTPUT. A version is pending while it is unpublished, untagged or
-// without its GitHub release, so a rerun finishes what an earlier run left. Tags go on the commit the registry says
-// the version was built from (npm's gitHead, the crate's .cargo_vcs_info.json); PyPI records no commit, so an
-// untagged PyPI version that this run did not upload stops with the command to tag it by hand.
+//   changesets       whether .changeset holds a changeset that releases something (empty ones release nothing)
+// Steps write their results to $GITHUB_OUTPUT. A version is pending while it is unpublished, untagged or without its
+// GitHub release, so a rerun finishes what an earlier run left. Tags go on the commit the registry says the version
+// was built from (npm's gitHead, the crate's .cargo_vcs_info.json); PyPI versions are tagged before they upload.
 import { $ } from "bun"
 import { appendFile, mkdtemp, readdir, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { parseChangeset } from "./check-changesets"
 import { pep440, tomlString } from "./sync-versions"
 
 const root = join(import.meta.dir, "../..")
@@ -57,6 +59,12 @@ export function changelogSection(changelog: string, version: string): string | u
   if (start < 0) return undefined
   const end = lines.findIndex((line, index) => index > start && line.startsWith("## "))
   return lines.slice(start + 1, end < 0 ? undefined : end).join("\n").trim() || undefined
+}
+
+/** the sdist and wheel file names for a pure-Python distribution (PEP 625 and PEP 427 normalize the name) */
+export function pythonDists(name: string, version: string): string[] {
+  const normalized = name.toLowerCase().replace(/[-_.]+/g, "_")
+  return [`${normalized}-${version}-py3-none-any.whl`, `${normalized}-${version}.tar.gz`].sort()
 }
 
 /** provenance needs the packed manifest to name this repository */
@@ -214,8 +222,9 @@ async function npmPublish() {
   for (const pkg of toPublish) {
     await retry(`publish ${pkg.name}`, async () => {
       const publish = await $`npm publish ${tarballs.get(pkg.name)!} --access public --provenance --tag ${distTag(pkg.version)}`.nothrow()
-      if (publish.exitCode === 0) ours.add(pkg.name)
-      else if ((await npmState(pkg.name, pkg.version)) !== "published") throw new Error(`npm publish exited ${publish.exitCode}`)
+      // the version was unpublished when this run started and runs never overlap, so if it is there now it is ours
+      if (publish.exitCode === 0 || (await npmState(pkg.name, pkg.version)) === "published") ours.add(pkg.name)
+      else throw new Error(`npm publish exited ${publish.exitCode}`)
     })
     await summary(`- npm: published ${pkg.name}@${pkg.version} (dist-tag ${distTag(pkg.version)})`)
   }
@@ -244,40 +253,73 @@ async function pythonRelease() {
   return { name, version, pyVersion, tag: `${name}-python@${pyVersion}` }
 }
 
-const pypiPublished = (name: string, version: string) => exists(`PyPI ${name}`, `https://pypi.org/pypi/${name}/${version}/json`)
+/** the files PyPI has for a version, empty when the version does not exist */
+async function pypiFiles(name: string, version: string): Promise<string[]> {
+  return retry(`PyPI ${name} ${version}`, async () => {
+    const response = await fetch(`https://pypi.org/pypi/${name}/${version}/json`, { headers: { "user-agent": USER_AGENT } })
+    if (response.status === 404) return []
+    if (response.status !== 200) throw new Error(`pypi.org answered ${response.status}`)
+    const { urls } = (await response.json()) as { urls: { filename: string }[] }
+    return urls.map(url => url.filename)
+  })
+}
+
+async function pypiState() {
+  const release = await pythonRelease()
+  const present = await pypiFiles(release.name, release.pyVersion)
+  const missing = pythonDists(release.name, release.pyVersion).filter(file => !present.includes(file))
+  return { ...release, missing, pending: missing.length > 0 || (await unfinished(release.tag)) }
+}
+
+/** the commit a tag points at, or undefined when there is no such tag on origin */
+async function tagCommit(tag: string) {
+  const line = (await $`git ls-remote --tags origin ${`refs/tags/${tag}`} ${`refs/tags/${tag}^{}`}`.quiet().text()).trim().split("\n")
+  const peeled = line.find(entry => entry.endsWith("^{}")) ?? line[0]
+  return peeled ? peeled.split(/\s/)[0] : undefined
+}
 
 async function pypiPreflight() {
-  const release = await pythonRelease()
-  const published = await pypiPublished(release.name, release.pyVersion)
-  const pending = !published || (await unfinished(release.tag))
-  if (pending && !published) {
+  const state = await pypiState()
+  if (state.missing.length) {
     const dist = join(root, PYTHON_DIR, "dist")
     await rm(dist, { recursive: true, force: true })
     await $`python -m build --sdist --wheel --outdir ${dist} ${join(root, PYTHON_DIR)}`
     const built = (await readdir(dist)).sort()
-    const expected = [`${release.name}-${release.pyVersion}-py3-none-any.whl`, `${release.name}-${release.pyVersion}.tar.gz`]
+    const expected = pythonDists(state.name, state.pyVersion)
     if (JSON.stringify(built) !== JSON.stringify(expected)) throw new Error(`python/dist has ${built.join(", ")}, expected ${expected.join(", ")}`)
     await $`twine check --strict ${built.map(file => join(dist, file))}`
-    await summary(`- PyPI: ${release.name} ${release.pyVersion} ready`)
-  } else if (pending) {
-    await summary(`- PyPI: ${release.name} ${release.pyVersion} is published but its tag or GitHub release is missing`)
+    await summary(`- PyPI: ${state.name} ${state.pyVersion} ready (${state.missing.join(", ")})`)
+  } else if (state.pending) {
+    await summary(`- PyPI: ${state.name} ${state.pyVersion} is published but its GitHub release is missing`)
   } else {
     await summary("- PyPI: nothing to publish")
   }
-  await output("pypi", pending ? "1" : "0")
-  await output("upload", pending && !published ? "true" : "false")
+  await output("pypi", state.pending ? "1" : "0")
+  await output("upload", state.missing.length ? "true" : "false")
 }
 
 async function pypiTag() {
-  const release = await pythonRelease()
-  // the upload step ran in this job when UPLOADED is true, so the files came from this commit
-  const ours = Bun.env.UPLOADED === "true"
-  await retry(`confirm ${release.name} ${release.pyVersion}`, async () => {
-    if (!(await pypiPublished(release.name, release.pyVersion))) throw new Error(`${release.name} ${release.pyVersion} is not visible on PyPI yet`)
-  }, 6)
+  const state = await pypiState()
   const commit = await head()
-  await tagAndRelease(release.tag, async () => publishedCommit(release.tag, ours ? commit : undefined, "PyPI"), release.version, await notes(PYTHON_DIR, release.version, release.tag))
-  await summary(`- PyPI: ${release.name} ${release.pyVersion} tagged ${release.tag}`)
+  const tagged = await tagCommit(state.tag)
+  if (tagged === undefined) {
+    await $`git tag ${state.tag} ${commit}`
+    await $`git push origin ${`refs/tags/${state.tag}`}`
+  } else if (tagged !== commit && state.missing.length) {
+    // an earlier upload from that commit stopped part way; uploading this commit's files would mix two builds
+    throw new Error(`${state.tag} is on ${tagged}, but PyPI lacks ${state.missing.join(", ")}: re-run the release run for ${tagged}, or delete the tag if nothing from it reached PyPI`)
+  }
+}
+
+async function pypiRelease() {
+  const state = await pypiState()
+  await retry(`confirm ${state.name} ${state.pyVersion}`, async () => {
+    const present = await pypiFiles(state.name, state.pyVersion)
+    const missing = pythonDists(state.name, state.pyVersion).filter(file => !present.includes(file))
+    if (missing.length) throw new Error(`PyPI does not show ${missing.join(", ")} yet`)
+  }, 10)
+  await tagAndRelease(state.tag, async () => publishedCommit(state.tag, undefined, "PyPI"), state.version, await notes(PYTHON_DIR, state.version, state.tag))
+  await summary(`- PyPI: published ${state.name} ${state.pyVersion} (${state.tag})`)
 }
 
 // crates.io
@@ -322,6 +364,7 @@ async function cratesPreflight() {
     await summary("- crates: nothing to publish")
   }
   await output("crates", pending ? "1" : "0")
+  await output("upload", crate.published ? "false" : "true")
 }
 
 async function cratesPublish() {
@@ -340,11 +383,21 @@ async function cratesPublish() {
   await tagAndRelease(tag, async () => (ours ? commit : crateCommit(crate, tag)), crate.version, await notes("rust", crate.version, tag))
 }
 
+async function changesets() {
+  const files = (await readdir(join(root, ".changeset"))).filter(file => file.endsWith(".md") && file !== "README.md")
+  const releasing = []
+  for (const file of files) if (parseChangeset(await Bun.file(join(root, ".changeset", file)).text()).packages.length) releasing.push(file)
+  await summary(releasing.length ? `- changesets to release: ${releasing.join(", ")}` : "- no changesets to release")
+  await output("pending", releasing.length ? "true" : "false")
+}
+
 const steps: Record<string, () => Promise<unknown>> = {
+  changesets,
   "npm-preflight": npmPreflight,
   "npm-publish": npmPublish,
   "pypi-preflight": pypiPreflight,
   "pypi-tag": pypiTag,
+  "pypi-release": pypiRelease,
   "crates-preflight": cratesPreflight,
   "crates-publish": cratesPublish,
 }

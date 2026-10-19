@@ -44,8 +44,14 @@ before the first stable release.
 
 Each registry publishes only when its repository variable is `true`
 (`HYPERFLY_PUBLISH_NPM`, `HYPERFLY_PUBLISH_PYPI`, `HYPERFLY_PUBLISH_CRATES`),
-in the order npm, PyPI, crates.io; a failure stops the registries after it. A
-rerun finishes a version that is published but not yet tagged or released.
-Running the release workflow by hand with `dry_run` (the default) builds and
-checks everything for every registry and publishes nothing; pull requests that
+in the order npm, PyPI, crates.io; a failure stops the registries after it.
+Before turning one on, the repository needs the `npm`, `pypi` and `crates`
+environments, a trusted publisher on npm and PyPI for workflow `release.yml`
+with the matching environment, and a `CARGO_REGISTRY_TOKEN` secret in `crates`
+for the crate's first publish (trusted publishing after that).
+
+A rerun finishes what a failed run left: it publishes missing files, then tags
+and creates GitHub releases, and never publishes a version twice. Running the
+release workflow by hand with `dry_run` (the default) builds and checks every
+version that still needs publishing and publishes nothing; pull requests that
 change the release files run the same preflight.
