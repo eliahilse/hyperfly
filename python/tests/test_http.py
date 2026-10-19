@@ -84,7 +84,7 @@ def test_parse_accept_bounds_allocation_by_examined_segments():
 def test_parse_accept_stops_after_the_cap():
     class Header(str):
         def find(self, sub, start=0, end=None):
-            assert start <= 32, "segment past the cap examined"
+            assert start < 32, "segment past the cap examined"
             return str.find(self, sub, start)
 
     assert parse_accept(Header("," * 32 + "x" * (1 << 20))) == []
