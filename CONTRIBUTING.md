@@ -29,3 +29,23 @@ writes them into `pyproject.toml` (as PEP 440, `1.0.0-alpha.1` becomes
 The repository is in prerelease mode (`.changeset/pre.json`, tag `alpha`), so
 every bump produces an `-alpha.N` version. `bun changeset pre exit` leaves it
 before the first stable release.
+
+## Releasing
+
+1. Merged changesets collect on `main`. On every push to `main` the release
+   workflow opens or updates a `chore: release` PR that applies them: versions,
+   changelogs, `pyproject.toml`, `Cargo.toml`. It starts CI on that PR itself.
+2. A maintainer reviews and merges that PR.
+3. The merge publishes every package whose version is not yet on its registry:
+   npm with provenance through trusted publishing, PyPI through trusted
+   publishing, crates.io. Prerelease versions go to the npm `next` dist-tag.
+   Each published version is tagged and gets a GitHub release with its
+   changelog section.
+
+Each registry publishes only when its repository variable is `true`
+(`HYPERFLY_PUBLISH_NPM`, `HYPERFLY_PUBLISH_PYPI`, `HYPERFLY_PUBLISH_CRATES`),
+in the order npm, PyPI, crates.io; a failure stops the registries after it. A
+rerun finishes a version that is published but not yet tagged or released.
+Running the release workflow by hand with `dry_run` (the default) builds and
+checks everything for every registry and publishes nothing; pull requests that
+change the release files run the same preflight.

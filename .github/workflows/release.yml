@@ -1,0 +1,239 @@
+name: release
+
+# Every push to main opens or updates the "chore: release" pull request from the pending changesets. Once it merges
+# (no changesets left), preflight checks every registry, and only then does anything publish: npm, then PyPI, then
+# crates.io, each after the one before succeeded or was skipped. A registry stays off until its repository variable
+# (HYPERFLY_PUBLISH_NPM, HYPERFLY_PUBLISH_PYPI, HYPERFLY_PUBLISH_CRATES) is "true"; each publishes from its own
+# environment. A manual run with dry_run, and a pull request that changes the release files, run the preflight only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/release.ts
+      - .github/scripts/sync-versions.ts
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run the preflight only and publish nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('release-{0}', github.ref) || 'release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version:
+    if: >-
+      github.repository == 'eliahilse/hyperfly' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    outputs:
+      pending: ${{ steps.changesets.outputs.has-changesets }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - run: bun install --frozen-lockfile
+
+      - id: changesets
+        uses: changesets/action@v2
+        with:
+          version-script: bun run version-packages
+          pr-title: "chore: release"
+          commit-message: "chore: release"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Run CI on the release PR
+        if: steps.changesets.outputs.pr-number != ''
+        run: gh workflow run ci.yml --ref changeset-release/main
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  preflight:
+    needs: version
+    if: >-
+      !cancelled() && github.repository == 'eliahilse/hyperfly' &&
+      (needs.version.outputs.pending == 'false' ||
+      (needs.version.result == 'skipped' && (github.event_name == 'pull_request' || inputs.dry_run)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      npm: ${{ steps.npm.outputs.npm }}
+      pypi: ${{ steps.pypi.outputs.pypi }}
+      crates: ${{ steps.crates.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - run: python -m pip install build twine
+
+      - run: bun install --frozen-lockfile
+
+      - name: Versions match their changeset manifests
+        run: bun .github/scripts/sync-versions.ts --check
+
+      - id: npm
+        run: bun .github/scripts/release.ts npm-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - id: pypi
+        run: bun .github/scripts/release.ts pypi-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - id: crates
+        run: bun .github/scripts/release.ts crates-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  npm:
+    needs: preflight
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) &&
+      vars.HYPERFLY_PUBLISH_NPM == 'true' && needs.preflight.outputs.npm != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      # trusted publishing (OIDC) needs npm 11.5.1 or later
+      - run: npm install -g npm@^11.5.1
+
+      - run: bun install --frozen-lockfile
+
+      - run: bun .github/scripts/release.ts npm-publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  pypi:
+    needs: [preflight, npm]
+    # after npm, so a failed npm publish never leaves PyPI published alone
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.npm.result == 'success' || needs.npm.result == 'skipped') &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) &&
+      vars.HYPERFLY_PUBLISH_PYPI == 'true' && needs.preflight.outputs.pypi != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - run: python -m pip install build twine
+
+      # builds and checks python/dist again, so what is uploaded comes from this job's checkout
+      - id: build
+        run: bun .github/scripts/release.ts pypi-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - if: steps.build.outputs.upload == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+
+      - run: bun .github/scripts/release.ts pypi-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPLOADED: ${{ steps.build.outputs.upload }}
+
+  crates:
+    needs: [preflight, npm, pypi]
+    # last, so a failed npm or PyPI publish never leaves the crate published alone
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (needs.npm.result == 'success' || needs.npm.result == 'skipped') &&
+      (needs.pypi.result == 'success' || needs.pypi.result == 'skipped') &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)) &&
+      vars.HYPERFLY_PUBLISH_CRATES == 'true' && needs.preflight.outputs.crates != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: crates
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      BOOTSTRAP_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # trusted publishing once the crate exists; CARGO_REGISTRY_TOKEN only for its first publish
+      - id: auth
+        if: env.BOOTSTRAP_TOKEN == ''
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - run: bun .github/scripts/release.ts crates-publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token || secrets.CARGO_REGISTRY_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
