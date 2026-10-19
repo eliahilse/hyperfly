@@ -13,6 +13,7 @@ from ._ir import (
     column_count,
     fingerprint_of,
     has_payload,
+    normalize_flags,
     serialize_artifact,
     validate_ir,
     validate_profile,
@@ -1441,6 +1442,7 @@ class Codec:
             validate_profile(ir, profile)
         # isolate from later caller mutation: the fingerprint is fixed at compile time
         ir = copy.deepcopy(ir)
+        normalize_flags(ir)
         self._ir = ir
         self.plan = plan
         self._profile = copy.deepcopy(profile) if profile is not None else None
