@@ -1,6 +1,7 @@
 import tracemalloc
 
 import pytest
+from conftest import load
 
 from hyperfly import CodecRegistry, compile_ir
 from hyperfly.http import (
@@ -63,6 +64,11 @@ def _assert_accept_rows(rows):
 @pytest.mark.parametrize("header,expected", ACCEPT_CASES)
 def test_parse_accept(header, expected):
     _assert_accept_rows([{"header": header, "expected": expected}])
+
+
+@pytest.mark.parametrize("row", load("accept.json"), ids=lambda row: row["name"])
+def test_parse_accept_vectors(row):
+    _assert_accept_rows([row])
 
 
 def test_parse_accept_bounds_allocation_by_examined_segments():
