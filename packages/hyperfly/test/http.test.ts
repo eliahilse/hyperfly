@@ -70,8 +70,16 @@ describe("negotiate", () => {
     "application/vnd.hyperfly;q=0.0",
     "application/vnd.hyperfly;q=0.00",
     "APPLICATION/VND.HYPERFLY ; Q=0.000",
-    "application/vnd.hyperfly; version=1; q=0; charset=x",
+    "application/*;q=0",
+    "*/*;q=0",
     "application/json, \tapplication/vnd.hyperfly\t;\tq \t=\t0\t",
+    "application/vnd.hyperfly;q=0, application/vnd.hyperfly;q=1",
+    "application/*;q=0, */*;q=1",
+    "*/*;q=1, application/*;q=0",
+    "*/*;q=0, application/vnd.hyperfly;q=abc",
+    "*/*;q=0, application/vnd.hyperfly;q=1.001",
+    "*/*;q=0, application/vnd.hyperfly;q=0\n",
+    "*/*;q=0, application/vnd.hyperfly;version=2;q=1",
   ])("opts out with %s", (accept) => {
     expect(negotiate(codecA.fingerprint, registry, { accept })).toEqual({
       kind: "json",
@@ -86,14 +94,29 @@ describe("negotiate", () => {
   test.each([
     "application/vnd.hyperfly;q=0.001",
     "application/vnd.hyperfly-x;q=0",
-    "*/*;q=0",
-    "application/*;q=0",
+    "*/*;q=0, application/vnd.hyperfly",
+    "application/*;q=0, application/vnd.hyperfly;q=0.5",
+    "application/vnd.hyperfly, */*;q=0",
+    "application/vnd.hyperfly;q=1, application/vnd.hyperfly;q=0",
+    "application/vnd.hyperfly;version=2;q=0",
+    "application/vnd.hyperfly; version=1; q=0; charset=x",
     "application/vnd.hyperfly",
+    "application/vnd.hyperfly;q=1.",
+    "application/vnd.hyperfly;q=1.000",
+    "application/json",
+    "application/vnd.hyperfly;q=abc",
     "application/vnd.hyperfly;q=0.0000",
     "application/vnd.hyperfly;q=0x",
+    "application/vnd.hyperfly;q=1.001, */*;q=0.1",
+    "application/vnd.hyperfly;q=2",
+    "application/vnd.hyperfly;q=.0",
+    "application/vnd.hyperfly;q=0;invalid",
+    "application/vnd.hyperfly;q=0;",
     'application/vnd.hyperfly;q="0"',
     'application/vnd.hyperfly; version="x;q=0"',
     "application/vnd.hyperfly;q=0\n",
+    `${Array.from({ length: 32 }, () => "invalid").join(",")},application/vnd.hyperfly;q=0`,
+    `${",".repeat(32)}application/vnd.hyperfly;q=0`,
     null,
     undefined,
   ])("does not opt out with %s", (accept) => {
@@ -108,6 +131,9 @@ describe("negotiate", () => {
     expect(negotiate(codecA.fingerprint, registry, {
       accept: `${prefix},invalid,application/vnd.hyperfly;q=0`,
     }).kind).toBe("hyperfly");
+    expect(negotiate(codecA.fingerprint, registry, {
+      accept: `${",".repeat(31)}application/vnd.hyperfly;q=0`,
+    }).kind).toBe("json");
   });
 
   test("an opt-out preserves the configured offer", () => {
@@ -473,6 +499,28 @@ describe("request body limits", () => {
 describe("binary request validation", () => {
   const registry = new CodecRegistry([codecA as never]);
   const url = "https://example.test/v1/thing";
+
+  test.each([
+    { name: "unsupported content type before malformed body", contentType: "text/plain", maxBytes: DEFAULT_MAX_BODY_BYTES, codecHeader: null, status: 415 },
+    { name: "size limit before unknown fingerprint", contentType: HYPERFLY_MEDIA_TYPE, maxBytes: HEADER_SIZE - 1, codecHeader: null, status: 413 },
+    { name: "codec mismatch before unknown fingerprint", contentType: HYPERFLY_MEDIA_TYPE, maxBytes: DEFAULT_MAX_BODY_BYTES, codecHeader: codecA.fingerprint, status: 400 },
+  ])("prioritizes $name", async ({ contentType, maxBytes, codecHeader, status }) => {
+    const bytes = codecB.encode(value as never).slice();
+    bytes.fill(0xff, 3, HEADER_SIZE);
+    const headers = new Headers({ "Content-Type": contentType });
+    if (codecHeader !== null) headers.set("Hyperfly-Codec", codecHeader);
+    const result = await readBody(new Request(url, {
+      method: "POST",
+      body: contentType === "text/plain" ? "garbage" : bytes as BodyInit,
+      headers,
+    }), registry, { maxBytes });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.response.status).toBe(status);
+      expect(result.response.body).toBeNull();
+      expect(result.response.headers.get("hyperfly-offer")).toBeNull();
+    }
+  });
 
   test.each([null, codecA.fingerprint, ` \t${codecA.fingerprint}\t `])("accepts codec header %s", async (header) => {
     const headers = new Headers({ "Content-Type": HYPERFLY_MEDIA_TYPE });

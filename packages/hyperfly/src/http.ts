@@ -166,19 +166,39 @@ function mediaType(contentType: string | null | undefined): string {
 function rejectsHyperfly(accept: string | null | undefined): boolean {
   if (!accept) return false;
   let start = 0;
-  for (let count = 0; count < MAX_ACCEPTED; count++) {
+  let specificity = 0;
+  let refused = false;
+  for (let count = 0; count < MAX_ENTRIES && start <= accept.length; count++) {
     const comma = accept.indexOf(",", start);
     const range = accept.slice(start, comma === -1 ? accept.length : comma);
-    if (mediaType(range) === HYPERFLY_MEDIA_TYPE) {
-      const parameters = range.matchAll(/;[ \t]*([^;= \t]+)[ \t]*=[ \t]*("(?:[^"\\]|\\.)*"|[^;]*)/g);
-      for (const parameter of parameters) {
-        if (parameter[1]!.toLowerCase() === "q" && /^0(?:\.0{0,3})?[ \t]*$/.test(parameter[2]!)) return true;
+    start = comma === -1 ? accept.length + 1 : comma + 1;
+    const semicolon = range.indexOf(";");
+    const type = range.slice(0, semicolon === -1 ? range.length : semicolon)
+      .replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase();
+    const rank = type === HYPERFLY_MEDIA_TYPE ? 3 : type === "application/*" ? 2 : type === "*/*" ? 1 : 0;
+    if (rank <= specificity) continue;
+    let valid = true;
+    let zero = false;
+    let parameterStart = semicolon;
+    while (parameterStart !== -1) {
+      const next = range.indexOf(";", parameterStart + 1);
+      const parameter = range.slice(parameterStart + 1, next === -1 ? range.length : next);
+      const equals = parameter.indexOf("=");
+      const name = parameter.slice(0, equals).replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase();
+      const value = parameter.slice(equals + 1).replace(/^[ \t]+|[ \t]+$/g, "");
+      if (equals === -1 || name !== "q" || !/^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)(?![\s\S])/.test(value)) {
+        valid = false;
+        break;
       }
+      zero = Number(value) === 0;
+      parameterStart = next;
     }
-    if (comma === -1) break;
-    start = comma + 1;
+    if (valid) {
+      specificity = rank;
+      refused = zero;
+    }
   }
-  return false;
+  return refused;
 }
 
 function peekFingerprint(bytes: Uint8Array): string {
