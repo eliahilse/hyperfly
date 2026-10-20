@@ -520,6 +520,20 @@ describe("request body limits", () => {
     expect(body.locked).toBe(false);
   });
 
+  test("skips empty chunks within a zero-byte limit", async () => {
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls++ < 100_000) controller.enqueue(new Uint8Array(0));
+        else controller.close();
+      },
+    }, { highWaterMark: 0 });
+    const result = await readBody(new Request(url, { method: "POST", body }), registry, { maxBytes: 0 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
+    expect(pulls).toBe(100_001);
+  });
+
   test("returns 413 promptly with an unread request clone", async () => {
     const body = new ReadableStream<Uint8Array>({
       pull(controller) { controller.enqueue(new Uint8Array(2)); },

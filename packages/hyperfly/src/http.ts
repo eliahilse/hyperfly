@@ -339,7 +339,7 @@ async function readBodyWithinLimit<T>(
           }
           return { ok: false, response: new Response(null, { status: 413 }) };
         }
-        chunks.push(value);
+        if (value.byteLength > 0) chunks.push(value);
       }
     } catch {
       return { ok: false, response: new Response(null, { status: 400 }) };
