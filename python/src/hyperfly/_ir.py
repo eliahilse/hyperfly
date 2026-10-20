@@ -256,7 +256,8 @@ def _check_fields(seen: set[str], fields: Any, start: int, _node: Any, path: str
             _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
         if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
             _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
-        if field_type.get("kind") in _PARENT_KINDS:
+        kind = field_type.get("kind")
+        if isinstance(kind, str) and kind in _PARENT_KINDS:
             rest = partial(_check_fields, seen, fields, index + 1)
             return [(_check_node, field_type, field_path), (rest, None, path)]
         _check_node(field_type, field_path)
@@ -494,10 +495,9 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
 
     Profile errors have the same ``profile:`` prefix as compilation errors.
     """
-    validate_ir(ir)
-    checked = snapshot_profile(profile)
     try:
-        _validate_profile(ir, checked)
+        validate_ir(ir)
+        _validate_profile(ir, snapshot_profile(profile))
     except RecursionError:
         _fail("$", "IR or profile nesting exceeds Python's recursion limit")
 

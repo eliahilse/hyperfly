@@ -196,6 +196,40 @@ def test_cyclic_ir_is_rejected_before_any_walk():
         assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")
 
 
+
+def _field(t, name="x"):
+    return {"kind": "struct", "fields": [{"name": name, "type": t}]}
+
+
+MALFORMED_KINDS = [
+    (_field({"kind": []}), "$.x"),
+    (_field({"kind": {}}), "$.x"),
+    (_field({"kind": {"kind": "int"}}), "$.x"),
+    (_field({"kind": ["array"]}), "$.x"),
+    (_field({"kind": "nullable", "inner": {"kind": {}}}), "$.x?"),
+    ({"kind": "array", "element": _field(_field({"kind": [1]}, "y"), "a")}, "$[].a.y"),
+    ({"kind": "struct", "fields": [
+        {"name": "a", "type": {"kind": "int"}},
+        {"name": "b", "type": {"kind": "array", "element": {"kind": ["struct"]}}},
+    ]}, "$.b[]"),
+]
+
+
+@pytest.mark.parametrize("ir, path", MALFORMED_KINDS)
+def test_nested_unhashable_kinds_are_ir_errors(ir, path):
+    entries = [
+        lambda: validate_ir(ir),
+        lambda: compile_ir(ir),
+        lambda: compile_ir(ir, plan="columnar"),
+        lambda: train(ir, []),
+        lambda: validate_profile(ir, PROFILE),
+    ]
+    for entry in entries:
+        with pytest.raises(HyperflyError) as err:
+            entry()
+        assert (err.value.code, str(err.value)) == ("ir", f"{path}: IR kind must be a string")
+
+
 def frame_sweep():
     """Caller depths from none to just short of the recursion limit."""
     return range(0, sys.getrecursionlimit() - 60, 40)
@@ -249,6 +283,38 @@ def test_compile_validate_profile_and_train_work_at_any_caller_depth():
                 assert result is None
             else:
                 assert result.fingerprint == expected.fingerprint, (name, frames)
+
+
+
+def stack_depth():
+    frame, depth = sys._getframe(1), 0
+    while frame:
+        frame, depth = frame.f_back, depth + 1
+    return depth
+
+
+def test_compile_validate_profile_and_train_at_the_stack_limit_are_ir_errors():
+    profiled = array_chain(507, TWO_STRINGS)
+    value = nested_value(506, [{"a": "id_01", "b": "one"}])
+    runs = {
+        "Codec": lambda: Codec(profiled, plan="columnar", profile=DEEPEST_PROFILE),
+        "train": lambda: train(profiled, [value, value]),
+        "validate_profile": lambda: validate_profile(profiled, DEEPEST_PROFILE),
+    }
+    room = sys.getrecursionlimit() - stack_depth()
+    for name, run in runs.items():
+        outcomes = []
+        for headroom in range(60, 0, -1):
+            try:
+                outcomes.append(outcome(room - headroom, run))
+            except RecursionError:
+                outcomes.append("stack")
+        # the stack runs out inside the guard first; with less room only raising the
+        # coded error, or the call itself, can fail
+        assert "ir" in outcomes, name
+        first = outcomes.index("ir")
+        assert set(outcomes[:first]) == {"ok"}, name
+        assert set(outcomes[first:]) == {"ir", "stack"}, name
 
 
 def struct_rows(levels):

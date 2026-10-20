@@ -261,17 +261,21 @@ def train(
             or (isinstance(number, float) and not number.is_integer())
         ):
             raise HyperflyError("options", f"{name}: must be a non-negative integer")
-    min_occurrences = max(1, min_occurrences)
-    entry_limit = int(min(max_entries, MAX_DICT_ENTRIES))
+    try:
+        return _train(ir, samples, max(1, min_occurrences), int(min(max_entries, MAX_DICT_ENTRIES)))
+    except RecursionError:
+        raise HyperflyError("ir", "$: IR nesting exceeds Python's recursion limit") from None
+
+
+def _train(
+    ir: dict[str, Any], samples: list[Any] | tuple[Any, ...], min_occurrences: int | float, entry_limit: int,
+) -> dict[str, Any] | None:
     validate_ir(ir)
     batches: dict[int, list[list[str]]] = {}
     arrays: list[tuple[int, dict[int, list[str | None]]]] = []
-    try:
-        refs = _enumerate_column_refs(ir)
-        for sample in samples:
-            _collect(ir, sample, 0, refs, batches, arrays)
-    except RecursionError:
-        raise HyperflyError("ir", "$: IR nesting exceeds Python's recursion limit") from None
+    refs = _enumerate_column_refs(ir)
+    for sample in samples:
+        _collect(ir, sample, 0, refs, batches, arrays)
 
     by_leaf: dict[int, dict[str, Any]] = {}
     for ordinal, (kind, _array) in enumerate(refs):
