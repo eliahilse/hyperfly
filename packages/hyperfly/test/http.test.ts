@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import acceptVectors from "../../../spec/vectors/accept.json" with { type: "json" };
 import { z } from "zod";
 import { CodecRegistry, type IRNode } from "../src/index.js";
@@ -889,6 +890,48 @@ describe("request body limits", () => {
     const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.response.status).toBe(400);
+  });
+
+  test("cancels the stream when it refuses a chunk that is not bytes", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      pull(controller) { controller.enqueue("1"); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
+    expect(cancelled).toBe(true);
+  });
+
+  class LyingLength extends Uint8Array {
+    override get byteLength(): number { return 0; }
+  }
+
+  test("counts a subclass chunk by its real length, not an overridden byteLength", async () => {
+    const chunk = (bytes: Uint8Array) => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new LyingLength(bytes));
+        controller.close();
+      },
+    });
+    const digits = new TextEncoder().encode("12");
+    const over = await readBody(new Request(url, { method: "POST", body: chunk(digits) }), registry, { maxBytes: 1 });
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.response.status).toBe(413);
+    expect(await readBody(new Request(url, { method: "POST", body: chunk(digits) }), registry)).toEqual({ ok: true, value: 12 });
+  });
+
+  test("accepts a Uint8Array chunk from another realm", async () => {
+    const foreign = runInNewContext("new Uint8Array([0x31, 0x32])") as Uint8Array;
+    expect(foreign instanceof Uint8Array).toBe(false);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(foreign);
+        controller.close();
+      },
+    });
+    expect(await readBody(new Request(url, { method: "POST", body }), registry)).toEqual({ ok: true, value: 12 });
   });
 
   const withContentLength = (contentLength: string) => {
