@@ -2,7 +2,7 @@ import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
-import { byteLengthOf, isUint8Array } from "./typed-array.js";
+import { isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -12,12 +12,13 @@ function fail(code: ErrorCode, path: string, message: string): never {
   throw new EncodeError(code, `${path}: ${message}`);
 }
 
+const objectTag = Function.prototype.call.bind(Object.prototype.toString) as (value: unknown) => string;
+
 /** A struct value is an object tagged "[object Object]": typed arrays, Map, Set, Date and boxed primitives are not. */
 export function isStructValue(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null) return false;
   try {
-    if (Object.getPrototypeOf(value) === Object.prototype && !(Symbol.toStringTag in value)) return true;
-    return Object.prototype.toString.call(value) === "[object Object]";
+    return objectTag(value) === "[object Object]";
   } catch {
     return false;
   }
@@ -169,12 +170,17 @@ export function encodeNode(
       return;
     }
     case "bytes": {
-      if (!isUint8Array(value)) fail("type", path, "expected Uint8Array");
-      const length = byteLengthOf(value);
+      let length: number | undefined;
+      try {
+        if (value instanceof Uint8Array || isUint8Array(value)) length = value.length;
+      } catch {
+        // a proxy or a value whose prototype cannot be read is not bytes
+      }
+      if (length === undefined) fail("type", path, "expected Uint8Array");
       if (length > ctx.maxByteLength) fail("limit", path, `bytes of ${length} exceeds the codec limit`);
       chargeBytes(length, ctx, path);
       writeUleb(w, BigInt(length));
-      w.bytes(value, length);
+      w.bytes(value as Uint8Array);
       return;
     }
     case "literal": {

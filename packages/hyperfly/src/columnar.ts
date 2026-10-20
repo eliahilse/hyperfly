@@ -1194,15 +1194,14 @@ export function encodeColumnarArray(
 
   const leaves = flattenLeaves(element)!;
 
-  // each nested container is read and checked once per row, when the first leaf under it
-  // reaches that row, so the first reported failure is the same as checking it per leaf
+  // a container shared by several leaves is read and checked once per row, when the first leaf
+  // under it reaches that row, so the first reported failure is the same as checking it per leaf
+  const prefixKeys = leaves.map((leaf) => leaf.segs.slice(0, -1).map((_, d) => JSON.stringify(leaf.segs.slice(0, d + 1))));
+  const sharing = new Map<string, number>();
+  for (const keys of prefixKeys) for (const key of keys) sharing.set(key, (sharing.get(key) ?? 0) + 1);
   const prefixIds = new Map<string, number>();
-  const chains = leaves.map((leaf) => leaf.segs.slice(0, -1).map((_, d) => {
-    const prefix = leaf.segs.slice(0, d + 1).join(".");
-    let id = prefixIds.get(prefix);
-    if (id === undefined) prefixIds.set(prefix, (id = prefixIds.size));
-    return id;
-  }));
+  for (const [key, leafCount] of sharing) if (leafCount > 1) prefixIds.set(key, prefixIds.size);
+  const chains = prefixKeys.map((keys) => keys.map((key) => prefixIds.get(key) ?? -1));
   const containers = Array.from({ length: prefixIds.size }, (): Record<string, unknown>[] => []);
   const containerOf = (
     row: Record<string, unknown>,
@@ -1212,8 +1211,9 @@ export function encodeColumnarArray(
   ): Record<string, unknown> => {
     let obj = row;
     for (let d = 0; d < chain.length; d++) {
-      const resolved = containers[chain[d]!]!;
-      const cached = resolved[i];
+      const id = chain[d]!;
+      const resolved = id === -1 ? undefined : containers[id]!;
+      const cached = resolved?.[i];
       if (cached !== undefined) {
         obj = cached;
         continue;
@@ -1226,7 +1226,8 @@ export function encodeColumnarArray(
           `${path}[${i}].${segs.slice(0, d + 1).join(".")}: expected object`,
         );
       }
-      resolved[i] = obj = v;
+      if (resolved) resolved[i] = v;
+      obj = v;
     }
     return obj;
   };
