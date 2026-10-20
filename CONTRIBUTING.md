@@ -34,7 +34,8 @@ before the first stable release.
 
 1. Merged changesets collect on `main`. On every push to `main` the release
    workflow opens or updates a `chore: release` PR that applies them: versions,
-   changelogs, `pyproject.toml`, `Cargo.toml`. It starts CI on that PR itself.
+   changelogs, `pyproject.toml`, `Cargo.toml`. CI runs on that PR and reports
+   as commit statuses.
 2. A maintainer reviews and merges that PR.
 3. The merge publishes every package whose version is not yet on its registry:
    npm with provenance through trusted publishing, PyPI through trusted
