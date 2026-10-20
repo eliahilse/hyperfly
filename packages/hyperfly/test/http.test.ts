@@ -329,11 +329,12 @@ describe("fetch adapter", () => {
     expect(errors[0]!.code).toBe("limit");
   });
 
-  test("falls back to JSON on an encoder depth refusal", async () => {
-    const shallow = compileIR<string[][]>({ kind: "array", element: { kind: "array", element: { kind: "string" } } }, {
-      limits: { maxDepth: 1 },
-    });
-    const values = [["a"]];
+  test.each(["row", "columnar"] as const)("falls back to JSON on a %s encoder depth refusal", async (plan) => {
+    const shallow = compileIR<{ s: string[] }[]>({
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "s", type: { kind: "array", element: { kind: "string" } } }] },
+    }, { plan, limits: { maxDepth: 1 } });
+    const values = [{ s: ["a"] }];
     const errors: EncodeError[] = [];
     const response = respond(new Request(url, {
       headers: { "Hyperfly-Accept": shallow.fingerprint },
