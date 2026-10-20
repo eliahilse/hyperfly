@@ -1,3 +1,5 @@
+from enum import Enum
+
 from conftest import load
 from hyperfly import compile_ir, fingerprint_of, serialize_artifact
 
@@ -23,3 +25,13 @@ def test_tuple_members_and_fields_compile_like_lists():
     listed = {"kind": "struct", "fields": [{"name": "e", "type": {"kind": "enum", "members": ["a", "b"]}}]}
     tupled = {"kind": "struct", "fields": ({"name": "e", "type": {"kind": "enum", "members": ("a", "b")}},)}
     assert compile_ir(tupled).fingerprint == compile_ir(listed).fingerprint
+
+
+def test_str_subclass_kinds_fingerprint_like_plain_strings():
+    class Kind(str, Enum):
+        bool = "bool"
+        array = "array"
+
+    plain = {"kind": "array", "element": {"kind": "bool"}}
+    subclassed = {"kind": Kind.array, "element": {"kind": Kind.bool}}
+    assert compile_ir(subclassed).fingerprint == compile_ir(plain).fingerprint

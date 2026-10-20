@@ -43,7 +43,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
     if not isinstance(node, dict):
         _fail(path, "IR node must be an object")
     kind = node.get("kind")
-    if type(kind) is not str:
+    if not isinstance(kind, str):
         _fail(path, "IR kind must be a string")
     if kind in ("bool", "float64", "string", "bytes"):
         return
@@ -160,7 +160,7 @@ def _literal(v: Any) -> str:
 def serialize_node(node: dict[str, Any]) -> str:
     kind = node["kind"]
     if kind in ("bool", "float64", "string", "bytes"):
-        return f'{{"kind":"{kind}"}}'
+        return '{"kind":"' + kind + '"}'
     if kind == "int":
         out = '{"kind":"int"'
         if node.get("min") is not None:
