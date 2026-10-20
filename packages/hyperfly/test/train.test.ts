@@ -82,6 +82,88 @@ describe("reference trainer", () => {
   });
 });
 
+describe("train options", () => {
+  test.each([null, false, true, 0, "options", [], () => {}, new Date(), new (class Options {})(), Object.create({})].map((value) => [value] as const))(
+    "rejects non-plain options %p", (options) => {
+      const run = () => train(ROWS, [], options as never);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options", message: "options: must be an object" }));
+    },
+  );
+
+  for (const key of ["minOccurrences", "maxEntries"] as const) {
+    test.each([1.5, -1, NaN, Infinity, -Infinity, "2", null, true, {}, [], Number.MAX_SAFE_INTEGER + 1].map((value) => [value] as const))(
+      `rejects invalid ${key} %p`, (value) => {
+        const run = () => train(ROWS, [], { [key]: value } as never);
+        expect(run).toThrow(HyperflyError);
+        expect(run).toThrow(expect.objectContaining({ code: "options", message: expect.stringContaining(`${key}:`) }));
+      },
+    );
+  }
+
+  test.each([
+    [{ minOccurrences: 0 }, "minOccurrences: must be a safe integer >= 1"],
+    [{ maxEntries: MAX_DICT_ENTRIES + 1 }, "maxEntries: must be a safe integer in [0, 16383]"],
+  ] as const)("rejects out-of-bounds options %p", (options, message) => {
+    const run = () => train(ROWS, [], options);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "options", message }));
+  });
+
+  test.each([
+    [{ unknown: 1 }, "unknown"],
+    [{ unknown: undefined }, "unknown"],
+    [Object.defineProperty({}, "hidden", { value: 1 }), "hidden"],
+    [{ [Symbol("option")]: 1 }, "Symbol(option)"],
+    [JSON.parse('{"__proto__":0}'), "__proto__"],
+  ] as [unknown, string][])("rejects unknown options %p", (options, key) => {
+    const run = () => train(ROWS, [], options as never);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "options", message: `options.${key}: unknown option` }));
+  });
+
+  test.each(["minOccurrences", "maxEntries"] as const)("wraps a throwing %s getter", (key) => {
+    for (const cause of [new TypeError("cannot read option"), new HyperflyError("options", "getter failed")]) {
+      const options = Object.defineProperty({}, key, { get() { throw cause; } });
+      const run = () => train(ROWS, [], options);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options", message: expect.stringContaining(key), cause }));
+    }
+  });
+
+  test("reads each option once and trains with the validated values", () => {
+    const reads = { minOccurrences: 0, maxEntries: 0 };
+    const profile = train(ROWS, samples([["a long unique value"]]), {
+      get minOccurrences() { return ++reads.minOccurrences === 1 ? 1 : NaN; },
+      get maxEntries() { return ++reads.maxEntries === 1 ? 1 : NaN; },
+    });
+    expect(reads).toEqual({ minOccurrences: 1, maxEntries: 1 });
+    expect(profile?.shared.columns).toEqual([{ leaf: 0, dict: ["a long unique value"] }]);
+  });
+
+  test("undefined fields and plain options preserve defaults", () => {
+    const data = samples([["alpha", "alpha", "alpha"]]);
+    const expected = train(ROWS, data);
+    for (const options of [undefined, {}, { minOccurrences: undefined, maxEntries: undefined }, Object.create(null)]) {
+      expect(train(ROWS, data, options)).toEqual(expected);
+    }
+  });
+
+  test("accepts minOccurrences at the safe integer boundaries", () => {
+    const data = samples([["a long unique value"]]);
+    expect(train(ROWS, data, { minOccurrences: 1 })?.shared.columns).toEqual([
+      { leaf: 0, dict: ["a long unique value"] },
+    ]);
+    expect(train(ROWS, data, { minOccurrences: Number.MAX_SAFE_INTEGER })).toBeUndefined();
+  });
+
+  test("accepts maxEntries at zero and the dictionary ceiling", () => {
+    const data = samples([["alpha", "alpha", "alpha"]]);
+    expect(train(ROWS, data, { maxEntries: 0 })).toBeUndefined();
+    expect(train(ROWS, data, { maxEntries: MAX_DICT_ENTRIES })).toEqual(train(ROWS, data));
+  });
+});
+
 describe("trainer grammar induction", () => {
   test("induces through an all-letter hex segment", () => {
     const profile = train(

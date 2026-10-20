@@ -16,9 +16,46 @@ import {
 } from "./profile.js";
 
 export interface TrainOptions {
-  /** A value must appear at least this often across the samples to be considered. */
+  /** Minimum occurrences across samples; a safe integer >= 1. Defaults to 2. */
   minOccurrences?: number;
+  /** Maximum dictionary entries; a safe integer in [0, 16383]. Defaults to 16383. */
   maxEntries?: number;
+}
+
+function checkedTrainOptions(options: TrainOptions): Required<TrainOptions> {
+  try {
+    if (typeof options !== "object" || options === null) {
+      throw new HyperflyError("options", "options: must be an object");
+    }
+    const prototype = Object.getPrototypeOf(options);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new HyperflyError("options", "options: must be an object");
+    }
+    for (const key of Reflect.ownKeys(options)) {
+      if (key !== "minOccurrences" && key !== "maxEntries") {
+        throw new HyperflyError("options", `options.${String(key)}: unknown option`);
+      }
+    }
+    const readOption = (key: keyof TrainOptions): number | undefined => {
+      try {
+        return options[key];
+      } catch (cause) {
+        throw new HyperflyError("options", `options.${key}: could not read train option`, { cause });
+      }
+    };
+    const minOccurrences = readOption("minOccurrences");
+    const maxEntries = readOption("maxEntries");
+    if (minOccurrences !== undefined && (!Number.isSafeInteger(minOccurrences) || minOccurrences < 1)) {
+      throw new HyperflyError("options", "minOccurrences: must be a safe integer >= 1");
+    }
+    if (maxEntries !== undefined && (!Number.isSafeInteger(maxEntries) || maxEntries < 0 || maxEntries > MAX_DICT_ENTRIES)) {
+      throw new HyperflyError("options", `maxEntries: must be a safe integer in [0, ${MAX_DICT_ENTRIES}]`);
+    }
+    return { minOccurrences: minOccurrences ?? 2, maxEntries: maxEntries ?? MAX_DICT_ENTRIES };
+  } catch (cause) {
+    if (cause instanceof HyperflyError && cause.code === "options") throw cause;
+    throw new HyperflyError("options", "options: could not read train options", { cause });
+  }
 }
 
 const encoder = new TextEncoder();
@@ -450,13 +487,13 @@ function detectDerivation(
  */
 export function train(ir: IRNode, samples: readonly unknown[], options: TrainOptions = {}): Profile | undefined {
   if (!Array.isArray(samples)) throw new HyperflyError("options", "samples: must be an array");
-  return withinStack(() => trainProfile(ir, samples, options));
+  const checked = checkedTrainOptions(options);
+  return withinStack(() => trainProfile(ir, samples, checked));
 }
 
-function trainProfile(ir: IRNode, samples: readonly unknown[], options: TrainOptions): Profile | undefined {
+function trainProfile(ir: IRNode, samples: readonly unknown[], options: Required<TrainOptions>): Profile | undefined {
   validateIR(ir);
-  const minOccurrences = Math.max(1, Math.floor(options.minOccurrences ?? 2));
-  const maxEntries = Math.max(0, Math.min(Math.floor(options.maxEntries ?? MAX_DICT_ENTRIES), MAX_DICT_ENTRIES));
+  const { minOccurrences, maxEntries } = options;
   const refs = enumerateColumns(ir);
   const data: TrainingData = { batches: new Map(), arrays: [] };
   for (const sample of samples) collect(ir, sample, 0, refs, data);

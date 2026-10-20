@@ -71,6 +71,10 @@ const profile = train(toIR(EventResponse), [response]); // Supply representative
 const profiled = compile(EventResponse, { plan: "columnar", profile });
 ```
 
+`train` accepts an optional plain options object with `minOccurrences` (a safe integer >= 1, default 2) and
+`maxEntries` (a safe integer from 0 to 16383, default 16383), and rejects invalid options with a `HyperflyError`
+of code `options`.
+
 The dictionary is part of the out-of-band artifact: it ships once, not per request. On an audit-log route in the
 repo's benchmark the dictionary is estimated at 17 KB and pays for itself after about twelve requests; the estimate
 excludes the rest of the artifact.
