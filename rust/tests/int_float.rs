@@ -1,4 +1,4 @@
-use hyperfly_core::{Codec, Error, ErrorCode, Field, Limits, Literal, Node, Plan, Value};
+use hyperfly_core::{Codec, CompileOptions, Error, ErrorCode, Field, Literal, Node, Plan, Value};
 
 fn field(name: &str, ty: Node) -> Field {
     Field {
@@ -14,11 +14,11 @@ fn int(min: Option<i64>, max: Option<i64>) -> Node {
 }
 
 fn compile(ir: Node, plan: Plan) -> Codec {
-    Codec::compile(ir, plan, Limits::default(), false).unwrap()
+    Codec::compile(ir, CompileOptions::new().with_plan(plan).with_pack(false)).unwrap()
 }
 
 fn code(error: Error) -> ErrorCode {
-    error.code
+    error.code()
 }
 
 fn row(ty: Node) -> Codec {
