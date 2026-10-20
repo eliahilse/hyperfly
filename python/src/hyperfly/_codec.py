@@ -2011,16 +2011,14 @@ def _derived_column(
         assert total is not None
         return total
 
-    def quick_total(quick: bool = True, within: int | None = None) -> int | None:
+    def quick_total(quick: bool = True) -> int | None:
         """The column's decoded bytes; when `quick`, None unless they follow without
-        reading its rows (from equal lengths or a tally of its source already taken);
-        given a budget `within`, None once a tally of its source, taken in runs, passes it."""
+        reading its rows (from equal lengths or a tally of its source already taken)."""
         if isinstance(source, int) or ordinal in ctx.uniform_derived:
             conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
         elif not escaped and 4 * count >= len(sizes):
             assert source_codes is not None
-            limit = None if within is None else (sizes, within)
-            tally = source_codes(derivation["source"], counts=True, cheap=quick, within=limit)
+            tally = source_codes(derivation["source"], counts=True, cheap=quick)
             if tally is None:
                 return None
             conformed = sum(sizes[code] * times for code, times in tally.items() if times)
@@ -2030,10 +2028,16 @@ def _derived_column(
             conformed = sum(derived_lengths())
         return conformed + sum(escape_lengths())
 
+    def shared_total(remaining: int) -> int | None:
+        if isinstance(source, int) or ordinal in ctx.uniform_derived:
+            return quick_total(False)
+        assert source_codes is not None
+        return source_codes(derivation["source"], charge=(sizes, remaining, derived_lengths))
+
     bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
-    # another derived column reads this source: a tally of it, taken in runs, serves them all
+    # another derived column reads this source: a tally of it, taken in runs, can serve them all
     shared = not escaped and 4 * count >= len(sizes) and ctx.consumers[derivation["source"]] > 1
-    runs = partial(quick_total, False) if shared else None
+    runs = shared_total if shared else None
     _settle(r, make, escape_failure or failure, path, bound, derived_total, quick_total, runs)
     table = ctx.derived_tables[ordinal]
 
@@ -2372,30 +2376,40 @@ def _source_codes(
     ordinal: int,
     counts: bool = False,
     cheap: bool = False,
-    within: tuple[tuple[int, ...], int] | None = None,
+    charge: tuple[tuple[int, ...], int, Callable[[], Iterable[int]]] | None = None,
 ) -> Any:
     """A derivation source's dictionary codes at the rows a derived column with
     participation `part` covers: 0 outside the dictionary, _NOT_PARTICIPATING where
     the source is absent; with `counts`, how often each code occurs there (with `cheap`,
-    None unless that is known or takes a byte count per code; with `within`, sizes by
-    code and a budget, otherwise tallied in runs and None once their sum passes it).
+    None unless that is known or takes a byte count per code). With `charge`, sizes by
+    code, a budget and the derived column's lengths, the sum of their sizes over those
+    codes, or None once it passes the budget: from a tally already taken, else from a
+    tally taken in runs, except that codes fewer than four times the sizes are summed
+    in runs by the first column to read them, as a tally pays only for a second one.
     Every derived column that reads one source with the same participation shares one
     result, held in `found`."""
-    if counts:
+    if counts or charge is not None:
         tally = found.get(("counts", ordinal, part))
         if tally is None:
             source = _source_codes(ctx, columns, ordinal_base, count, found, part, ordinal)
             entries = len(ctx.codes[ordinal])
             if cheap and not _counts_each(source, entries):
                 return None
-            if within is None or _counts_each(source, entries):
-                tally = _tally(source, entries)
+            if charge is None:
+                tally = found[("counts", ordinal, part)] = _tally(source, entries)
             else:
-                tally = _tally_runs(source, *within)
-            if tally is None:
-                return None
-            found[("counts", ordinal, part)] = tally
-        return tally
+                sizes, remaining, lengths = charge
+                if 4 * len(sizes) > len(source) and ("summed", ordinal, part) not in found:
+                    found[("summed", ordinal, part)] = True
+                    return _run_sums(lengths(), remaining)
+                taken = _tally_runs(source, sizes, remaining)
+                if taken is None:
+                    return None
+                found[("counts", ordinal, part)], total = taken
+                return total
+        if charge is None:
+            return tally
+        return sum(map(mul, map(charge[0].__getitem__, tally), tally.values()))
     known = found.get((ordinal, part))
     if known is not None:
         return known
@@ -2441,17 +2455,26 @@ def _tally(codes: array, entries: int) -> dict[int, int]:
     return Counter(codes)
 
 
-def _tally_runs(codes: Any, sizes: tuple[int, ...], remaining: int) -> Counter[int] | None:
-    """How often each code occurs, tallied in runs, or None once a run takes the sum of
-    their sizes past `remaining`. A run is at least four times the codes, so summing the
-    tally after each run costs at most a quarter of reading it."""
+def _tally_runs(codes: Any, sizes: tuple[int, ...], remaining: int) -> tuple[Counter[int], int] | None:
+    """How often each code occurs, tallied in runs (by a byte count per code where
+    _counts_each), and the sum of their sizes, or None once a run takes that sum past
+    `remaining`. A run is at least four times the codes, so summing the tally after
+    each run costs at most a quarter of reading it."""
     tally: Counter[int] = Counter()
+    total = 0
     run = max(_RUN, 4 * len(sizes))
+    each = _counts_each(codes, len(sizes) - 1)
     for start in range(0, len(codes), run):
-        _count_into(tally, codes[start : start + run])
-        if sum(map(mul, map(sizes.__getitem__, tally), tally.values())) > remaining:
+        if each:
+            data = codes[start : start + run].tobytes()
+            for code in range(len(sizes)):
+                tally[code] += data.count(code)
+        else:
+            _count_into(tally, codes[start : start + run])
+        total = sum(map(mul, map(sizes.__getitem__, tally), tally.values()))
+        if total > remaining:
             return None
-    return tally
+    return tally, total
 
 
 def _count_into(tally: Counter[int], codes: Any) -> None:

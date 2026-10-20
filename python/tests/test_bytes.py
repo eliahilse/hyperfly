@@ -1,5 +1,6 @@
 import tracemalloc
 from array import array
+from itertools import combinations, islice
 
 import pytest
 
@@ -678,10 +679,10 @@ def test_derived_fan_out_reads_its_source_once(k, values, fillers, spied):
         assert spied["runs"] == 0
 
 
-def _masked_fanout(k, distinct=True):
-    # 128 rows of an optional grammar source alternating 00 and 10, each rendering an
-    # empty value, then k optional consumers absent from two rows each: rows i and i + 1
-    # for consumer i, or rows 0 and 1 for all of them
+def _masked_fanout(k, distinct=True, rows=128):
+    # rows of an optional grammar source alternating 00 and 10, each rendering an empty
+    # value, then k optional consumers absent from two rows each: rows i and i + 1 for
+    # consumer i, or rows 0 and 1 for all of them
     ir = _array(
         dict(_field("s", "string"), optional=True),
         *(dict(_field(f"d{i}", "string"), optional=True) for i in range(k)),
@@ -692,30 +693,91 @@ def _masked_fanout(k, distinct=True):
         {"leaf": 0, "dict": ["00", "10"] + [f"f{i}" for i in range(40)], "grammar": [LANE, LANE]},
         *({"leaf": i + 1, "derived": {"source": 0, "values": values}} for i in range(k)),
     )
-    body = "8001" + "ff" * 16 + "0300020001" + "aa" * 16 + "020000"
+    mask = rows // 8
+    body = _uleb(rows).hex() + "ff" * mask + "0300020001" + "aa" * mask + "020000"
     for i in range(k):
         absent = (1 << i) | (1 << (i + 1)) if distinct else 3
-        body += (((1 << 128) - 1) ^ absent).to_bytes(16, "little").hex() + "0400"
+        body += (((1 << rows) - 1) ^ absent).to_bytes(mask, "little").hex() + "0400"
     return ir, profile, body + "ff"
 
 
-# each consumer's bound, 126 rows of up to 10 bytes, passes a 1,000-byte budget
+def _coded_masks(k, rows, entries, first, distinct=True):
+    # rows of a dictionary source holding codes first to first + rows - 1, each rendering
+    # an empty value, then k optional consumers absent from two rows each: a distinct
+    # pair for each consumer, or rows 0 and 1 for all of them
+    ir = _array(
+        _field("s", "string"),
+        *(dict(_field(f"d{i}", "string"), optional=True) for i in range(k)),
+        _field("n", "int"),
+    )
+    values = ["y" * 10] * entries
+    values[first - 1 : first - 1 + rows] = [""] * rows
+    profile = _profile(
+        {"leaf": 0, "dict": [f"s{i}" for i in range(entries)]},
+        *({"leaf": i + 1, "derived": {"source": 0, "values": values}} for i in range(k)),
+    )
+    width = (first + rows - 1).bit_length()
+    body = _uleb(rows) + bytearray([1, width])
+    _codec._pack_bits(body, list(range(first, first + rows)), width)
+    for a, b in islice(combinations(range(rows), 2), k) if distinct else [(0, 1)] * k:
+        body += (((1 << rows) - 1) ^ (1 << a) ^ (1 << b)).to_bytes(rows // 8, "little") + b"\x04\x00"
+    return ir, profile, bytes(body + b"\xff")
+
+
+def _uleb(value):
+    out = bytearray()
+    _codec.write_uleb(out, value)
+    return out
+
+
+# each consumer's bound, 126 or 254 rows of up to 10 bytes, passes a 1,000-byte budget
 SMALL = Limits(max_total_bytes=1000)
+
+# consumers whose rows hold fewer codes than four times their sizes, though enough to
+# share a tally: 126 rows against the 43 sizes of a grammar source and the 130 of a
+# byte dictionary, and 254 against 1,016 two-byte sizes, exactly at that bound
+SHORT_MASKS = {
+    "grammar source": lambda k, distinct: (_masked_fanout(k, distinct), SMALL),
+    "byte codes": lambda k, distinct: (_coded_masks(k, 128, 129, 1, distinct), SMALL),
+    "two-byte codes": lambda k, distinct: (_coded_masks(k, 256, 1015, 256, distinct), Limits(max_total_bytes=3000)),
+}
 
 
 @pytest.mark.parametrize("k", [2, 6, 40])
 def test_distinct_participation_takes_no_unused_tally(k, spied):
-    _decode_with(_masked_fanout(k), limits=SMALL)
+    # 254 rows, at least four times the 43 sizes
+    _decode_with(_masked_fanout(k, rows=256), limits=SMALL)
     # each consumer's own rows are tallied once, as its charge, and nothing else is
     assert spied["tally"] == 0 and spied["runs"] == 0
     assert spied["tally runs"] == k
+
+
+@pytest.mark.parametrize("k", [2, 6, 40])
+@pytest.mark.parametrize("shape", list(SHORT_MASKS))
+def test_distinct_short_participation_is_summed(k, shape, spied):
+    case, limits = SHORT_MASKS[shape](k, True)
+    _decode_with(case, limits=limits)
+    # no consumer's rows are read by another, so each is summed in runs and none tallied
+    assert spied["runs"] == k
+    assert spied["tally"] == 0 and spied["tally runs"] == 0
+
+
+@pytest.mark.parametrize("k", [2, 3, 6])
+@pytest.mark.parametrize("shape", list(SHORT_MASKS))
+def test_repeated_short_participation_is_tallied_once(k, shape, spied):
+    case, limits = SHORT_MASKS[shape](k, False)
+    _decode_with(case, limits=limits)
+    # the first consumer sums its rows; the second tallies them, as its charge, for
+    # every later one
+    assert spied["runs"] == 1 and spied["tally runs"] == 1
+    assert spied["tally"] == 0
 
 
 @pytest.mark.parametrize("k", [2, 6])
 @pytest.mark.parametrize("shape", ["masked", "sparse"])
 def test_one_participation_reads_its_source_once(k, shape, spied):
     if shape == "masked":
-        _decode_with(_masked_fanout(k, distinct=False), limits=SMALL)
+        _decode_with(_masked_fanout(k, distinct=False, rows=256), limits=SMALL)
     else:
         _decode_with(_sparse_fanout(k, ["", "y" * 10], 40))
     assert spied["tally"] == 0 and spied["runs"] == 0
@@ -751,6 +813,26 @@ def test_a_shared_early_overflow_takes_no_full_pass(spied):
     assert err.value.code == "limit" and "[].d[3668]" in str(err.value)
     assert spied["tally"] == 0 and spied["runs"] == 0
     assert spied["tally runs"] == 1 and spied["counted"] == 1
+
+
+def test_a_small_dictionary_early_overflow_takes_no_full_tally(spied):
+    # two consumers of 100,000 rows over a 31-entry dictionary: the first passes the
+    # budget at d[13268], within the fourth of its 25 runs, so its rows are not all counted
+    ir = _array(_field("s", "string"), _field("d", "string"), _field("e", "string"), _field("n", "int"))
+    values = ["y" * 10] * 30 + ["y" * 9]
+    profile = _profile(
+        {"leaf": 0, "dict": [f"w{i}" for i in range(31)]},
+        {"leaf": 1, "derived": {"source": 0, "values": values}},
+        {"leaf": 2, "derived": {"source": 0, "values": values}},
+    )
+    body = _uleb(100000) + bytearray([1, 5])
+    _codec._pack_bits(body, [1 + i % 31 for i in range(100000)], 5)
+    codec = compile_ir(ir, plan="columnar", profile=profile, limits=Limits(max_total_bytes=400000))
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes(body + b"\x04\x00\x04\x00\xff"))
+    assert err.value.code == "limit" and "[].d[13268]" in str(err.value)
+    assert spied["tally"] == 0 and spied["runs"] == 0
+    assert spied["tally runs"] == 1
 
 
 @pytest.mark.parametrize("count", [70, 300])
