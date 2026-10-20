@@ -1,6 +1,9 @@
 import json
 import os
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, create_model
 
 import pytest
 
@@ -53,6 +56,32 @@ def same_value(actual, expected, ir=None, *, decoded=False):
     return type(actual) is type(expected) and actual == expected
 
 
+class VectorModel(BaseModel):
+    def model_dump(self, **kwargs):
+        return super().model_dump(exclude_unset=True, **kwargs)
+
+
+def declared_type(ir):
+    kind = ir["kind"]
+    if kind == "struct":
+        fields = {}
+        for field in ir["fields"]:
+            annotation = declared_type(field["type"])
+            if field.get("nullable"):
+                annotation = annotation | None
+            fields[field["name"]] = (annotation, None if field.get("optional") else ...)
+        return create_model("VectorValue", __base__=VectorModel, **fields)
+    if kind == "array":
+        return list[declared_type(ir["element"])]
+    if kind == "nullable":
+        return declared_type(ir["inner"]) | None
+    if kind == "literal":
+        return Literal[ir["value"]]
+    if kind == "enum":
+        return Literal[tuple(ir["members"])]
+    return {"bytes": bytes, "bool": bool, "int": int, "float64": float, "string": str}[kind]
+
+
 def decode_json(direction, body, registry):
     if direction == "response":
         return decode_response("application/json", body, registry)
@@ -65,6 +94,9 @@ def test_json_fallback_valid(row, direction):
     registry = CodecRegistry([compile_ir(row["ir"])])
     value = revive(row["value"])
     if direction == "encode":
+        # A struct's IR bytes positions are represented by declared model fields.
+        if row["ir"]["kind"] == "struct":
+            value = declared_type(row["ir"]).model_validate(value)
         body, headers = encode_for(negotiate(None, registry), value)
         assert headers["Content-Type"] == "application/json"
         assert same_value(json.loads(body), json.loads(row["json"]), row["ir"])
