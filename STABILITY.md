@@ -28,8 +28,8 @@ Error codes are part of each package's public API. These include `limit`,
 Match on the code rather than the message.
 
 HTTP request failures are also part of the contract: the status codes
-`readBody` answers with in TypeScript, and the `status` and `reason` values of
-Python's `RequestError`, as the package READMEs list them.
+`readBody` answers with in TypeScript, and the `status` and `reason` values
+Python's `RequestError` carries.
 HTTP error message text is not part of the contract.
 
 ## Wire compatibility
@@ -39,8 +39,9 @@ negotiation headers are frozen for all of 1.x as described in
 [the spec's stability section](spec/wire-v0.md#stability).
 Any 1.x encoder's bytes decode with any 1.x decoder of the same artifact,
 across TypeScript, Python and Rust, subject to the receiver's decode limits.
-Every package decodes packed columns by default; a decoder configured without
-packing support (for example `pack: false` in TypeScript) rejects them.
+TypeScript and Python decode packed columns by default; a Rust codec decodes
+them when it is compiled with packing enabled. A decoder without packing
+support (for example `pack: false` in TypeScript) rejects packed columns.
 
 Encoder output size, the plan or columns `train` picks, and benchmark numbers
 are not part of the contract. They may improve in minor releases while the
