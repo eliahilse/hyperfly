@@ -26,6 +26,24 @@ function fail(path: string, message: string): never {
   throw new HyperflyError("ir", `${path}: ${message}`);
 }
 
+/** Message text for an untrusted JSON value, without calling any method it may carry. */
+export function describeValue(v: unknown): string {
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "object" && v !== null) return "an object";
+  return String(v);
+}
+
+/** Runs fn, reporting a call-stack overflow on deeply nested untrusted input as invalid IR. */
+export function withinStack<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    // untrusted JSON can nest deeper than the host stack; that is invalid IR, not a crash
+    if (e instanceof RangeError) throw new HyperflyError("ir", "IR or profile nesting exceeds the call stack");
+    throw e;
+  }
+}
+
 function isObject(v: unknown): boolean {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -62,8 +80,36 @@ function checkFieldName(name: string, path: string): void {
   }
 }
 
+const NODE_KEYS: Record<IRNode["kind"], readonly string[]> = {
+  bool: ["kind"],
+  int: ["kind", "min", "max"],
+  float64: ["kind"],
+  string: ["kind"],
+  bytes: ["kind"],
+  literal: ["kind", "value"],
+  enum: ["kind", "members"],
+  nullable: ["kind", "inner"],
+  array: ["kind", "element", "length"],
+  struct: ["kind", "fields"],
+};
+
+const FIELD_KEYS: readonly string[] = ["name", "type", "optional", "nullable"];
+
+function checkKeys(value: object, allowed: readonly string[], path: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) fail(path, `unknown key ${key}`);
+  }
+}
+
 export function validateIR(node: IRNode, path = "$"): void {
+  withinStack(() => checkNode(node, path));
+}
+
+function checkNode(node: IRNode, path: string): void {
   if (!isObject(node)) fail(path, "IR node must be an object");
+  if (typeof node.kind === "string" && Object.prototype.hasOwnProperty.call(NODE_KEYS, node.kind)) {
+    checkKeys(node, NODE_KEYS[node.kind], path);
+  }
   switch (node.kind) {
     case "bool":
     case "float64":
@@ -84,11 +130,7 @@ export function validateIR(node: IRNode, path = "$"): void {
     }
     case "literal": {
       const v = node.value;
-      const ok =
-        v === null ||
-        typeof v === "string" ||
-        typeof v === "boolean" ||
-        (isSafeInt(v) && !Object.is(v, -0));
+      const ok = v === null || typeof v === "string" || typeof v === "boolean" || isSafeInt(v);
       if (!ok) fail(path, "literal must be string, boolean, null, or a safe integer");
       if (typeof v === "string") checkString(v, path, "literal string");
       return;
@@ -118,14 +160,14 @@ export function validateIR(node: IRNode, path = "$"): void {
       if (node.inner.kind === "literal" && node.inner.value === null) {
         fail(path, "nullable(literal null) has two encodings for null");
       }
-      validateIR(node.inner, `${path}?`);
+      checkNode(node.inner, `${path}?`);
       return;
     }
     case "array": {
       if (node.length !== undefined && (!isSafeInt(node.length) || node.length < 0)) {
         fail(path, "fixed array length must be a non-negative safe integer");
       }
-      validateIR(node.element, `${path}[]`);
+      checkNode(node.element, `${path}[]`);
       return;
     }
     case "struct": {
@@ -133,6 +175,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       const seen = new Set<string>();
       for (const f of node.fields) {
         if (!isObject(f)) fail(path, "struct fields must be objects");
+        checkKeys(f, FIELD_KEYS, path);
         if (typeof f.name !== "string" || f.name.length === 0) fail(path, "field names must be non-empty strings");
         checkString(f.name, path, "field name");
         checkFieldName(f.name, path);
@@ -148,12 +191,12 @@ export function validateIR(node: IRNode, path = "$"): void {
         if (f.nullable && f.type.kind === "literal" && f.type.value === null) {
           fail(`${path}.${f.name}`, "nullable flag on a null literal has two encodings for null");
         }
-        validateIR(f.type, `${path}.${f.name}`);
+        checkNode(f.type, `${path}.${f.name}`);
       }
       return;
     }
     default:
-      fail(path, `unknown IR kind ${(node as { kind: string }).kind}`);
+      fail(path, `unknown IR kind ${describeValue((node as { kind: unknown }).kind)}`);
   }
 }
 

@@ -395,6 +395,26 @@
       },
       "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":5},\"ir\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"s\",\"type\":{\"kind\":\"string\"}}]}}},{\"name\":\"b\",\"type\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"t\",\"type\":{\"kind\":\"string\"}}]}}}]},\"profile\":{\"columns\":[{\"leaf\":1,\"dict\":[\"only-second\"]}]}}",
       "fingerprint": "e2990b2c317808c4988c821a9fa93f83"
+    },
+    {
+      "name": "literal-negative-zero@row",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": -0
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"literal\",\"value\":0}}",
+      "fingerprint": "feb69d9d8dc23478cd954ff381bb72d1"
+    },
+    {
+      "name": "literal-negative-zero-float@row",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": -0.0
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"literal\",\"value\":0}}",
+      "fingerprint": "feb69d9d8dc23478cd954ff381bb72d1"
     }
   ]
 }

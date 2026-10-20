@@ -645,6 +645,7 @@ impl Codec {
                     (Literal::Null, Value::Null) => true,
                     (Literal::Bool(a), Value::Bool(b)) => a == b,
                     (Literal::Int(a), Value::Int(b)) => a == b,
+                    (Literal::Int(0), Value::Float(f)) => *f == 0.0,
                     (Literal::Str(a), Value::Str(b)) => a == b,
                     _ => false,
                 };

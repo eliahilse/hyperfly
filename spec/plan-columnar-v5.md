@@ -294,6 +294,8 @@ The result numbers every columnar leaf in the whole schema `0 … N−1`.
   token object holds exactly one of `lit` or `num`; `columns` MUST be
   non-empty — a profile with nothing to say is expressed by having no
   profile, not by an empty one, so one codec never has two artifacts.
+- Integer-valued fields follow wire-v0 §4: `2.0` is the integer 2 and `-0`
+  is 0, while `2.5` is rejected.
 
 Constraints, all validated at compile time:
 

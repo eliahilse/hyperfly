@@ -14,7 +14,7 @@ from ._codec import (
     _match_grammar,
     _packed_bytes,
 )
-from ._ir import MAX_DICT_ENTRIES, _enumerate_column_refs, _has_lone_surrogate, column_count
+from ._ir import MAX_DICT_ENTRIES, _enumerate_column_refs, _has_lone_surrogate, column_count, validate_ir
 from ._wire import uleb_len
 
 
@@ -247,6 +247,7 @@ def train(
     Values must recur at least ``min_occurrences`` times to enter a dictionary,
     which holds at most ``max_entries`` entries. Return None when no profile helps.
     """
+    validate_ir(ir)
     if math.isfinite(min_occurrences):
         min_occurrences = max(1, math.floor(min_occurrences))
     elif min_occurrences == -math.inf:
