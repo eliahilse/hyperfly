@@ -1,6 +1,6 @@
 use hyperfly_core::{
-    Codec, ErrorCode, Field, GrammarCase, GrammarNum, GrammarToken, Limits, Node, Plan, Profile,
-    ProfileColumn, Value,
+    Codec, CompileOptions, ErrorCode, Field, GrammarCase, GrammarNum, GrammarToken, Limits, Node,
+    Plan, Profile, ProfileColumn, Value,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -88,13 +88,17 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
         length: None,
     };
     let default_codec =
-        Codec::compile(ir.clone(), Plan::Columnar, Limits::default(), true).unwrap();
-    let limits = Limits {
-        max_total_bytes: u64::MAX,
-        max_byte_amplification: u64::MAX,
-        ..Limits::default()
-    };
-    let codec = Codec::compile(ir, Plan::Columnar, limits, true).unwrap();
+        Codec::compile(ir.clone(), CompileOptions::new().with_plan(Plan::Columnar)).unwrap();
+    let mut limits = Limits::default();
+    limits.max_total_bytes = u64::MAX;
+    limits.max_byte_amplification = u64::MAX;
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_limits(limits),
+    )
+    .unwrap();
 
     let mut expands_then_fails = miniz_oxide::deflate::compress_to_vec(&vec![0u8; 1 << 20], 6);
     expands_then_fails.pop();
@@ -106,14 +110,18 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
     ] {
         let body = packed_body((1 << 28) - 1, blob);
         assert_eq!(
-            default_codec.decode_body(&body).unwrap_err().code.as_str(),
+            default_codec
+                .decode_body(&body)
+                .unwrap_err()
+                .code()
+                .as_str(),
             "limit"
         );
         let baseline = CURRENT.load(Ordering::SeqCst);
         PEAK.store(baseline, Ordering::SeqCst);
         let result = codec.decode_body(&body);
         let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
-        assert_eq!(result.unwrap_err().code.as_str(), "packed");
+        assert_eq!(result.unwrap_err().code().as_str(), "packed");
         assert!(peak < 16 * 1024 * 1024, "decode allocated {peak} bytes");
     }
 
@@ -149,7 +157,7 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
         }
         for invalid in invalid_bodies {
             assert_eq!(
-                codec.decode_body(&invalid).unwrap_err().code.as_str(),
+                codec.decode_body(&invalid).unwrap_err().code().as_str(),
                 "packed"
             );
         }
@@ -168,32 +176,32 @@ fn grammar_budget_fails_before_rendering() {
         }])),
         length: None,
     };
-    let profile = Profile {
-        version: 2,
-        columns: vec![ProfileColumn {
-            leaf: 0,
-            dict: None,
-            grammar: Some(vec![
-                GrammarToken::Lit("x".repeat(1 << 20)),
-                GrammarToken::Num(GrammarNum {
-                    base: 16,
-                    len: 1,
-                    case: GrammarCase::Lower,
-                }),
-            ]),
-            derived: None,
-        }],
-    };
-    let limits = Limits {
-        max_total_bytes: 0,
-        ..Limits::default()
-    };
-    let codec =
-        Codec::compile_with_profile(ir, Plan::Columnar, limits, false, Some(profile)).unwrap();
+    let profile = Profile::new(
+        2,
+        vec![ProfileColumn::new(0).with_grammar(vec![
+            GrammarToken::Lit("x".repeat(1 << 20)),
+            GrammarToken::Num(GrammarNum {
+                base: 16,
+                len: 1,
+                case: GrammarCase::Lower,
+            }),
+        ])],
+    );
+    let mut limits = Limits::default();
+    limits.max_total_bytes = 0;
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_limits(limits)
+            .with_pack(false)
+            .with_profile(profile),
+    )
+    .unwrap();
     let baseline = CURRENT.load(Ordering::SeqCst);
     PEAK.store(baseline, Ordering::SeqCst);
     let result = codec.decode_body(&[1, 3, 0, 0, 0]);
     let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
-    assert_eq!(result.unwrap_err().code, ErrorCode::Limit);
+    assert_eq!(result.unwrap_err().code(), ErrorCode::Limit);
     assert!(peak < 512 * 1024, "decode allocated {peak} bytes");
 }

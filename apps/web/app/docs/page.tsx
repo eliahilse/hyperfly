@@ -89,6 +89,9 @@ export default function DocsPage() {
               core package has no Pydantic dependency; use the extra for the Pydantic example below.
             </p>
           </div>
+          <p className="docs-prose">
+            The npm package requires Node.js 22 or later and is ESM only.
+          </p>
           <CodeBlock label="terminal">{`npm install hyperfly@next zod
 pip install --pre hyperfly
 # With the Pydantic adapter (Pydantic >= 2.5):
@@ -266,9 +269,9 @@ async function getEvents(url: string) {
             <h2 className="section-title" id="limits-title">Limits</h2>
           </div>
           <p className="docs-prose">
-            A decoder bounds nesting, array counts, value lengths, and two per-body budgets: the
+            Codecs bound nesting, array counts, value lengths, and two per-body budgets: the
             sum of all array counts and the sum of all decoded string and bytes lengths, each
-            scaled to the body&apos;s length. Encoders apply the same limits; over HTTP, a value past them
+            scaled to the body&apos;s length. Over HTTP, a value past these limits
             falls back to JSON. Limits are local to each peer, are not negotiated, and are not
             part of the fingerprint.
           </p>
@@ -290,7 +293,7 @@ async function getEvents(url: string) {
           <ul className="docs-list">
             <li><a href={`${README}#readme`}>Package README</a>: API, limits, errors, and runtime support.</li>
             <li><a href={`${README}#errors`}>Error codes</a>: every <code>HyperflyError</code> code and its <code>cause</code>.</li>
-            <li><a href={`${README}#runtime-support`}>Runtime support</a>: Node, Bun, Deno, Workers, and browsers.</li>
+            <li><a href={`${README}#runtime-support`}>Runtime support</a>: Node.js 22 or later, Bun, Deno, Workers, and browsers.</li>
             <li><a href={`${GITHUB}/blob/main/python/README.md`}>Python README</a>: Pydantic and Python HTTP helpers.</li>
             <li><a href={`${GITHUB}/blob/main/rust/README.md`}>Rust crate README</a>: the Rust codec.</li>
             <li><a href={`${GITHUB}/blob/main/spec/wire-v0.md`}>wire-v0</a>: envelope, primitives, and limits.</li>

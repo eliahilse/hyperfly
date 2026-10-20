@@ -1,8 +1,10 @@
 # Hyperfly negotiation — v1
 
-Status: draft. Defines how a client and server agree to exchange hyperfly bytes
-instead of JSON over HTTP, and how a client obtains an artifact it does not yet
-hold. The wire format (`spec/wire-v0.md`) is unchanged by this document.
+Status: stable. The contract is frozen for hyperfly 1.x; see
+[Stability](wire-v0.md#stability). Defines how a client and server agree to
+exchange hyperfly bytes instead of JSON over HTTP, and how a client obtains an
+artifact it does not yet hold. The wire format (`spec/wire-v0.md`) is
+unchanged by this document.
 
 The governing rule is inherited from the format: a peer decodes only an
 artifact it holds, identified by fingerprint. Negotiation exists so that fact
@@ -100,19 +102,28 @@ A server that offers binary responses SHOULD expose its artifacts:
 GET /.well-known/hyperfly/a65108e20d19c19ff525ddf4789d5ba1
 ```
 
+A pathname that does not begin with the exact, case-sensitive prefix
+`/.well-known/hyperfly/` is not a discovery path. When it does, the
+remainder MUST be exactly 32 ASCII hex characters, in either case, and is
+matched against the lowercase fingerprint. Any other remainder, including
+surrounding whitespace, a trailing slash, percent-encoded bytes, or a `?`
+and query text supplied as part of the pathname, MUST yield `404`; the
+lookup performs no trimming and no percent-decoding. A query string the
+HTTP layer separates before lookup is not part of the pathname.
+
 ```
 200 OK
 Content-Type: application/json
 Cache-Control: public, max-age=31536000, immutable
 ```
 
-The body is the canonical artifact text (wire-v0 §5, plan §6.3). Artifacts are
+The body is the canonical artifact text (wire-v0 §5, plan §6.5). Artifacts are
 content-addressed, so the response is immutable and indefinitely cacheable: a
 different artifact is a different URL by construction.
 
 A client MUST verify that the fingerprint of the text it received equals the
 one it asked for, and MUST reject a mismatch. It MUST derive the artifact from
-the parsed content rather than trusting the received text (wire-v0 §7), so a
+the parsed content rather than trusting the received text (plan §6.5), so a
 server cannot induce a client to hash bytes it has not understood.
 
 Unknown fingerprint: `404`. That is not an error condition for the protocol —
@@ -157,7 +168,7 @@ that applies wins:
 
 ## 5. Rotation
 
-Retraining a profile produces a new fingerprint (plan §6.4). A deployment
+Retraining a profile produces a new fingerprint (plan §6.6). A deployment
 rotates without a cliff by holding both:
 
 1. The server registers the new codec alongside the old one. Both fingerprints
@@ -180,10 +191,18 @@ what makes the fallback a transition rather than an outage.
   that is not exactly 32 lowercase hex characters after trimming is
   malformed, not normalized. Duplicates are compared after trimming and only
   the first is kept. `spec/vectors/accept.json` pins this behaviour; every
-  implementation runs it.
+  implementation that provides HTTP negotiation runs it.
 - A fingerprint is not a secret, but it does identify a schema and a trained
   dictionary. A server MUST NOT serve an artifact belonging to one tenant to
   another, and `.well-known` discovery MUST apply the same authorization as
   the routes the artifact describes.
 - Whether a value is dictionary-coded is observable in response length (plan
-  §6.6). Negotiation does not change that; it only makes it opt-in per client.
+  §6.8). Negotiation does not change that; it only makes it opt-in per client.
+
+## 7. Stability
+
+This document is frozen for hyperfly 1.x as wire-v0
+[Stability](wire-v0.md#stability) describes. Its Additions and A future wire
+version subsections allow optional headers peers ignore, new artifacts
+selected by fingerprint with JSON fallback, and negotiation changes a 1.x
+peer could misread only under new header names or a new media type.

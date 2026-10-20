@@ -1,10 +1,11 @@
 # Hyperfly wire format — v0
 
-Status: draft. This document and the vectors under `spec/vectors/` are the
-authorities on the format. The TypeScript package is a reference
-implementation; any future implementation (Rust, Python) must reproduce the
-vectors byte-for-byte. Where an implementation and this document disagree, the
-document wins.
+Status: stable. The contract is frozen for hyperfly 1.x; see
+[Stability](#stability). This document and the vectors under `spec/vectors/`
+are the authorities on the format. The TypeScript, Python and Rust
+implementations each reproduce the vectors byte-for-byte; any other
+implementation MUST do the same. Where an implementation and this document
+disagree, the document wins.
 
 v0 is the schema-compiled row layout: no profiles, no entropy coding, no
 dictionaries, no columnar or delta transforms. Those arrive as new plans (and
@@ -79,6 +80,12 @@ An integer-valued field accepts any JSON number whose value is an integer in
 `[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
 fractional values and values beyond that range are invalid IR.
 
+IR nodes MUST be objects whose `kind` names one of the kinds below, with all
+required members shown below; fields MUST be objects with `name` and `type`.
+Node-valued members MUST themselves be valid IR nodes. `members` and `fields`
+MUST be arrays. Optional members, when present, MUST have the declared type;
+`null` is not an absent member.
+
 ### 4.1 `bool`
 
 One byte: `0x00` false, `0x01` true. Decoders MUST reject other values.
@@ -92,8 +99,9 @@ representable in v0).
 ### 4.3 `enum { members }`
 
 ULEB128 index into `members`, in declared order. Index MUST be
-`< members.length`. Members are unique, non-empty, strings only. Declared
-order is canonical; reordering members is a new artifact.
+`< members.length`. `members` MUST contain at least one member, and each
+member MUST be a unique, non-empty string. Declared order is canonical;
+reordering members is a new artifact.
 
 ### 4.4 `int { min?, max? }`
 
@@ -101,6 +109,7 @@ order is canonical; reordering members is a new artifact.
 - Otherwise: `svarint(value)`.
 - Declared bounds are validated on encode AND decode; out-of-bounds MUST be
   rejected on both sides.
+- If both bounds are declared, `min` MUST NOT exceed `max`.
 
 ### 4.5 `float64`
 
@@ -122,6 +131,8 @@ surrogates. Decoders MUST reject invalid UTF-8 (no replacement characters).
 - Fixed (`length` declared): exactly `length` elements, no count on the wire.
 - Variable: `uvarint` count, then elements.
 
+A declared `length` MUST be a non-negative integer in the domain of §3.3.
+
 ### 4.9 `nullable { inner }`
 
 One byte: `0x00` null (nothing follows), `0x01` value follows. Other values
@@ -131,14 +142,17 @@ field flag (§4.10), which uses the bitmap instead.
 ### 4.10 `struct { fields }`
 
 Field order is declared order and is canonical.
+Field names MUST be non-empty strings and MUST be unique within a struct.
 
 **Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
 a decimal array index (`0`, or a digit string with no leading zero whose value
 is below 2^32 − 1). Some host languages reorder integer-index object keys and
 trap `__proto__` assignment, so such names cannot round-trip or fingerprint
 identically everywhere. Field names, enum members, and string literals MUST
-also be well-formed Unicode: a lone surrogate has no portable representation
-and MUST be rejected at IR validation.
+also be well-formed Unicode: a sequence of Unicode scalar values. Lone
+surrogates MUST be rejected at IR validation; every other scalar value,
+including NUL, U+FFFE, U+FFFF and unassigned code points, MUST be accepted
+subject to the other constraints on that string.
 
 **Closed objects.** IR nodes and fields MUST NOT carry keys this
 specification does not define for their kind, and profile objects MUST NOT
@@ -147,7 +161,8 @@ not define; such IR or profile is invalid.
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
-value two wire encodings. Each field has `optional` and
+value two wire encodings. A field's `nullable` flag MUST NOT be true when its
+type is a `nullable` node. Each field has `optional` and
 `nullable` flags. When present, each flag MUST be a JSON boolean; any other
 value is invalid IR. Layout:
 
@@ -157,6 +172,12 @@ value is invalid IR. Layout:
    nullable field regardless of presence. Bit set = null. For an absent
    field the bit MUST be zero.
 3. Field values, in field order, for fields that are present and not null.
+
+A decoder MUST read the presence bitmap and then the null bitmap, validating
+each bitmap's padding, before processing fields in declared order. It MUST
+check a field's absent/null consistency when that field is reached, reporting
+a null bit for an absent field as `bitmap`; it MUST NOT check this before
+decoding earlier fields' values.
 
 Absent and null are distinct states and MUST NOT collapse. A required field
 cannot be absent; a non-nullable field cannot be null; violations are encode
@@ -202,8 +223,12 @@ Implementations MUST enforce configurable limits with these v0 defaults:
   nodes enclosing it, and decoding a node deeper than `maxDepth` is rejected
   with `depth`,
 - `maxItems` 2^24 per array, applied to a declared length as to a count,
-- `maxByteLength` 2^28 per string/bytes value, checked against the length
-  prefix before any payload byte is read,
+- `maxByteLength` 2^28 per string/bytes value and per declared inflated
+  total of a deflate-packed string column (plan-columnar-v5 §3), checked
+  against the length prefix before any payload byte is read; for a decoder
+  with inflate also per blob of such a column, checked against the blob
+  length before any blob byte is read (a decoder without inflate rejects the
+  column as `unsupported` without reading the blob length, below),
 - `maxAmplification` 32: an array count above
   `maxAmplification × (remaining bytes + 1)` is rejected, where remaining
   bytes are the body bytes after the count or, for a fixed-length array,
@@ -261,7 +286,9 @@ an exceeded budget as `limit`:
   declared inflated total, after `maxByteLength` is applied to each declared
   length and to the total, and before the blob length is read; a decoder
   without an inflate capability charges it the same way and only then
-  rejects the column as `unsupported`; its values are not charged again;
+  rejects the column as `unsupported`; otherwise it reads the blob length
+  and MUST reject a length above `maxByteLength` with `limit` before reading
+  any blob byte. Its values are not charged again;
 - a dictionary, grammar or derived value, when it is resolved, after its own
   checks (code range, source lookup) and after `maxByteLength` is applied to
   its length, and before it is built (a grammar value's length follows from
@@ -314,13 +341,160 @@ partial values.
 
 ## 8. Vectors
 
-`spec/vectors/vectors.json` — valid encode/decode pairs and invalid inputs
-(both directions), body bytes only. `spec/vectors/fingerprints.json` — IR →
-canonical text → fingerprint, locking §5. `spec/vectors/limits.json` — each
-§6 limit just at and just past its bound, for decoders and encoders; its
-`decodeOnly` vectors are bodies a decoder MUST accept whose values an encoder
-MUST refuse (§6). `spec/vectors/bytes.json` — the §6 byte budget at and
-just past its bound, in the same format, with `packedDecode` vectors that
-decoders run alone because deflate output differs between libraries.
-`spec/vectors/ir.json` — invalid IR and valid near misses, locking §4
-acceptance. Every implementation runs all five.
+The vector files are listed under [Vectors](#vectors) in Stability.
+
+Hex is body bytes only. `decodeOnly` rows are decoded without requiring an
+encode round trip; in `limits.json`, the encoder MUST refuse their values
+(§6). `packedDecode` rows run on decoders alone because deflate output differs
+between libraries.
+
+## 9. Errors
+
+Codec operations (IR/profile validation and compile, encode, decode) and
+artifact loading (negotiation-v1 §3) MUST report the following stable
+lowercase codes on the implementation's error type. References to the plan
+below mean plan-columnar-v5.
+
+- `varint` (decode): non-minimal ULEB128 or more than eight bytes (§3.1).
+- `range` (encode, decode): declared numeric bounds are exceeded, or a decoded
+  number, index, code or derived source is outside its domain
+  (§3.3, §4.3–§4.4, plan §3).
+- `type` (encode): a value mismatches its type (including safe integers),
+  literal, enum, fixed length or nullability (§4).
+- `required` (encode): a required field is absent (§4.10).
+- `utf8` (encode, decode): a lone surrogate on encode or invalid UTF-8 on
+  decode (§4.6, plan §3).
+- `float` (encode, decode): a non-finite float; on decode, negative zero or
+  non-minimal XOR encoding (§4.5, plan §3).
+- `marker` (decode): an invalid boolean, nullable marker, column mode or
+  mode parameter (§4.1, §4.9, plan §3).
+- `bitmap` (decode): nonzero bitmap or packed padding, an absent field marked
+  null, inconsistent escape bits or a zero patched-frame exception high part
+  (§3.5, §4.10, plan §3).
+- `trailing` (decode): bytes remain after a complete body (§2).
+- `truncated` (decode): input ends before a value is complete (§3–§4, §6,
+  plan §3).
+- `depth` (encode, decode): traversal exceeds `maxDepth` (§6).
+- `limit` (encode, decode): an item, byte, amplification or remaining-input
+  bound is exceeded (§6).
+- `header` (decode): a short envelope, bad magic or wrong wire major (§2).
+- `fingerprint` (decode, artifact loading): the envelope fingerprint differs
+  from the codec's fingerprint (§2), loaded artifact content does not hash
+  to the fingerprint it was fetched under, or a fingerprint supplied for
+  artifact loading is not 32 hex characters (negotiation-v1 §3).
+- `ir` (compile): invalid IR or profile (§4, plan §6.1–§6.5), or an artifact
+  naming an unimplemented wire, plan layout or plan version (Stability).
+- `packed` (decode): invalid DEFLATE, trailing bytes in its blob or wrong
+  inflated length (plan §3–§4).
+- `unsupported` (decode; compile in host-language schema adapters): missing
+  inflate capability or a required profile entry (plan §3), or a host schema
+  construct with no IR equivalent.
+- `artifact` (artifact loading): a discovery response or loaded artifact
+  cannot be read: a non-2xx status other than the `404` miss of
+  negotiation-v1 §3, an unreadable, oversized or non-UTF-8 body, or text that
+  is not well-formed JSON. Parsed content that is not a valid artifact, IR or
+  profile is `ir`.
+
+The code is the contract; messages are not. Wherever a vector pins a code,
+every implementation MUST report that code. §6 fixes the order of limit
+checks so the same input yields the same code. Implementations may define
+further codes for failures outside this document (option validation,
+host-adapter validation failures, JSON parsing outside artifact loading); those MUST NOT replace a code
+above for a failure this document defines.
+
+## Stability
+
+### Frozen
+
+Every hyperfly 1.x release preserves:
+
+- The magic `0x68 0x66`, wire major `0x01` and envelope (§2).
+- The primitives (§3), row@1 node encodings (§4), and columnar@5 layout and
+  column payloads (plan-columnar-v5).
+- Canonical serialization and fingerprinting (§5, plan-columnar-v5 §6.5):
+  an IR, plan and profile yield the same artifact text and fingerprint in
+  every 1.x release.
+- The set of valid IR and profile documents, as this document (§4,
+  plan-columnar-v5 §6.2) and the vectors define it. It is never narrowed,
+  and widens only by the additions below.
+- For every existing artifact, the set of bodies a decoder accepts at the
+  same limits and the decoded value of each, as this document and the
+  vectors define them. A 1.x release MUST NOT change that set in either
+  direction.
+- The error codes of §9 for the failures they cover.
+- The limit names and defaults of §6. A decoder configured with the defaults
+  MUST accept every valid body within them (a deflate-packed column also
+  needs the inflate capability, plan-columnar-v5 §3); the check order of §6
+  is fixed.
+- Negotiation-v1 as a whole: `application/vnd.hyperfly`; `Hyperfly-Accept`,
+  `Hyperfly-Codec` and `Hyperfly-Offer`; the
+  `/.well-known/hyperfly/<fingerprint>` path; the `Accept` and
+  `Hyperfly-Accept` parsing rules; fallback conditions; `Vary`; and the
+  status rules of negotiation-v1 §4 in their order.
+
+An implementation that accepts or rejects differently from the sets above
+has a defect. Fixing it to conform is not a breaking change, and the fix
+adds a vector row that pins the corrected behaviour.
+
+### Additions
+
+1.x may add only what an existing peer cannot misread:
+
+- New plan layouts or versions, IR node kinds or fields, and profile column
+  kinds. Each produces new artifact text and a new fingerprint;
+  a peer that does not hold it falls back to JSON as for any unknown
+  fingerprint (negotiation-v1 §2). No existing artifact's bytes or fingerprint
+  change.
+- A new profile document version, provided any content it gives a new
+  meaning is distinguishable in the serialized profile or the plan version,
+  so a peer that does not implement it refuses it with `ir`. The profile
+  `version` itself is not part of the artifact text.
+- New `hints` (plan-columnar-v5 §6.2), which are outside the artifact.
+- New optional HTTP headers, ignored by peers that do not know them.
+- A new media type, for a negotiation change that a 1.x peer could otherwise
+  misread under `application/vnd.hyperfly`.
+- New error codes, only for failures of something added.
+- New limits, only with defaults that reject nothing a 1.x decoder at the
+  defaults accepts.
+
+Implementations need not support an addition to remain conforming. They
+MUST NOT change behaviour for anything frozen under Frozen.
+
+### A future wire version
+
+A wire major other than `0x01` is a different envelope: a 1.x decoder MUST
+reject it with `header` before reading any body byte. A new major is selected
+like every codec: its artifact text names its wire value, giving it its own
+fingerprint. A client advertises it in `Hyperfly-Accept`, most preferred
+first, beside its wire-1 fingerprints; a server that holds it may answer with
+it, and every peer that does not hold it gets the JSON fallback. No new
+negotiation mechanism is needed. A change to negotiation itself that a 1.x
+peer could misread uses new header names or a new media type, never a new
+meaning for an existing one.
+
+A 1.x peer loading artifact text (negotiation-v1 §3) MUST refuse a wire, plan
+layout or plan version it does not implement with `ir` and continue in JSON.
+It MUST NOT compile it as a different version.
+
+### Vectors
+
+The JSON files under `spec/vectors/` are the 1.x compatibility suite:
+
+- `accept.json` — `Hyperfly-Accept` parsing (negotiation-v1 §6).
+- `bytes.json` — byte budgets at and past their bounds (§6).
+- `columnar.json` — payloads, profiles and artifacts (plan-columnar-v5).
+- `fingerprints.json` — IR → canonical text → fingerprint (§5,
+  plan-columnar-v5 §6.5).
+- `ir.json` — invalid IR and valid near misses (§4, plan-columnar-v5 §6.2).
+- `limits.json` — limits at and past their bounds, encode and decode (§6).
+- `vectors.json` — row encode/decode pairs and invalid inputs (§3–§4).
+
+Every 1.x implementation MUST pass every applicable row: each row that pins
+Frozen behaviour, and each row for an Addition the implementation
+implements. `accept.json` binds only implementations that provide HTTP
+negotiation. A row whose input the implementation's value model cannot
+represent (a lone surrogate in a language whose strings are Unicode scalar
+values) does not apply to it. A row that decodes a deflate-packed column
+needs the inflate capability; an implementation without it reports
+`unsupported` for that row after the §6 checks that precede it. Within 1.x,
+rows may be added, never changed or removed.

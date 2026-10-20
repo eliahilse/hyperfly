@@ -415,6 +415,54 @@
       },
       "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"row\",\"version\":1},\"ir\":{\"kind\":\"literal\",\"value\":0}}",
       "fingerprint": "feb69d9d8dc23478cd954ff381bb72d1"
+    },
+    {
+      "name": "derived-profile@columnar",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "id1"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "e1"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "canonical": "{\"wire\":1,\"plan\":{\"layout\":\"columnar\",\"version\":5},\"ir\":{\"kind\":\"array\",\"element\":{\"kind\":\"struct\",\"fields\":[{\"name\":\"a\",\"type\":{\"kind\":\"string\"}},{\"name\":\"b\",\"type\":{\"kind\":\"string\"}}]}},\"profile\":{\"columns\":[{\"leaf\":0,\"dict\":[\"id1\"]},{\"leaf\":1,\"derived\":{\"source\":0,\"values\":[\"e1\"]}}]}}",
+      "fingerprint": "d393df419b313b491ccfd900aab19a6a"
     }
   ]
 }

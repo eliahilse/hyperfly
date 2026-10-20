@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import acceptVectors from "../../../spec/vectors/accept.json" with { type: "json" };
 import { z } from "zod";
 import { CodecRegistry, type IRNode } from "../src/index.js";
@@ -746,6 +747,91 @@ describe("request body limits", () => {
     expect(await readBody(new Request(url, { method: "POST", body }), registry, {
       maxBytes: bytes.byteLength,
     })).toEqual({ ok: true, value: "é" });
+  });
+
+  test.each([
+    ["Uint8Array", () => new Uint8Array(1)],
+    ["Buffer", () => Buffer.alloc(1)],
+    ["Uint8Array view", () => new Uint8Array(16).subarray(5, 6)],
+    ["Buffer view", () => Buffer.alloc(16).subarray(8, 9)],
+  ])("copies each %s chunk before the stream reuses its buffer", async (_, alloc) => {
+    const buffer = alloc();
+    const digits = new TextEncoder().encode("12");
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls === digits.length) return controller.close();
+        buffer[0] = digits[pulls++]!;
+        controller.enqueue(buffer);
+      },
+    }, { highWaterMark: 0 });
+    expect(await readBody(new Request(url, { method: "POST", body }), registry)).toEqual({ ok: true, value: 12 });
+  });
+
+  test.each([
+    ["ArrayBuffer", () => new Uint8Array([0x31]).buffer],
+    ["Uint16Array", () => new Uint16Array([0x31])],
+    ["string", () => "1"],
+  ])("refuses a %s chunk with 400", async (_, chunk) => {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunk());
+        controller.close();
+      },
+    });
+    const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
+  });
+
+  test("refuses a locked body with 400", async () => {
+    const request = new Request(url, { method: "POST", body: new TextEncoder().encode("1") });
+    request.body!.getReader();
+    const result = await readBody(request, registry);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
+  });
+
+  test("cancels the stream when it refuses a chunk that is not bytes", async () => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      pull(controller) { controller.enqueue("1"); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
+    expect(cancelled).toBe(true);
+  });
+
+  class LyingLength extends Uint8Array {
+    override get byteLength(): number { return 0; }
+  }
+
+  test("counts a subclass chunk by its real length, not an overridden byteLength", async () => {
+    const chunk = (bytes: Uint8Array) => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new LyingLength(bytes));
+        controller.close();
+      },
+    });
+    const digits = new TextEncoder().encode("12");
+    const over = await readBody(new Request(url, { method: "POST", body: chunk(digits) }), registry, { maxBytes: 1 });
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.response.status).toBe(413);
+    expect(await readBody(new Request(url, { method: "POST", body: chunk(digits) }), registry)).toEqual({ ok: true, value: 12 });
+  });
+
+  test("accepts a Uint8Array chunk from another realm", async () => {
+    const foreign = runInNewContext("new Uint8Array([0x31, 0x32])") as Uint8Array;
+    expect(foreign instanceof Uint8Array).toBe(false);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(foreign);
+        controller.close();
+      },
+    });
+    expect(await readBody(new Request(url, { method: "POST", body }), registry)).toEqual({ ok: true, value: 12 });
   });
 
   test.each(["-1", "1.5", "1x"])("ignores invalid Content-Length %s", async (contentLength) => {

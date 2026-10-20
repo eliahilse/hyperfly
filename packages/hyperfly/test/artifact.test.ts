@@ -153,7 +153,7 @@ describe("loadArtifact", () => {
     },
   );
 
-  test("forwards decode limits and pack hooks", () => {
+  test("forwards limits and pack hooks", () => {
     const limited = loadArtifact(codec.artifact, codec.fingerprint, { limits: { maxItems: 1 }, pack: false });
     expect(() => limited.decode(codec.encode(sample))).toThrow(expect.objectContaining({ code: "limit" }));
     const columnar = compileIR(ROWS, { plan: "columnar", pack: false });
@@ -246,6 +246,21 @@ describe("fetchArtifact", () => {
     expect(loaded?.fingerprint).toBe(unicode.fingerprint);
   });
 
+  test("copies each chunk before the stream reuses its buffer", async () => {
+    const bytes = new TextEncoder().encode(codec.artifact);
+    const buffer = new Uint8Array(1);
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset === bytes.length) return controller.close();
+        buffer[0] = bytes[offset++]!;
+        controller.enqueue(buffer);
+      },
+    }, { highWaterMark: 0 });
+    const loaded = await fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)) });
+    expect(loaded?.fingerprint).toBe(codec.fingerprint);
+  });
+
   test("rejects invalid UTF-8", async () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(new Uint8Array([0xff]))) }))
       .rejects.toThrow(expect.objectContaining({ code: "ir", message: expect.stringContaining("UTF-8") }));
@@ -256,6 +271,27 @@ describe("fetchArtifact", () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)) }))
       .rejects.toThrow(expect.objectContaining({ code: "ir" }));
     expect(body.locked).toBe(false);
+  });
+
+  test("enforces the byte cap on a subclass chunk with an overridden byteLength", async () => {
+    class LyingLength extends Uint8Array {
+      override get byteLength(): number { return 0; }
+    }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new LyingLength(new TextEncoder().encode(codec.artifact)));
+        controller.close();
+      },
+    });
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)), maxBytes: 1 }))
+      .rejects.toThrow(expect.objectContaining({ code: "limit" }));
+  });
+
+  test("rejects a locked response body as unreadable", async () => {
+    const response = new Response(codec.artifact);
+    response.body!.getReader();
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(response) }))
+      .rejects.toThrow(expect.objectContaining({ code: "ir", message: "artifact body could not be read" }));
   });
 
   test("forwards request headers", async () => {
