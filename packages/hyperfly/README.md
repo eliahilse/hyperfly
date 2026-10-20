@@ -384,10 +384,10 @@ ESM only, three entry points:
 
 ## Runtime support
 
+Requires Node.js 22 or later; ESM only.
+
 | Runtime | Codec and `hyperfly/http` | Decodes packed string columns | Packs string columns on encode | Verified |
 |---|---|---|---|---|
-| Node 18 | Yes | Yes | No | Supported |
-| Node 20 | Yes | Yes | From 20.16 | Supported |
 | Node 22 | Yes | Yes | From 22.3 | Supported |
 | Node 24 | Yes | Yes | Yes | Supported |
 | Bun | Yes | Yes | Yes | Tested in CI |
@@ -410,7 +410,7 @@ const packed = compile(EventResponse, { plan: "columnar", pack });
 
 `pack` replaces the default hooks as a whole, so a hook set without `inflate` cannot decode packed columns, and
 `pack: false` disables both. HTTP helpers use the `fetch`, `Request`, `Response`, `Headers` and `ReadableStream`
-globals, which Node 18 and later provide. CI runs the TypeScript tests and the TypeScript/Python HTTP interop on Bun;
+globals, which Node.js 22 and later provide. CI runs the TypeScript tests and the TypeScript/Python HTTP interop on Bun;
 it does not run a Node, Deno or browser matrix.
 
 ## What it costs on the wire
