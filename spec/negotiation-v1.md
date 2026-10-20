@@ -82,6 +82,33 @@ An encoder refusal MUST be answered in JSON like any other fallback, never
 with an error status. The server SHOULD record it: it marks a route whose
 limits need raising on both peers.
 
+In a JSON fallback response, a `bytes` value MUST be a standard padded
+base64 string (RFC 4648 §4), using the alphabet `A-Z`, `a-z`, `0-9`, `+`,
+`/` and `=` padding, with no line breaks or whitespace. A peer decoding
+JSON under a codec it holds MUST turn each string at a `bytes` position
+back into bytes. A client decodes a JSON response under the codec it would
+use for a binary response on that route, and a server a JSON request body
+under the route's codec. It MUST reject a string that is not canonical padded
+base64, including nonzero unused pad bits, as a JSON-decoding failure
+(`json` for a response, `400` for a request body).
+
+Other nodes retain their codec value model in JSON: `bool` is a boolean;
+`int` and `float64` are numbers; `string` and `enum` are strings; `literal`
+is its declared value; a null value is `null`; arrays are JSON arrays and
+structs are JSON objects. Absent optional fields are omitted. The JSON
+spelling is not part of the contract: whitespace, key order and number
+spelling may differ between writers, and peers compare parsed values, with
+numbers as binary64.
+
+A client decoding a JSON response MUST decode the body as strict UTF-8
+JSON. Invalid UTF-8 or malformed JSON MUST fail with `json`; invalid UTF-8
+MUST NOT be repaired with replacement characters.
+
+In a JSON body decoded without a codec, integer-valued numbers outside
+`[-(2^53 - 1), 2^53 - 1]` are outside the interoperable range of RFC 8259 §6;
+hyperfly does not define their value. Integer values a codec encodes are
+always within that range (wire-v0 §3.3).
+
 `Hyperfly-Offer` is optional and advisory: it names an artifact the server
 would have used, so a client can fetch it (§3) and upgrade itself. A client
 MUST NOT treat its presence as a requirement, and a server MUST behave
@@ -143,7 +170,10 @@ that applies wins:
 2. The body exceeds the server's request-body bound: `413 Content Too Large`.
    The bound is server configuration (implementations SHOULD default to
    1 MiB), enforced by counting bytes as they arrive; `Content-Length` serves
-   only to reject early.
+   only to reject early. After trimming leading and trailing SP and HTAB,
+   it MUST be used only if the remainder is a non-empty run of ASCII
+   digits; otherwise it MUST be ignored and the bound enforced on bytes
+   received.
 3. A hyperfly body is shorter than the envelope header, or its magic or major
    is wrong (wire-v0 §2): `400 Bad Request`.
 4. A hyperfly body arrives with a `Hyperfly-Codec` header whose value, with
@@ -154,6 +184,15 @@ that applies wins:
 6. The hyperfly body fails to decode under the held codec, for any wire-v0
    error (limits included): `400`.
 7. A JSON body is not well-formed UTF-8 JSON: `400`.
+
+JSON request bodies use the same value representation as JSON fallback
+responses (§2), including canonical padded base64 for `bytes`. A server
+encoding a value as JSON MUST write bytes as base64; a peer decoding a JSON
+request body under a codec it holds MUST convert strings at `bytes`
+positions back into bytes and reject noncanonical base64 with `400`.
+
+`spec/vectors/http.json` pins the JSON representation, response decoding
+and request-body bounds in §§2 and 4.
 
 ## 5. Rotation
 

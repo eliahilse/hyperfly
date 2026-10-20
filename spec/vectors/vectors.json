@@ -1,5 +1,5 @@
 {
-  "description": "Golden vectors for hyperfly wire v0, plan row@1. Hex is body bytes only (no envelope). Every implementation must pass all three sections. Values of the form {\"$surrogate\": \"XXXX\"} denote a string containing that lone UTF-16 code unit; implementations whose strings cannot represent one skip the vector.",
+  "description": "Golden vectors for hyperfly wire v0, plan row@1. Hex is body bytes only (no envelope). Every implementation must pass all three sections. Numeric value tokens 1.0, 3.0 and -0.0 MUST retain their floating-point host representation where the JSON loader distinguishes it; no marker is needed. Values of the form {\"$surrogate\": \"XXXX\"} denote a string containing that lone UTF-16 code unit; implementations whose strings cannot represent one skip the vector.",
   "valid": [
     {
       "name": "bool-true",
@@ -329,6 +329,40 @@
         }
       },
       "hex": "0e"
+    },
+    {
+      "name": "int-integral-float",
+      "ir": {
+        "kind": "int"
+      },
+      "value": 1.0,
+      "hex": "02"
+    },
+    {
+      "name": "int-bounded-integral-float",
+      "ir": {
+        "kind": "int",
+        "min": 0
+      },
+      "value": 3.0,
+      "hex": "03"
+    },
+    {
+      "name": "literal-integral-float",
+      "ir": {
+        "kind": "literal",
+        "value": 1
+      },
+      "value": 1.0,
+      "hex": ""
+    },
+    {
+      "name": "int-negative-zero-float",
+      "ir": {
+        "kind": "int"
+      },
+      "value": -0.0,
+      "hex": "00"
     }
   ],
   "invalidDecode": [

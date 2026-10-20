@@ -75,9 +75,15 @@ All fixed-width values are **little-endian**. `float64` is IEEE 754 binary64.
 
 ## 4. Node encodings (plan `row` v1)
 
-An integer-valued field accepts any JSON number whose value is an integer in
-`[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
-fractional values and values beyond that range are invalid IR.
+An integer-valued IR field accepts any JSON number whose value is an integer
+in `[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its
+sign; fractional values and values beyond that range are invalid IR.
+
+For an `int` node or an integer `literal`, a value MUST be accepted as an
+integer regardless of its host representation when it is a number whose
+value is an integer in that domain: `1.0` is 1 and `-0.0` is 0. Booleans are
+not numbers. Fractional, non-finite and out-of-domain values MUST be rejected
+on encode with `type`; declared bounds are checked as in §4.4.
 
 ### 4.1 `bool`
 
@@ -88,6 +94,10 @@ One byte: `0x00` false, `0x01` true. Decoders MUST reject other values.
 Zero bytes. The value is part of the artifact. v0 literal values are strings,
 booleans, `null`, or JSON-safe integers (non-integer numeric literals are not
 representable in v0).
+
+An integer literal matches any numeric value equal to that integer under the
+§4 rule, including an integral floating-point value. A mismatch MUST be
+rejected on encode with `type`.
 
 ### 4.3 `enum { members }`
 
@@ -100,7 +110,9 @@ order is canonical; reordering members is a new artifact.
 - If `min` is declared: `uvarint(value - min)` using exact integer arithmetic.
 - Otherwise: `svarint(value)`.
 - Declared bounds are validated on encode AND decode; out-of-bounds MUST be
-  rejected on both sides.
+  rejected on both sides with `range`. On encode, the §4 integer-domain
+  check precedes the bound checks, including for integral floating-point
+  values.
 
 ### 4.5 `float64`
 
@@ -144,6 +156,16 @@ and MUST be rejected at IR validation.
 specification does not define for their kind, and profile objects MUST NOT
 carry keys the columnar plan's profile document (plan-columnar-v5 §6.2) does
 not define; such IR or profile is invalid.
+
+**Artifact nesting.** The canonical artifact text (§5, plan-columnar-v5
+§6.5) MUST NOT nest JSON containers deeper than 512. The artifact object is
+depth 1; every object or array value is one deeper than its container.
+This depth is a function of the IR and profile alone, independent of their
+input spelling. An IR or profile whose artifact would exceed this bound is
+invalid IR and MUST be rejected with `ir` before any recursion that could
+exhaust the host stack. Every implementation MUST accept every otherwise
+valid IR and profile within the bound regardless of host stack size. This
+bound is independent of `maxDepth` (§6).
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
@@ -303,8 +325,9 @@ partial values.
 
 - Little-endian everywhere; no big-endian variant will exist.
 - The IR exclusions in §4.10 (portable field names, well-formed Unicode,
-  closed objects, unambiguous null) are permanent: they exist so that every
-  implementation accepts exactly the same set of artifacts.
+  closed objects, artifact nesting, unambiguous null) are permanent: they
+  exist so that every implementation accepts exactly the same set of
+  artifacts.
 - The fingerprint identifies the full codec artifact. Future columnar, delta,
   dictionary, or profiled layouts are new `plan` values under the same
   serialization scheme; v0 reserves no in-band escape values for them.
