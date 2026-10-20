@@ -37,7 +37,7 @@ fn main() -> Result<(), hyperfly_core::Error> {
 
 `Plan::Columnar` lays arrays of structs out column by column, and
 `Codec::compile_with_profile` takes a trained profile (dictionaries, grammars,
-derived columns). `codec.fingerprint` is the hex fingerprint peers negotiate on.
+derived columns). `codec.fingerprint()` is the hex fingerprint peers negotiate on.
 
 ## Decoding untrusted input
 

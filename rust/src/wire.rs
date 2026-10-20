@@ -1,27 +1,47 @@
 use std::fmt;
 
+/// A machine-readable reason for a compilation, encoding, or decoding failure.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
+    /// `varint`: an overlong ULEB128 encoding or one exceeding eight bytes.
     Varint,
+    /// `range`: a numeric value, index, or derived source is outside its allowed domain.
     Range,
+    /// `type`: an input value does not match its schema type, literal, enum, or fixed length.
     Type,
+    /// `required`: an input object lacks a required field.
     Required,
+    /// `utf8`: decoded string bytes are not valid UTF-8.
     Utf8,
+    /// `float`: a non-finite float, or a negative-zero bit pattern on decode.
     Float,
+    /// `marker`: an invalid boolean, nullable marker, column mode, or mode parameter.
     Marker,
+    /// `bitmap`: nonzero padding, an absent field marked null, or inconsistent escape bits.
     Bitmap,
+    /// `trailing`: bytes remain after a complete body.
     Trailing,
+    /// `truncated`: input ends before the declared value is complete.
     Truncated,
+    /// `depth`: value traversal exceeds the configured nesting depth.
     Depth,
+    /// `limit`: an item, byte, amplification, or remaining-input bound is exceeded.
     Limit,
+    /// `header`: the envelope is too short or has invalid magic or wire major version.
     Header,
+    /// `fingerprint`: the envelope fingerprint differs from the codec's fingerprint.
     Fingerprint,
+    /// `ir`: the schema, layout, or profile is invalid.
     Ir,
+    /// `packed`: a DEFLATE blob is invalid, has trailing bytes, or has the wrong output length.
     Packed,
+    /// `unsupported`: packed input is disabled or a column requires a missing profile entry.
     Unsupported,
 }
 
 impl ErrorCode {
+    /// Returns the lowercase wire error code name.
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Varint => "varint",
@@ -45,9 +65,12 @@ impl ErrorCode {
     }
 }
 
+/// A codec failure with a stable code and a human-readable explanation.
 #[derive(Debug)]
 pub struct Error {
+    /// The machine-readable failure category.
     pub code: ErrorCode,
+    /// The explanation, including a value path when available.
     pub message: String,
 }
 
@@ -59,6 +82,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A codec operation's value or typed failure.
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
@@ -68,16 +92,24 @@ pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
     })
 }
 
+/// The smallest wire integer, `-(2^53 - 1)`.
 pub const INT_MIN: i64 = -((1i64 << 53) - 1);
+/// The largest wire integer, `2^53 - 1`.
 pub const INT_MAX: i64 = (1i64 << 53) - 1;
 const ULEB_DOMAIN_MAX: u64 = (1u64 << 56) - 1;
 const MAX_ULEB_BYTES: usize = 8;
 
+/// Resource bounds enforced during encoding and decoding.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// Maximum nesting depth from root depth zero; default 64. Structs, arrays, and nullable nodes count.
     pub max_depth: u32,
+    /// Maximum number of elements per array; default `2^24`.
     pub max_items: u64,
+    /// Maximum bytes per string or byte value, and per packed blob and inflated column; default `2^28`.
     pub max_byte_length: u64,
+    /// Array count multiplier for the bound `count <= max_amplification * (remaining_bytes + 1)`;
+    /// default 4096. Encoding uses the array payload byte length in place of remaining bytes.
     pub max_amplification: u64,
 }
 
@@ -95,16 +127,11 @@ impl Default for Limits {
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
-    pub limits: Limits,
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(buf: &'a [u8], limits: Limits) -> Self {
-        Reader {
-            buf,
-            pos: 0,
-            limits,
-        }
+    pub fn new(buf: &'a [u8]) -> Self {
+        Reader { buf, pos: 0 }
     }
 
     pub fn u8(&mut self) -> Result<u8> {

@@ -1,8 +1,6 @@
-use hyperfly_core::ir::{
-    Derivation, GrammarCase, GrammarNum, GrammarToken, Profile, ProfileColumn,
-};
 use hyperfly_core::{
-    fingerprint_of, serialize_artifact, Codec, Field, Limits, Literal, Node, Plan, Value,
+    fingerprint_of, serialize_artifact, Codec, Derivation, Field, GrammarCase, GrammarNum,
+    GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn, Value,
 };
 use serde_json::Value as Json;
 
@@ -216,6 +214,21 @@ fn fingerprints() {
         );
         assert_eq!(
             to_hex(&fingerprint_of(&canonical)),
+            case["fingerprint"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        let codec = Codec::compile_with_profile(
+            node_of(&case["ir"]),
+            plan,
+            Limits::default(),
+            false,
+            profile,
+        )
+        .unwrap();
+        assert_eq!(codec.artifact(), canonical, "{}", case["name"]);
+        assert_eq!(
+            codec.fingerprint(),
             case["fingerprint"].as_str().unwrap(),
             "{}",
             case["name"]
