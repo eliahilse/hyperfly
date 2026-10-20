@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Mapping
-from typing import Any, NoReturn, cast
+from functools import partial
+from typing import Any, Callable, NoReturn, cast
 
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
@@ -39,21 +40,32 @@ def normalize_integers(value: Any) -> None:
 
 
 def json_copy(value: Any) -> Any:
-    """Copy JSON-shaped data without recursion; a container shared in the input stays shared."""
-    memo: dict[int, Any] = {}
-    holder = [value]
-    stack: list[tuple[Any, Any]] = [(holder, 0)]
+    """Copy JSON-shaped data without recursion: dicts become plain dicts, lists and
+    tuples keep their type, and a container shared in the input stays shared."""
+    order: list[Any] = []
+    seen: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(value, False)]
     while stack:
-        parent, key = stack.pop()
-        item = parent[key]
-        if not isinstance(item, (dict, list, tuple)):
-            continue
-        copy = memo.get(id(item))
-        if copy is None:
-            copy = memo[id(item)] = dict(item) if isinstance(item, dict) else list(item)
-            stack.extend((copy, inner) for inner in (copy.keys() if type(copy) is dict else range(len(copy))))
-        parent[key] = copy
-    return holder[0]
+        item, done = stack.pop()
+        if done:
+            order.append(item)
+        elif isinstance(item, (dict, list, tuple)) and id(item) not in seen:
+            seen.add(id(item))
+            stack.append((item, True))
+            stack.extend((inner, False) for inner in (item.values() if isinstance(item, dict) else item))
+    copies: dict[int, Any] = {}
+
+    def pick(inner: Any) -> Any:
+        return copies[id(inner)] if isinstance(inner, (dict, list, tuple)) else inner
+
+    for item in order:
+        if isinstance(item, dict):
+            copies[id(item)] = {key: pick(inner) for key, inner in item.items()}
+        elif isinstance(item, tuple):
+            copies[id(item)] = tuple(map(pick, item))
+        else:
+            copies[id(item)] = list(map(pick, item))
+    return pick(value)
 
 
 def check_artifact_nesting(ir: Any) -> None:
@@ -123,13 +135,19 @@ def _check_field_name(name: str, path: str) -> None:
 def validate_ir(node: Any, path: str = "$") -> None:
     """Validate a v0 schema; raise code ``ir`` prefixed with the failing path."""
     check_artifact_nesting(node)
-    try:
-        _check_node(node, path)
-    except RecursionError:
-        _fail(path, "IR nesting exceeds Python's recursion limit")
+    # depth-first in declared order: a field and then its whole type are checked
+    # before the next field, so the first failure is the one recursion would report
+    stack: list[_Check] = [(_check_node, node, path)]
+    while stack:
+        check, current, current_path = stack.pop()
+        stack.extend(reversed(check(current, current_path)))
 
 
-def _check_node(node: Any, path: str) -> None:
+_Check = tuple[Callable[[Any, str], list[Any]], Any, str]
+
+
+def _check_node(node: Any, path: str) -> list[_Check]:
+    """Check one node; return the checks of its children, in order."""
     if not isinstance(node, dict):
         _fail(path, "IR node must be an object")
     kind = node.get("kind")
@@ -137,7 +155,7 @@ def _check_node(node: Any, path: str) -> None:
         _fail(path, "IR kind must be a string")
     if kind in ("bool", "float64", "string", "bytes"):
         _check_keys(node, _SCALAR_KEYS, path)
-        return
+        return []
     if kind == "int":
         _check_keys(node, _INT_KEYS, path)
         lo, hi = node.get("min"), node.get("max")
@@ -147,7 +165,7 @@ def _check_node(node: Any, path: str) -> None:
             _fail(path, "int max must be a safe integer in the v0 domain")
         if lo is not None and hi is not None and lo > hi:
             _fail(path, "int min exceeds max")
-        return
+        return []
     if kind == "literal":
         _check_keys(node, _LITERAL_KEYS, path)
         if "value" not in node:
@@ -157,7 +175,7 @@ def _check_node(node: Any, path: str) -> None:
             _fail(path, "literal must be string, boolean, null, or a safe integer")
         if type(v) is str:
             _check_string(v, path, "literal string")
-        return
+        return []
     if kind == "enum":
         _check_keys(node, _ENUM_KEYS, path)
         members = node.get("members")
@@ -175,7 +193,7 @@ def _check_node(node: Any, path: str) -> None:
             if m in seen:
                 _fail(path, f'duplicate enum member "{m}"')
             seen.add(m)
-        return
+        return []
     if kind == "nullable":
         _check_keys(node, _NULLABLE_KEYS, path)
         inner = node.get("inner")
@@ -185,47 +203,47 @@ def _check_node(node: Any, path: str) -> None:
             _fail(path, "nullable(nullable) is invalid")
         if inner.get("kind") == "literal" and inner.get("value") is None:
             _fail(path, "nullable(literal null) has two encodings for null")
-        _check_node(inner, path + "?")
-        return
+        return [(_check_node, inner, path + "?")]
     if kind == "array":
         _check_keys(node, _ARRAY_KEYS, path)
         length: Any = node.get("length")
         if "length" in node and (not _is_safe_int(length) or length < 0):
             _fail(path, "fixed array length must be a non-negative safe integer")
-        _check_node(node.get("element"), path + "[]")
-        return
+        return [(_check_node, node.get("element"), path + "[]")]
     if kind == "struct":
         _check_keys(node, _STRUCT_KEYS, path)
         fields = node.get("fields")
         if not isinstance(fields, (list, tuple)):
             _fail(path, "struct fields must be an array")
-        seen = set()
-        for f in fields:
-            if not isinstance(f, dict):
-                _fail(path, "struct fields must be objects")
-            _check_keys(f, _FIELD_KEYS, path)
-            name = f.get("name")
-            if type(name) is not str or not name:
-                _fail(path, "field names must be non-empty strings")
-            _check_string(name, path, "field name")
-            _check_field_name(name, path)
-            if name in seen:
-                _fail(path, f'duplicate field "{name}"')
-            seen.add(name)
-            field_path = f"{path}.{name}"
-            for flag in ("optional", "nullable"):
-                if flag in f and type(f[flag]) is not bool:
-                    _fail(field_path, f"{flag} flag must be a boolean")
-            field_type = f.get("type")
-            if not isinstance(field_type, dict):
-                _fail(field_path, "field type must be an IR object")
-            if f.get("nullable") and field_type.get("kind") == "nullable":
-                _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
-            if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
-                _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
-            _check_node(field_type, field_path)
-        return
+        check_field = partial(_check_field, set())
+        return [(check_field, f, path) for f in fields]
     _fail(path, f"unknown IR kind {kind}")
+
+
+def _check_field(seen: set[str], f: Any, path: str) -> list[_Check]:
+    if not isinstance(f, dict):
+        _fail(path, "struct fields must be objects")
+    _check_keys(f, _FIELD_KEYS, path)
+    name = f.get("name")
+    if type(name) is not str or not name:
+        _fail(path, "field names must be non-empty strings")
+    _check_string(name, path, "field name")
+    _check_field_name(name, path)
+    if name in seen:
+        _fail(path, f'duplicate field "{name}"')
+    seen.add(name)
+    field_path = f"{path}.{name}"
+    for flag in ("optional", "nullable"):
+        if flag in f and type(f[flag]) is not bool:
+            _fail(field_path, f"{flag} flag must be a boolean")
+    field_type = f.get("type")
+    if not isinstance(field_type, dict):
+        _fail(field_path, "field type must be an IR object")
+    if f.get("nullable") and field_type.get("kind") == "nullable":
+        _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
+    if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
+        _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
+    return [(_check_node, field_type, field_path)]
 
 
 def _esc(s: str) -> str:
@@ -265,37 +283,50 @@ def serialize_node(node: dict[str, Any]) -> str:
     return _node_json(node)
 
 
+class _Text(str):
+    """Canonical text queued between the IR nodes still to render."""
+
+
 def _node_json(node: dict[str, Any]) -> str:
-    kind = node["kind"]
-    if kind in ("bool", "float64", "string", "bytes"):
-        return '{"kind":"' + cast(str, kind) + '"}'
-    if kind == "int":
-        out = '{"kind":"int"'
-        if node.get("min") is not None:
-            out += f',"min":{_int(node["min"])}'
-        if node.get("max") is not None:
-            out += f',"max":{_int(node["max"])}'
-        return out + "}"
-    if kind == "literal":
-        return f'{{"kind":"literal","value":{_literal(node["value"])}}}'
-    if kind == "enum":
-        return '{"kind":"enum","members":[' + ",".join(_esc(m) for m in node["members"]) + "]}"
-    if kind == "nullable":
-        return f'{{"kind":"nullable","inner":{_node_json(node["inner"])}}}'
-    if kind == "array":
-        out = f'{{"kind":"array","element":{_node_json(node["element"])}'
-        if node.get("length") is not None:
-            out += f',"length":{_int(node["length"])}'
-        return out + "}"
-    fields = []
-    for f in node["fields"]:
-        text = f'{{"name":{_esc(f["name"])},"type":{_node_json(f["type"])}'
-        if f.get("optional"):
-            text += ',"optional":true'
-        if f.get("nullable"):
-            text += ',"nullable":true'
-        fields.append(text + "}")
-    return '{"kind":"struct","fields":[' + ",".join(fields) + "]}"
+    out: list[str] = []
+    stack: list[Any] = [node]
+    while stack:
+        item = stack.pop()
+        if type(item) is _Text:
+            out.append(item)
+            continue
+        kind = item["kind"]
+        if kind in ("bool", "float64", "string", "bytes"):
+            out.append('{"kind":"' + cast(str, kind) + '"}')
+        elif kind == "int":
+            text = '{"kind":"int"'
+            if item.get("min") is not None:
+                text += f',"min":{_int(item["min"])}'
+            if item.get("max") is not None:
+                text += f',"max":{_int(item["max"])}'
+            out.append(text + "}")
+        elif kind == "literal":
+            out.append(f'{{"kind":"literal","value":{_literal(item["value"])}}}')
+        elif kind == "enum":
+            out.append('{"kind":"enum","members":[' + ",".join(_esc(m) for m in item["members"]) + "]}")
+        elif kind == "nullable":
+            out.append('{"kind":"nullable","inner":')
+            stack += (_Text("}"), item["inner"])
+        elif kind == "array":
+            out.append('{"kind":"array","element":')
+            length = item.get("length")
+            stack += (_Text("}" if length is None else f',"length":{_int(length)}}}'), item["element"])
+        else:
+            out.append('{"kind":"struct","fields":[')
+            parts: list[Any] = []
+            for f in item["fields"]:
+                if parts:
+                    parts.append(_Text(","))
+                flags = (',"optional":true' if f.get("optional") else "") + (',"nullable":true' if f.get("nullable") else "")
+                parts += (_Text('{"name":' + _esc(f["name"]) + ',"type":'), f["type"], _Text(flags + "}"))
+            parts.append(_Text("]}"))
+            stack.extend(reversed(parts))
+    return "".join(out)
 
 
 MAX_DICT_ENTRIES = 16383

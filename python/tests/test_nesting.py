@@ -148,11 +148,54 @@ def test_cyclic_ir_is_rejected_before_any_walk():
         assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")
 
 
-def test_validate_ir_never_leaks_recursion_errors():
+def frame_sweep():
+    """Caller depths from none to just short of the recursion limit."""
+    return range(0, sys.getrecursionlimit() - 60, 40)
+
+
+@pytest.mark.parametrize("chain", sorted(CHAINS))
+def test_validators_and_serializers_work_at_any_caller_depth(chain):
+    ir = CHAINS[chain](DEEPEST)
+    node, artifact = serialize_node(ir), serialize_artifact(ir, "columnar")
+    for frames in frame_sweep():
+        at_depth(frames, lambda: validate_ir(ir))
+        assert at_depth(frames, lambda: serialize_node(ir)) == node
+        assert at_depth(frames, lambda: serialize_artifact(ir, "columnar")) == artifact
+
+
+def outcome(frames, fn):
+    try:
+        at_depth(frames, fn)
+    except HyperflyError as error:
+        return error.code
+    return "ok"
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_compile_and_train_past_the_stack_are_ir_errors(plan):
     ir = array_chain(DEEPEST)
-    with pytest.raises(HyperflyError) as err:
-        at_depth(sys.getrecursionlimit() - 150, lambda: validate_ir(ir))
-    assert err.value.code == "ir"
+    outcomes = {outcome(frames, lambda: compile_ir(ir, plan=plan)) for frames in frame_sweep()}
+    outcomes |= {outcome(frames, lambda: train(ir, [[]])) for frames in frame_sweep()}
+    assert outcomes == {"ok", "ir"}
+
+
+def struct_rows(levels):
+    ir, value = {"kind": "int"}, 7
+    for _ in range(levels):
+        ir, value = {"kind": "struct", "fields": [{"name": "a", "type": ir}]}, {"a": value}
+    return {"kind": "array", "element": ir}, [value]
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_encode_and_decode_past_the_stack_are_depth_errors(plan):
+    ir, value = struct_rows(160)
+    codec = compile_ir(ir, plan=plan, limits=dataclasses.replace(Limits(), max_depth=1000))
+    body = codec.encode_body(value)
+    assert codec.decode_body(body) == value
+    encoded = {outcome(frames, lambda: codec.encode_body(value)) for frames in frame_sweep()}
+    decoded = {outcome(frames, lambda: codec.decode_body(body)) for frames in frame_sweep()}
+    assert decoded == {"ok", "depth"}
+    assert encoded == ({"ok", "depth"} if plan == "row" else {"ok"})
 
 
 def test_deep_ir_copies_survive_the_compiled_codec():
@@ -333,3 +376,103 @@ def test_recursive_models_are_unsupported():
     with pytest.raises(HyperflyError) as err:
         to_ir(Node)
     assert err.value.code == "unsupported"
+
+
+def recursive_node_json(node):
+    """The recursive canonical serializer the iterative one replaced, kept as a reference."""
+    kind = node["kind"]
+    if kind in ("bool", "float64", "string", "bytes"):
+        return '{"kind":"' + kind + '"}'
+    if kind == "int":
+        out = '{"kind":"int"'
+        if node.get("min") is not None:
+            out += f',"min":{int(node["min"])}'
+        if node.get("max") is not None:
+            out += f',"max":{int(node["max"])}'
+        return out + "}"
+    if kind == "literal":
+        value = node["value"]
+        text = "null" if value is None else "true" if value is True else "false" if value is False else (
+            str(int(value)) if type(value) in (int, float) else json.dumps(value, ensure_ascii=False)
+        )
+        return f'{{"kind":"literal","value":{text}}}'
+    if kind == "enum":
+        return '{"kind":"enum","members":[' + ",".join(json.dumps(m, ensure_ascii=False) for m in node["members"]) + "]}"
+    if kind == "nullable":
+        return f'{{"kind":"nullable","inner":{recursive_node_json(node["inner"])}}}'
+    if kind == "array":
+        out = f'{{"kind":"array","element":{recursive_node_json(node["element"])}'
+        if node.get("length") is not None:
+            out += f',"length":{int(node["length"])}'
+        return out + "}"
+    fields = []
+    for f in node["fields"]:
+        text = f'{{"name":{json.dumps(f["name"], ensure_ascii=False)},"type":{recursive_node_json(f["type"])}'
+        if f.get("optional"):
+            text += ',"optional":true'
+        if f.get("nullable"):
+            text += ',"nullable":true'
+        fields.append(text + "}")
+    return '{"kind":"struct","fields":[' + ",".join(fields) + "]}"
+
+
+def fixture_irs():
+    from conftest import load
+
+    found = []
+    stack = [load(name) for name in ("vectors.json", "columnar.json", "ir.json", "limits.json", "fingerprints.json")]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            if isinstance(item.get("ir"), dict):
+                found.append(item["ir"])
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    valid = []
+    for ir in found:
+        try:
+            validate_ir(ir)
+        except HyperflyError:
+            continue
+        valid.append(ir)
+    return valid
+
+
+MIXED = {"kind": "struct", "fields": [
+    {"name": "i", "type": {"kind": "int", "min": -3.0, "max": 9}, "optional": True},
+    {"name": "l", "type": {"kind": "literal", "value": "q\"\\\u0001é"}},
+    {"name": "n", "type": {"kind": "nullable", "inner": {"kind": "array", "element": {"kind": "bytes"}, "length": 2}}},
+    {"name": "e", "type": {"kind": "enum", "members": ("a", "\u2028")}, "nullable": True, "optional": True},
+    {"name": "z", "type": {"kind": "literal", "value": -0.0}},
+    {"name": "s", "type": {"kind": "struct", "fields": ()}},
+]}
+
+
+def test_iterative_serializer_matches_the_recursive_one():
+    irs = fixture_irs() + [MIXED, array_chain(DEEPEST), struct_chain(DEEPEST), array_chain(DEEPEST - json_depth(MIXED) + 1, MIXED)]
+    assert len(irs) > 100
+    for ir in irs:
+        assert serialize_node(ir) == recursive_node_json(ir)
+
+
+def test_ir_copies_keep_tuples_and_plain_dicts():
+    import copy
+
+    class Node(dict):
+        pass
+
+    shared = Node(kind="enum", members=("a", "b"))
+    ir = {"kind": "struct", "fields": (
+        {"name": "x", "type": shared},
+        {"name": "y", "type": {"kind": "array", "element": shared}},
+    )}
+    codec = compile_ir(ir)
+    for copied in (codec.ir, codec.ir):
+        assert copied == copy.deepcopy(ir)
+        assert type(copied["fields"]) is tuple
+        x, y = copied["fields"]
+        assert type(x["type"]) is dict and type(x["type"]["members"]) is tuple
+        assert x["type"] is y["type"]["element"]
+        assert x["type"] is not shared
+    assert codec.encode_body({"x": "b", "y": ["a"]}) == compile_ir(copy.deepcopy(ir)).encode_body({"x": "b", "y": ["a"]})

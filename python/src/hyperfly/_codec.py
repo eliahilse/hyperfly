@@ -2964,11 +2964,11 @@ class Codec(Generic[T]):
         r = Reader(bytes(data), self._limits)
         try:
             value = _decode_node(r, self._ir, "$", 0, self._ctx)
+            r.expect_end()
+            for items, build in r.deferred:
+                items.extend(build())
         except RecursionError:
             raise DecodeError("depth", "$: nesting exceeds Python's recursion limit") from None
-        r.expect_end()
-        for items, build in r.deferred:
-            items.extend(build())
         return cast(T, value)
 
     def encode(self, value: T) -> bytes:
