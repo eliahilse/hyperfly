@@ -62,13 +62,19 @@ DEFAULT_LIMITS = Limits()
 
 
 class Budget:
-    __slots__ = ("cap", "total", "byte_cap", "bytes")
+    """The item and byte budgets of one body. A column whose decoded bytes are
+    bounded within the byte budget defers its exact total, which is settled only
+    once a later charge needs it."""
+
+    __slots__ = ("cap", "total", "byte_cap", "bytes", "owed", "deferred")
 
     def __init__(self, cap: int, byte_cap: int) -> None:
         self.cap = cap
         self.total = 0
         self.byte_cap = byte_cap
         self.bytes = 0
+        self.owed = 0
+        self.deferred: list[tuple[int, Callable[[], int]]] = []
 
     def charge(self, count: int, path: str, error: type[HyperflyError]) -> None:
         if count > self.cap - self.total:
@@ -76,9 +82,27 @@ class Budget:
         self.total += count
 
     def charge_bytes(self, length: int, path: str, error: type[HyperflyError]) -> None:
-        if length > self.byte_cap - self.bytes:
-            raise error("limit", f"{path}: {self.bytes + length} bytes exceed the byte budget of {self.byte_cap}")
+        if length > self.byte_cap - self.bytes - self.owed:
+            self.settle()
+            if length > self.byte_cap - self.bytes:
+                raise error("limit", f"{path}: {self.bytes + length} bytes exceed the byte budget of {self.byte_cap}")
         self.bytes += length
+
+    def defer_bytes(self, bound: int, exact: Callable[[], int]) -> bool:
+        """Charge a total of at most `bound` bytes, computed by `exact` only when
+        needed, if the bound fits what remains."""
+        if bound > self.byte_cap - self.bytes - self.owed:
+            return False
+        self.deferred.append((bound, exact))
+        self.owed += bound
+        return True
+
+    def settle(self) -> None:
+        """Charge the exact totals deferred so far."""
+        for _bound, exact in self.deferred:
+            self.bytes += exact()
+        self.deferred.clear()
+        self.owed = 0
 
 
 class Reader:
