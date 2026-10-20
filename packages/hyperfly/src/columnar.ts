@@ -653,6 +653,18 @@ export function matchGrammar(value: string, grammar: readonly GrammarToken[]): b
   return offset === value.length ? lanes : null;
 }
 
+const renderedCache = new WeakMap<object, number>();
+
+/** UTF-8 length of every value a frozen grammar renders: numeric tokens render exactly len ASCII digits. */
+function renderedLength(grammar: readonly GrammarToken[]): number {
+  let n = renderedCache.get(grammar);
+  if (n === undefined) {
+    n = grammar.reduce((sum, token) => sum + ("lit" in token ? utf8Length(token.lit) : token.num.len), 0);
+    renderedCache.set(grammar, n);
+  }
+  return n;
+}
+
 function renderGrammar(grammar: readonly GrammarToken[], lanes: readonly number[]): string {
   let out = "";
   let lane = 0;
@@ -975,8 +987,7 @@ function decodeStringColumn(
         badRange = range.error;
       }
     }
-    // every numeric token renders exactly len ASCII digits, so all matched rows share one length
-    const rendered = grammar.reduce((n, token) => n + ("lit" in token ? utf8Length(token.lit) : token.num.len), 0);
+    const rendered = renderedLength(grammar);
     const resolve = (values: string[] | null): void => {
       let matched = 0;
       for (let i = 0; i < count; i++) {
