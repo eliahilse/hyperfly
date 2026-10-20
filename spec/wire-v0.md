@@ -163,10 +163,11 @@ not define; such IR or profile is invalid.
 depth 1; every object or array value is one deeper than its container.
 This depth is a function of the IR and profile alone, independent of their
 input spelling. An IR or profile whose artifact would exceed this bound is
-invalid IR and MUST be rejected with `ir` before any recursion that could
-exhaust the host stack. Every implementation MUST accept every otherwise
-valid IR and profile within the bound regardless of host stack size. This
-bound is independent of `maxDepth` (§6).
+invalid IR and MUST be rejected with `ir`. Acceptance within the bound
+MUST NOT depend on a host-language recursion limit, and an implementation
+MUST reject IR or a profile past the bound without unbounded recursion.
+Implementations MUST document any host stack sizing they require. This bound
+is independent of `maxDepth` (§6).
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
@@ -482,16 +483,18 @@ The JSON files under `spec/vectors/` are the 1.x compatibility suite:
 - `columnar.json` — payloads, profiles and artifacts (plan-columnar-v5).
 - `fingerprints.json` — IR → canonical text → fingerprint (§5,
   plan-columnar-v5 §6.5).
+- `http.json` — JSON body representation, response decoding and request bounds
+  (negotiation-v1 §§2, 4).
 - `ir.json` — invalid IR and valid near misses (§4, plan-columnar-v5 §6.2).
 - `limits.json` — limits at and past their bounds, encode and decode (§6).
 - `vectors.json` — row encode/decode pairs and invalid inputs (§3–§4).
 
 Every 1.x implementation MUST pass every applicable row: each row that pins
 Frozen behaviour, and each row for an Addition the implementation
-implements. `accept.json` binds only implementations that provide HTTP
-negotiation. A row whose input the implementation's value model cannot
-represent (a lone surrogate in a language whose strings are Unicode scalar
-values) does not apply to it. A row that decodes a deflate-packed column
-needs the inflate capability; an implementation without it reports
+implements. `accept.json` and `http.json` bind only implementations that
+provide HTTP negotiation. A row whose input the implementation's value model
+cannot represent (a lone surrogate in a language whose strings are Unicode
+scalar values) does not apply to it. A row that decodes a deflate-packed
+column needs the inflate capability; an implementation without it reports
 `unsupported` for that row after the §6 checks that precede it. Within 1.x,
 rows may be added, never changed or removed.
