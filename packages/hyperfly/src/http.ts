@@ -434,7 +434,7 @@ export function readBody<T>(
 
 function bodyLimit(maxBytes: number): number {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
-    throw new RangeError("maxBytes must be a non-negative safe integer");
+    throw new HyperflyError("options", "maxBytes: must be a non-negative safe integer");
   }
   return maxBytes;
 }

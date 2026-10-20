@@ -584,7 +584,9 @@ describe("request body limits", () => {
         pull() { pulled = true; },
       }, { highWaterMark: 0 });
       const request = new Request(url, { method: "POST", body });
-      expect(() => readBody(request, registry, { maxBytes })).toThrow(RangeError);
+      const run = () => readBody(request, registry, { maxBytes });
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options" }));
       expect(pulled).toBe(false);
       expect(request.bodyUsed).toBe(false);
     },
