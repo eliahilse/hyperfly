@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from hyperfly import Codec, EncodeError, HyperflyError, Limits, compile_ir
+from hyperfly.pydantic import ModelCodec
 from hyperfly.pydantic import compile as compile_model
 
 
@@ -224,7 +225,11 @@ def test_codec_constructor_defaults_and_keyword_only_options():
         Codec(BOOL_IR, "row")
 
 
-@pytest.mark.parametrize("factory", [Codec, compile_ir, lambda ir, **options: compile_model(Flag, **options)])
+@pytest.mark.parametrize("factory", [
+    Codec, compile_ir,
+    lambda ir, **options: compile_model(Flag, **options),
+    lambda ir, **options: ModelCodec(Flag, **options),
+])
 def test_all_codec_constructors_read_original_options_once(factory):
     reads = []
 

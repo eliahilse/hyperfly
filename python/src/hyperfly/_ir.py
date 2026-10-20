@@ -366,7 +366,7 @@ def _validate_profile(ir: dict[str, Any], profile: Any) -> None:
     def record(value: Any, path: str) -> dict[str, Any]:
         if type(value) is not dict:
             fail(f"{path} must be an object")
-        return cast(dict[str, Any], value)
+        return cast("dict[str, Any]", value)
 
     def check_keys(
         value: dict[str, Any], path: str, allowed: set[str], required: set[str]

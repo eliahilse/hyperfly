@@ -7,7 +7,7 @@ import types
 import typing
 from typing import Any, Literal, NoReturn, cast
 
-from ._codec import Codec, PackHooks, checked_options, compile_ir
+from ._codec import Codec, PackHooks, checked_options
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError, Limits, UnsupportedSchemaError
 
 try:
@@ -198,13 +198,22 @@ def _is_root_model(model: type) -> bool:
 class ModelCodec(Codec[Any]):
     """A model codec returning BaseModel instances only when validate is True.
 
+    Construct directly or with ``compile``; both check options before the model.
     With validation disabled, decoding returns plain dictionaries, so the value
-    type is Any. Validation failures raise code ``validation``.
+    type is Any. Invalid inputs raise ``options``, ``unsupported``, or ``ir``;
+    value validation failures raise code ``validation``.
     """
 
-    def __init__(self, codec: Codec[Any], model: type[BaseModel], validate: bool) -> None:
-        """Reuse a compiled codec with a model and validation policy."""
-        self.__dict__.update(codec.__dict__)
+    def __init__(
+        self, model: type[BaseModel], *, plan: str = "row", validate: bool = False,
+        limits: Limits | None = None, pack: PackHooks | Literal[False] | None = None,
+        profile: dict[str, Any] | None = None,
+    ) -> None:
+        """Check options and compile the model schema with optional value validation."""
+        plan, limits, pack = checked_options(plan, limits, pack)
+        if validate is not True and validate is not False:
+            raise HyperflyError("options", "validate: must be a boolean")
+        super().__init__(to_ir(model), plan=plan, limits=limits, pack=pack, profile=profile)
         self._model = model
         self._validate = validate
 
@@ -268,11 +277,7 @@ def compile(  # noqa: A001 - mirrors the documented API
 
     Raise codes ``options``, ``unsupported``, or ``ir`` for invalid inputs.
     """
-    plan, limits, pack = checked_options(plan, limits, pack)
-    if validate is not True and validate is not False:
-        raise HyperflyError("options", "validate: must be a boolean")
-    codec = compile_ir(to_ir(model), plan=plan, limits=limits, pack=pack, profile=profile)
-    return ModelCodec(codec, model, validate)
+    return ModelCodec(model, plan=plan, validate=validate, limits=limits, pack=pack, profile=profile)
 
 
 __all__ = ["ModelCodec", "compile", "to_ir"]

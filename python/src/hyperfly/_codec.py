@@ -798,7 +798,7 @@ def _encode_int_column(out: bytearray, node: dict[str, Any], values: list[int]) 
         out.append(delta_width)
         _pack_bits(out, [d - delta_base for d in diffs], delta_width)
         return
-    low_width, high_width, exceptions, lows, highs = cast(tuple[int, int, list[bool], list[int], list[int]], pfor)
+    low_width, high_width, exceptions, lows, highs = cast("tuple[int, int, list[bool], list[int], list[int]]", pfor)
     out.append(0x04)
     write_uleb(out, zigzag(for_base))
     out.append(low_width)
@@ -1077,7 +1077,7 @@ def _encode_string_column(
         return
     if mode == 0x01:
         out.append(dict_width)
-        dict_codes = cast(list[int], codes)
+        dict_codes = cast("list[int]", codes)
         _pack_bits(out, dict_codes, dict_width)
         _write_escaped(out, encoded, [code == 0 for code in dict_codes])
         return
@@ -1089,15 +1089,15 @@ def _encode_string_column(
         out += packed_bytes
         return
     if mode == 0x03:
-        escaped = cast(list[bool], grammar_escaped)
+        escaped = cast("list[bool]", grammar_escaped)
         escape_count = sum(escaped)
         _write_escape_header(out, escaped, escape_count)
-        numeric = [token for token in cast(list[dict[str, Any]], grammar) if "num" in token]
-        for token, lane in zip(numeric, cast(list[list[int]], grammar_lanes)):
+        numeric = [token for token in cast("list[dict[str, Any]]", grammar) if "num" in token]
+        for token, lane in zip(numeric, cast("list[list[int]]", grammar_lanes)):
             _encode_int_column(out, {"min": 0, "max": _grammar_limit(token) - 1}, lane)
         _write_escaped(out, encoded, escaped)
         return
-    escaped = cast(list[bool], derived_escaped)
+    escaped = cast("list[bool]", derived_escaped)
     escape_count = sum(escaped)
     _write_escape_header(out, escaped, escape_count)
     _write_escaped(out, encoded, escaped)
@@ -2239,7 +2239,7 @@ def _derived_column(
         if isinstance(source, int) or ordinal in ctx.uniform_derived:
             return quick_total(False)
         assert source_codes is not None
-        return cast(int | None, source_codes(derivation["source"], charge=(sizes, remaining, derived_lengths)))
+        return cast("int | None", source_codes(derivation["source"], charge=(sizes, remaining, derived_lengths)))
 
     bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
     runs = shared_total if shared else None

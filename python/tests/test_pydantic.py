@@ -71,7 +71,8 @@ def test_cross_language_fingerprint_for_shared_schema():
 
 
 @pytest.mark.parametrize("validate", [False, True])
-def test_profiled_columnar_roundtrip(validate):
+@pytest.mark.parametrize("factory", [compile, ModelCodec])
+def test_profiled_columnar_roundtrip(validate, factory):
     class Row(BaseModel):
         status: str
 
@@ -79,7 +80,7 @@ def test_profiled_columnar_roundtrip(validate):
         rows: list[Row]
 
     profile = {"version": 1, "shared": {"columns": [{"leaf": 0, "dict": ["online", "offline"]}]}}
-    codec = compile(Response, plan="columnar", profile=profile, pack=False, validate=validate)
+    codec = factory(Response, plan="columnar", profile=profile, pack=False, validate=validate)
     reference = compile_ir(to_ir(Response), plan="columnar", profile=profile, pack=False)
     assert codec.plan == "columnar"
     assert codec.profile == profile
@@ -116,6 +117,39 @@ class _Positive(BaseModel):
         if value < 0:
             raise ValueError("negative")
         return value
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+@pytest.mark.parametrize("validate", [False, True])
+def test_model_codec_constructor_matches_compile(plan, validate):
+    direct = ModelCodec(_Positive, plan=plan, validate=validate, pack=False)
+    compiled = compile(_Positive, plan=plan, validate=validate, pack=False)
+    assert direct.fingerprint == compiled.fingerprint
+    assert direct.artifact == compiled.artifact
+    assert direct.model is compiled.model is _Positive
+    assert direct.validate is compiled.validate is validate
+    expected = _Positive(n=1) if validate else {"n": 1}
+    for encode, decode in (("encode", "decode"), ("encode_body", "decode_body")):
+        data = getattr(direct, encode)({"n": 1})
+        assert data == getattr(compiled, encode)({"n": 1})
+        assert getattr(direct, decode)(data) == getattr(compiled, decode)(data) == expected
+    with pytest.raises(TypeError):
+        ModelCodec(_Positive, plan)
+
+
+@pytest.mark.parametrize("factory", [compile, ModelCodec])
+@pytest.mark.parametrize("options,message", [
+    ({"plan": "invalid", "validate": None}, "plan: must be row or columnar"),
+    ({"pack": True}, "pack: must be False or a mapping"),
+    ({"validate": None}, "validate: must be a boolean"),
+])
+def test_model_options_are_checked_before_unsupported_schema(factory, options, message):
+    class Unsupported(BaseModel):
+        mapping: dict[str, int]
+
+    with pytest.raises(HyperflyError) as err:
+        factory(Unsupported, **options)
+    assert (err.value.code, str(err.value)) == ("options", message)
 
 
 @pytest.mark.parametrize("method", ["encode", "encode_body"])

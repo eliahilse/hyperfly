@@ -38,10 +38,8 @@ Issues = "https://github.com/eliahilse/hyperfly/issues"
 packages = ["src/hyperfly"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["tests", "package.json", ".gitignore"]
+exclude = ["tests", "package.json"]
 
 [tool.mypy]
 strict = true
 files = ["src/hyperfly"]
-
-[tool.hatch.build.targets.sdist.hooks.custom]

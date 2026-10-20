@@ -83,12 +83,12 @@ class Negotiation:
 def _trim(text: str, lo: int, hi: int) -> tuple[int, int]:
     lo = _skip_ows(text, lo, hi)
     if lo < hi and text[hi - 1] in _OWS:
-        hi = cast(re.Match[str], _TRAILING_OWS.search(text, lo, hi)).start()
+        hi = cast("re.Match[str]", _TRAILING_OWS.search(text, lo, hi)).start()
     return lo, hi
 
 
 def _skip_ows(text: str, lo: int, hi: int) -> int:
-    return cast(re.Match[str], _LEADING_OWS.match(text, lo, hi)).end()
+    return cast("re.Match[str]", _LEADING_OWS.match(text, lo, hi)).end()
 
 
 def _media_rank(text: str, lo: int, hi: int) -> int:

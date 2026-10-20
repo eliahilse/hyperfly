@@ -27,6 +27,7 @@ value: bool = codec.decode(memoryview(encoded))
 body_value: bool = codec.decode_body(bytearray(codec.encode_body(value)))
 plain: Codec[Any] = compile_ir(ir, pack=False)
 model_codec: ModelCodec = compile(Flag, validate=True, pack=hooks)
+direct: ModelCodec = ModelCodec(Flag, validate=True, pack=hooks)
 base: Codec[Any] = model_codec
 registry = CodecRegistry([codec, plain, model_codec])
 registry.add(model_codec)
