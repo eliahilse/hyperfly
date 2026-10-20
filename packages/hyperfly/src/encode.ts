@@ -1,7 +1,7 @@
 import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
-import type { IRNode } from "./ir.js";
+import { hasPayload, type IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -29,6 +29,9 @@ export interface EncodeCtx {
   maxItems: number;
   maxByteLength: number;
   maxAmplification: number;
+  maxTotalItems: number;
+  /** array counts charged so far in this body, columnar arrays once with their row count */
+  items: number;
   columnar: boolean;
   deflate?: (data: Uint8Array) => Uint8Array;
   /** packing is only canonical when the same codec can also inflate what it wrote */
@@ -37,15 +40,34 @@ export interface EncodeCtx {
 }
 
 /**
- * Mirror of the decoder's wire-v0 §6 amplification policy, using the array's own
- * payload as a lower bound of what the decoder will see remaining. The encoder is
- * therefore the stricter side: what it accepts, its decoder accepts. A route that
- * really ships this many near-free rows raises maxAmplification on both peers.
+ * Wire-v0 §6 from the encoder's side: the array's own bytes after its count are
+ * a lower bound of what the decoder will see remaining, so the encoder is the
+ * stricter side and what it accepts, its decoder accepts. The one-bit floor
+ * the decoder holds a row-encoded array of non-zero-bit elements to is
+ * enforced here too, for the rare element (a fixed columnar array of
+ * single-member enums) that is not zero-bit yet packs to nothing.
  */
-export function checkAmplification(count: number, payloadBytes: number, ctx: EncodeCtx, path: string): void {
+export function checkAmplification(count: number, payloadBytes: number, floor: boolean, ctx: EncodeCtx, path: string): void {
   if (count > (payloadBytes + 1) * ctx.maxAmplification) {
     fail("limit", path, `${count} rows in ${payloadBytes} payload byte(s) exceeds the amplification limit`);
   }
+  if (floor && count > payloadBytes * 8) {
+    fail("limit", path, `${count} items in ${payloadBytes} payload byte(s) fall below the one-bit floor`);
+  }
+}
+
+/** Charge an array's count on entry; a sum past maxTotalItems can be refused before the body is complete. */
+export function chargeItems(count: number, ctx: EncodeCtx, path: string): void {
+  ctx.items += count;
+  if (ctx.items > ctx.maxTotalItems) {
+    fail("limit", path, `${ctx.items} items in this body exceed maxTotalItems ${ctx.maxTotalItems}`);
+  }
+}
+
+/** The item budget against the final body length, once the body is complete. */
+export function checkItemBudget(ctx: EncodeCtx, bodyLength: number): void {
+  const cap = Math.min(ctx.maxTotalItems, ctx.maxAmplification * (bodyLength + 1));
+  if (ctx.items > cap) fail("limit", "$", `${ctx.items} items in a ${bodyLength}-byte body exceed the item budget of ${cap}`);
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
@@ -152,11 +174,12 @@ export function encodeNode(
       } else {
         writeUleb(w, BigInt(value.length));
       }
+      chargeItems(value.length, ctx, path);
       const payloadStart = w.size;
       for (let i = 0; i < value.length; i++) {
         encodeNode(w, node.element, value[i], `${path}[${i}]`, depth + 1, ctx, column);
       }
-      checkAmplification(value.length, w.size - payloadStart, ctx, path);
+      checkAmplification(value.length, w.size - payloadStart, hasPayload(node.element), ctx, path);
       return;
     }
     case "struct": {

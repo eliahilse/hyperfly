@@ -1,5 +1,5 @@
-import { boundAmplification, decodeNode, readBitmap, type Inflate } from "./decode.js";
-import { checkAmplification, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
+import { decodeNode, enterArray, type Inflate } from "./decode.js";
+import { checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import type { IRField, IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
@@ -93,31 +93,72 @@ function packBits(w: Writer, values: readonly bigint[], width: number): void {
   if (bits > 0) w.u8(Number(acc & 0xffn));
 }
 
-function unpackBits(r: Reader, count: number, width: number, path: string): bigint[] {
+/**
+ * Spec §3.1 reader: consumes the packed bytes and checks the padding up front,
+ * then hands values out one at a time, so a column is never expanded into an
+ * intermediate array of bigints.
+ */
+function unpackBits(r: Reader, count: number, width: number, path: string): () => bigint {
   if (width > MAX_WIDTH) {
     throw new DecodeError("marker", `${path}: bit width ${width} exceeds ${MAX_WIDTH}`);
   }
-  if (width === 0) return new Array<bigint>(count).fill(0n);
+  if (width === 0) return () => 0n;
   const bytes = r.bytes(packedBytes(count, width));
+  // leftover bits are padding and must be zero, or one value would have two encodings
+  const used = (count * width) % 8;
+  if (used !== 0 && bytes[bytes.length - 1]! >> used !== 0) {
+    throw new DecodeError("bitmap", `${path}: nonzero bit-packing padding`);
+  }
   const mask = (1n << BigInt(width)) - 1n;
-  const out: bigint[] = new Array<bigint>(count);
+  const shift = BigInt(width);
   let acc = 0n;
   let bits = 0;
   let index = 0;
-  for (let i = 0; i < count; i++) {
+  return () => {
     while (bits < width) {
       acc |= BigInt(bytes[index++] ?? 0) << BigInt(bits);
       bits += 8;
     }
-    out[i] = acc & mask;
-    acc >>= BigInt(width);
+    const value = acc & mask;
+    acc >>= shift;
     bits -= width;
+    return value;
+  };
+}
+
+/** A bitmap of `count` flags kept as its wire bytes, padding checked (wire-v0 §3.5). */
+function readPackedBitmap(r: Reader, count: number, path: string): Uint8Array {
+  const bytes = r.bytes(Math.ceil(count / 8));
+  const used = count % 8;
+  if (used !== 0 && bytes[bytes.length - 1]! >> used !== 0) {
+    throw new DecodeError("bitmap", `${path}: nonzero bitmap padding`);
   }
-  // leftover bits are padding and must be zero, or one value would have two encodings
-  if (acc !== 0n) {
-    throw new DecodeError("bitmap", `${path}: nonzero bit-packing padding`);
-  }
-  return out;
+  return bytes;
+}
+
+function bitAt(bytes: Uint8Array, i: number): boolean {
+  return (bytes[i >> 3]! & (1 << (i & 7))) !== 0;
+}
+
+function popcount8(byte: number): number {
+  const b = byte - ((byte >> 1) & 0x55);
+  const c = (b & 0x33) + ((b >> 2) & 0x33);
+  return (c + (c >> 4)) & 0x0f;
+}
+
+function popcount(bytes: Uint8Array): number {
+  let n = 0;
+  for (const byte of bytes) n += popcount8(byte);
+  return n;
+}
+
+/** For each set flag, its index among the set flags; for each clear one, among the clear ones. */
+function rankBits(bytes: Uint8Array, count: number): Int32Array {
+  const rank = new Int32Array(count);
+  let set = 0;
+  let clear = 0;
+  for (let i = 0; i < count; i++) rank[i] = bitAt(bytes, i) ? set++ : clear++;
+  return rank;
 }
 
 export interface IntBounds {
@@ -258,18 +299,22 @@ export function intColumnEncodedLength(values: readonly bigint[], bounds: IntBou
   return writer.finish().length;
 }
 
-function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: string): bigint[] {
+/** Participating values of one column by participant index, held typed or packed until rows materialize. */
+type Column<T = unknown> = (j: number) => T;
+
+const noValues: Column<never> = () => undefined as never;
+
+function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: string): Column<number> {
   const mode = r.u8();
   if (mode > 4) throw new DecodeError("marker", `${path}: invalid int column mode 0x${mode.toString(16)}`);
-  const out: bigint[] = new Array<bigint>(count);
   if (count === 0) {
     if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
-    return out;
+    return noValues;
   }
 
   const fromForm = (form: bigint): bigint => bounds.min !== undefined ? form + bounds.min : unzigzag(form);
 
-  const validate = (v: bigint, i: number): bigint => {
+  const check = (v: bigint, i: number): number => {
     if (v < BigInt(INT_MIN) || v > BigInt(INT_MAX)) {
       throw new DecodeError("range", `${path}[${i}]: decoded integer outside the v0 domain`);
     }
@@ -279,20 +324,38 @@ function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: stri
     if (bounds.max !== undefined && v > bounds.max) {
       throw new DecodeError("range", `${path}[${i}]: above declared max`);
     }
-    return v;
+    return Number(v);
   };
 
-  if (mode === 0x00) {
-    for (let i = 0; i < count; i++) out[i] = validate(fromForm(readUleb(r)), i);
-    return out;
+  if (mode === 0x00 || mode === 0x01) {
+    let prev = 0n;
+    const next = (i: number): number => {
+      const form = readUleb(r);
+      prev = i === 0 || mode === 0x00 ? fromForm(form) : prev + unzigzag(form);
+      return check(prev, i);
+    };
+    // every value, and in delta mode every difference, costs at least one byte: a body
+    // too short for the column fails on its first bad value or its end, before allocating
+    if (r.remaining() < count) {
+      for (let i = 0; i < count; i++) next(i);
+    }
+    r.need(count);
+    const out = new Float64Array(count);
+    for (let i = 0; i < count; i++) out[i] = next(i);
+    return (j) => out[j]!;
   }
 
   if (mode === 0x02) {
     const base = unzigzag(readUleb(r));
     const width = r.u8();
-    const packed = unpackBits(r, count, width, path);
-    for (let i = 0; i < count; i++) out[i] = validate(base + packed[i]!, i);
-    return out;
+    const next = unpackBits(r, count, width, path);
+    if (width === 0) {
+      const value = check(base, 0);
+      return () => value;
+    }
+    const out = new Float64Array(count);
+    for (let i = 0; i < count; i++) out[i] = check(base + next(), i);
+    return (j) => out[j]!;
   }
 
   if (mode === 0x03) {
@@ -300,52 +363,60 @@ function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: stri
     const first = fromForm(readUleb(r));
     const base = unzigzag(readUleb(r));
     const width = r.u8();
-    const packed = unpackBits(r, Math.max(0, count - 1), width, path);
-    let running = first;
-    out[0] = validate(running, 0);
-    for (let i = 1; i < count; i++) {
-      running = running + base + packed[i - 1]!;
-      out[i] = validate(running, i);
-    }
-    return out;
-  }
-
-  if (mode === 0x04) {
-    const base = unzigzag(readUleb(r));
-    const lowWidth = r.u8();
-    const highWidth = r.u8();
-    if (lowWidth > 55) {
-      throw new DecodeError("marker", `${path}: patched frame low width ${lowWidth} exceeds 55`);
-    }
-    if (highWidth < 1 || lowWidth + highWidth > MAX_WIDTH) {
-      throw new DecodeError("marker", `${path}: invalid patched frame widths L=${lowWidth}, H=${highWidth}`);
-    }
-    const exceptions = readBitmap(r, count, path);
-    const lows = unpackBits(r, count, lowWidth, path);
-    const exceptionCount = exceptions.reduce((n, exception) => n + (exception ? 1 : 0), 0);
-    const highs = unpackBits(r, exceptionCount, highWidth, path);
-    let highIndex = 0;
-    for (let i = 0; i < count; i++) {
-      let high = 0n;
-      if (exceptions[i]) {
-        high = highs[highIndex++]!;
-        if (high === 0n) {
-          throw new DecodeError("bitmap", `${path}[${i}]: patched frame exception has a zero high part`);
-        }
+    const next = unpackBits(r, count - 1, width, path);
+    if (width === 0) {
+      // a constant step: the values are monotone, so the ends bound every one between
+      const head = check(first, 0);
+      const last = first + base * BigInt(count - 1);
+      try {
+        check(last, count - 1);
+      } catch {
+        let running = first;
+        for (let i = 1; i < count; i++) check((running += base), i);
       }
-      const value = base + lows[i]! + (high << BigInt(lowWidth));
-      out[i] = validate(value, i);
+      const step = Number(base);
+      const exact = Number.isSafeInteger(step);
+      return (j) => {
+        const offset = j * step;
+        return exact && Number.isSafeInteger(offset) ? head + offset : Number(first + base * BigInt(j));
+      };
     }
-    return out;
+    const out = new Float64Array(count);
+    let running = first;
+    out[0] = check(running, 0);
+    for (let i = 1; i < count; i++) {
+      running = running + base + next();
+      out[i] = check(running, i);
+    }
+    return (j) => out[j]!;
   }
 
-  let prev = fromForm(readUleb(r));
-  out[0] = validate(prev, 0);
-  for (let i = 1; i < count; i++) {
-    prev = prev + unzigzag(readUleb(r));
-    out[i] = validate(prev, i);
+  const base = unzigzag(readUleb(r));
+  const lowWidth = r.u8();
+  const highWidth = r.u8();
+  if (lowWidth > 55) {
+    throw new DecodeError("marker", `${path}: patched frame low width ${lowWidth} exceeds 55`);
   }
-  return out;
+  if (highWidth < 1 || lowWidth + highWidth > MAX_WIDTH) {
+    throw new DecodeError("marker", `${path}: invalid patched frame widths L=${lowWidth}, H=${highWidth}`);
+  }
+  const exceptions = readPackedBitmap(r, count, path);
+  const lows = unpackBits(r, count, lowWidth, path);
+  const highs = unpackBits(r, popcount(exceptions), highWidth, path);
+  const shift = BigInt(lowWidth);
+  const out = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    let high = 0n;
+    const low = lows();
+    if (bitAt(exceptions, i)) {
+      high = highs();
+      if (high === 0n) {
+        throw new DecodeError("bitmap", `${path}[${i}]: patched frame exception has a zero high part`);
+      }
+    }
+    out[i] = check(base + low + (high << shift), i);
+  }
+  return (j) => out[j]!;
 }
 
 function sigBytes(x: bigint): number {
@@ -449,13 +520,12 @@ function encodeFloatColumn(w: Writer, values: number[], path: string): void {
   }
 }
 
-function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
+function decodeFloatColumn(r: Reader, count: number, path: string): Column<number> {
   const mode = r.u8();
   if (mode > 3) throw new DecodeError("marker", `${path}: invalid float column mode 0x${mode.toString(16)}`);
-  const out: number[] = new Array<number>(count);
   if (count === 0) {
     if (mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
-    return out;
+    return noValues;
   }
 
   if (mode >= 2) {
@@ -468,17 +538,21 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
       }
       return Number(m) / pow;
     };
-    if (mode === 3) {
-      for (let i = 0; i < count; i++) out[i] = mantissa(unzigzag(readUleb(r)), i);
-      return out;
+    let prev = 0n;
+    const next = (i: number): number => {
+      const form = unzigzag(readUleb(r));
+      prev = i === 0 || mode === 3 ? form : prev + form;
+      return mantissa(prev, i);
+    };
+    // every mantissa, and in delta mode every difference, costs at least one byte: a body
+    // too short for the column fails on its first bad value or its end, before allocating
+    if (r.remaining() < count) {
+      for (let i = 0; i < count; i++) next(i);
     }
-    let prev = unzigzag(readUleb(r));
-    out[0] = mantissa(prev, 0);
-    for (let i = 1; i < count; i++) {
-      prev = prev + unzigzag(readUleb(r));
-      out[i] = mantissa(prev, i);
-    }
-    return out;
+    r.need(count);
+    const out = new Float64Array(count);
+    for (let i = 0; i < count; i++) out[i] = next(i);
+    return (j) => out[j]!;
   }
 
   const validate = (bits: bigint, i: number): number => {
@@ -489,12 +563,21 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
   };
 
   if (mode === 0) {
+    // a body too short for the column fails on its first bad value or its end, before allocating
+    if (r.remaining() < 8 * count) {
+      for (let i = 0; i < count; i++) validate(r.u64le(), i);
+    }
+    r.need(8 * count);
+    const out = new Float64Array(count);
     for (let i = 0; i < count; i++) out[i] = validate(r.u64le(), i);
-    return out;
+    return (j) => out[j]!;
   }
-  let prev = r.u64le();
-  out[0] = validate(prev, 0);
-  for (let i = 1; i < count; i++) {
+  let prev = 0n;
+  const next = (i: number): number => {
+    if (i === 0) {
+      prev = r.u64le();
+      return validate(prev, 0);
+    }
     const len = r.u8();
     if (len > 8) throw new DecodeError("marker", `${path}[${i}]: xor length ${len} exceeds 8`);
     let x = 0n;
@@ -503,9 +586,17 @@ function decodeFloatColumn(r: Reader, count: number, path: string): number[] {
       throw new DecodeError("float", `${path}[${i}]: non-minimal xor encoding`);
     }
     prev ^= x;
-    out[i] = validate(prev, i);
+    return validate(prev, i);
+  };
+  // the first value takes 8 bytes, every later one at least its length byte: a body too
+  // short for the column fails on its first bad value or its end, before allocating
+  if (r.remaining() < 8 + count - 1) {
+    for (let i = 0; i < count; i++) next(i);
   }
-  return out;
+  r.need(8 + count - 1);
+  const out = new Float64Array(count);
+  for (let i = 0; i < count; i++) out[i] = next(i);
+  return (j) => out[j]!;
 }
 
 const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -547,7 +638,7 @@ export function matchGrammar(value: string, grammar: readonly GrammarToken[]): b
   return offset === value.length ? lanes : null;
 }
 
-function renderGrammar(grammar: readonly GrammarToken[], lanes: readonly bigint[]): string {
+function renderGrammar(grammar: readonly GrammarToken[], lanes: readonly number[]): string {
   let out = "";
   let lane = 0;
   for (const token of grammar) {
@@ -717,21 +808,37 @@ function encodeStringColumn(
   writeEscaped(w, bytes, derivedEscaped!);
 }
 
+/** Which rows of an eligible array a leaf participates in, as its wire bitmaps. */
+interface Participation {
+  presence: Uint8Array | null;
+  nulls: Uint8Array | null;
+  count: number;
+}
+
+function participates(part: Participation, row: number): boolean {
+  return (part.presence === null || bitAt(part.presence, row)) && (part.nulls === null || !bitAt(part.nulls, row));
+}
+
+interface DecodedLeaf {
+  part: Participation;
+  values: Column;
+}
+
 function decodeStringColumn(
   r: Reader,
-  slots: readonly number[],
-  sourceValue: SourceValue,
+  part: Participation,
+  rows: number,
+  sourceOf: (ordinal: number) => DecodedLeaf | undefined,
   path: string,
   inflate: Inflate | undefined,
   profile: ProfileIndex,
   ordinal: number,
-): string[] {
-  const count = slots.length;
+): Column<string> {
+  const count = part.count;
   const mode = r.u8();
   if (mode > 4) throw new DecodeError("marker", `${path}: invalid string column flags 0x${mode.toString(16)}`);
   if (count === 0 && mode !== 0) throw new DecodeError("marker", `${path}: empty column must use mode 0x00`);
-  const out: string[] = new Array<string>(count);
-  if (count === 0) return out;
+  if (count === 0) return noValues;
 
   const decodeSlice = (bytes: Uint8Array, i: number): string => {
     try {
@@ -753,25 +860,44 @@ function decodeStringColumn(
     }
     return value;
   };
-  const readEscapes = (): { escaped: boolean[]; count: number } => {
+  interface Escapes {
+    escaped: Column<boolean>;
+    bits: Uint8Array | null;
+    count: number;
+    values: string[];
+  }
+  const readEscapes = (): Escapes => {
     const raw = readUleb(r);
     if (raw > BigInt(count)) {
       throw new DecodeError("range", `${path}: escape count ${raw} exceeds participating row count ${count}`);
     }
     const escapeCount = Number(raw);
-    if (escapeCount === 0) return { escaped: new Array<boolean>(count).fill(false), count: 0 };
-    if (escapeCount === count) return { escaped: new Array<boolean>(count).fill(true), count };
-    const escaped = readBitmap(r, count, path);
-    const popcount = escaped.reduce((n, value) => n + (value ? 1 : 0), 0);
-    if (popcount !== escapeCount) {
-      throw new DecodeError("bitmap", `${path}: escape bitmap popcount ${popcount} does not equal ${escapeCount}`);
+    let bits: Uint8Array | null = null;
+    if (escapeCount > 0 && escapeCount < count) {
+      bits = readPackedBitmap(r, count, path);
+      const set = popcount(bits);
+      if (set !== escapeCount) {
+        throw new DecodeError("bitmap", `${path}: escape bitmap popcount ${set} does not equal ${escapeCount}`);
+      }
     }
-    return { escaped, count: escapeCount };
+    return {
+      escaped: bits ? (j) => bitAt(bits, j) : escapeCount === 0 ? () => false : () => true,
+      bits,
+      count: escapeCount,
+      values: [],
+    };
   };
 
   if (mode === 0x00) {
+    // each literal costs at least its length byte: a body too short for the column fails
+    // on its first bad row or its end, before allocating
+    if (r.remaining() < count) {
+      for (let i = 0; i < count; i++) readLiteral(i);
+    }
+    r.need(count);
+    const out = new Array<string>(count);
     for (let i = 0; i < count; i++) out[i] = readLiteral(i);
-    return out;
+    return (j) => out[j]!;
   }
 
   if (mode === 0x01) {
@@ -781,19 +907,33 @@ function decodeStringColumn(
     }
     const width = r.u8();
     if (width > 14) throw new DecodeError("marker", `${path}: dictionary width ${width} exceeds 14`);
-    const codes = unpackBits(r, count, width, path);
-    for (let i = 0; i < count; i++) {
-      const code = codes[i]!;
-      if (code === 0n) {
-        out[i] = readLiteral(i);
-      } else {
-        if (code > BigInt(dict.length)) {
-          throw new DecodeError("range", `${path}[${i}]: dictionary code ${code} out of range`);
-        }
-        out[i] = checkProfileLength(dict[Number(code) - 1]!, i);
+    const next = unpackBits(r, count, width, path);
+    // width zero codes every row as an escape; codes are held only once their bytes are read
+    const codes = width === 0 ? null : new Uint16Array(count);
+    let escapeCount = codes ? 0 : count;
+    if (codes) {
+      for (let i = 0; i < count; i++) {
+        codes[i] = Number(next());
+        if (codes[i] === 0) escapeCount++;
       }
     }
-    return out;
+    const value = (i: number): string => {
+      const code = codes ? codes[i]! : 0;
+      if (code === 0) return readLiteral(i);
+      if (code > dict.length) {
+        throw new DecodeError("range", `${path}[${i}]: dictionary code ${code} out of range`);
+      }
+      return checkProfileLength(dict[code - 1]!, i);
+    };
+    // each escape costs at least its length byte: a body too short for them fails on its
+    // first bad row or its end, before allocating
+    if (r.remaining() < escapeCount) {
+      for (let i = 0; i < count; i++) value(i);
+    }
+    r.need(escapeCount);
+    const out = new Array<string>(count);
+    for (let i = 0; i < count; i++) out[i] = value(i);
+    return (j) => out[j]!;
   }
 
   if (mode === 0x03) {
@@ -805,49 +945,82 @@ function decodeStringColumn(
     const lanes = numeric.map((token, lane) =>
       decodeIntColumn(r, { min: 0n, max: grammarLimit(token) - 1n }, matchedCount, `${path}.lane[${lane}]`),
     );
-    let matched = 0;
-    for (let i = 0; i < count; i++) {
-      if (escapes.escaped[i]) {
-        out[i] = readLiteral(i);
-        continue;
+    // every numeric token renders exactly len ASCII digits, so all matched rows share one length
+    const resolve = (values: string[] | null): void => {
+      let checked = false;
+      for (let i = 0; i < count; i++) {
+        if (escapes.escaped(i)) {
+          const value = readLiteral(i);
+          if (values) values.push(value);
+        } else if (!checked) {
+          checkProfileLength(renderGrammar(grammar, lanes.map((lane) => lane(0))), i);
+          checked = true;
+        }
       }
-      const values = lanes.map((lane) => lane[matched]!);
-      out[i] = checkProfileLength(renderGrammar(grammar, values), i);
-      matched++;
-    }
-    return out;
+    };
+    // escaped values follow in row order, each at least its length byte: a body too short
+    // for them fails on its first bad row or its end, before allocating
+    if (r.remaining() < escapes.count) resolve(null);
+    r.need(escapes.count);
+    resolve(escapes.values);
+    const rank = escapes.bits ? rankBits(escapes.bits, count) : null;
+    return (j) => {
+      const index = rank ? rank[j]! : j;
+      if (escapes.escaped(j)) return escapes.values[index]!;
+      return renderGrammar(grammar, lanes.map((lane) => lane(index)));
+    };
   }
 
   if (mode === 0x04) {
     const derived = profile.derivedOf(ordinal);
     if (!derived) throw new DecodeError("unsupported", `${path}: derived column requires a profile for this leaf`);
     const escapes = readEscapes();
-    for (let i = 0; i < count; i++) {
-      if (escapes.escaped[i]) {
-        out[i] = readLiteral(i);
-        continue;
+    const source = sourceOf(derived.source);
+    // per participant: its escape index when escaped, else the source's dictionary code
+    const resolve = (slot: Int32Array | null): void => {
+      let j = 0;
+      let s = 0;
+      for (let row = 0; row < rows && j < count; row++) {
+        const sourceRow = source !== undefined && participates(source.part, row);
+        if (participates(part, row)) {
+          if (escapes.escaped(j)) {
+            if (slot) slot[j] = escapes.values.length;
+            escapes.values.push(readLiteral(j));
+          } else {
+            if (!sourceRow) {
+              throw new DecodeError("range", `${path}[${j}]: derived source does not participate in this array row`);
+            }
+            const value = source.values(s);
+            const code = typeof value === "string" ? profile.codeOf(derived.source, value) : undefined;
+            if (code === undefined) {
+              throw new DecodeError("range", `${path}[${j}]: derived source value is outside its dictionary`);
+            }
+            checkProfileLength(derived.values[code - 1]!, j);
+            if (slot) slot[j] = code;
+          }
+          j++;
+        }
+        if (sourceRow) s++;
       }
-      const source = sourceValue(derived.source, slots[i]!);
-      if (typeof source !== "string") {
-        throw new DecodeError("range", `${path}[${i}]: derived source does not participate in this array row`);
-      }
-      const code = profile.codeOf(derived.source, source);
-      if (code === undefined) {
-        throw new DecodeError("range", `${path}[${i}]: derived source value is outside its dictionary`);
-      }
-      out[i] = checkProfileLength(derived.values[code - 1]!, i);
-    }
-    return out;
+    };
+    // escaped values follow in row order, each at least its length byte: a body too short
+    // for them fails on its first bad row or its end, before allocating
+    if (r.remaining() < escapes.count) resolve(null);
+    r.need(escapes.count);
+    const slot = new Int32Array(count);
+    resolve(slot);
+    return (k) => (escapes.escaped(k) ? escapes.values[slot[k]!]! : derived.values[slot[k]! - 1]!);
   }
 
-  const lengths: number[] = new Array<number>(count);
+  // each length costs at least one byte, so the lengths grow with the bytes read, not the count
+  const lengths: number[] = [];
   let total = 0;
   for (let i = 0; i < count; i++) {
     const raw = readUleb(r);
     if (raw > BigInt(r.limits.maxByteLength)) {
       throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
     }
-    lengths[i] = Number(raw);
+    lengths.push(Number(raw));
     total += lengths[i]!;
     if (total > r.limits.maxByteLength) {
       throw new DecodeError("limit", `${path}: packed column total exceeds limit`);
@@ -870,12 +1043,13 @@ function decodeStringColumn(
   if (inflated.length !== total) {
     throw new DecodeError("packed", `${path}: packed blob inflates to ${inflated.length} bytes, expected ${total}`);
   }
+  const out = new Array<string>(count);
   let offset = 0;
   for (let i = 0; i < count; i++) {
     out[i] = decodeSlice(inflated.subarray(offset, offset + lengths[i]!), i);
     offset += lengths[i]!;
   }
-  return out;
+  return (j) => out[j]!;
 }
 
 function encodeBoolColumn(w: Writer, values: unknown[], path: string): void {
@@ -910,14 +1084,19 @@ function decodeEnumColumn(
   node: Extract<IRNode, { kind: "enum" }>,
   count: number,
   path: string,
-): string[] {
-  const indices = unpackBits(r, count, enumWidth(node), path);
-  return indices.map((index, i) => {
+): Column<string> {
+  const width = enumWidth(node);
+  const next = unpackBits(r, count, width, path);
+  if (width === 0) return () => node.members[0]!;
+  const indices = new Uint32Array(count);
+  for (let i = 0; i < count; i++) {
+    const index = next();
     if (index >= BigInt(node.members.length)) {
       throw new DecodeError("range", `${path}[${i}]: enum index ${index} out of range`);
     }
-    return node.members[Number(index)]!;
-  });
+    indices[i] = Number(index);
+  }
+  return (j) => node.members[indices[j]!]!;
 }
 
 interface RowState {
@@ -953,6 +1132,7 @@ export function encodeColumnarArray(
   } else {
     writeUleb(w, BigInt(value.length));
   }
+  chargeItems(value.length, ctx, path);
   const payloadStart = w.size;
 
   const rows = value.map((row, i) => {
@@ -1066,7 +1246,7 @@ export function encodeColumnarArray(
     }
   }
 
-  checkAmplification(rows.length, w.size - payloadStart, ctx, path);
+  checkAmplification(rows.length, w.size - payloadStart, false, ctx, path);
 }
 
 export function decodeColumnarArray(
@@ -1089,104 +1269,95 @@ export function decodeColumnarArray(
     }
     count = Number(raw);
   }
-  if (count > r.limits.maxItems) {
-    throw new DecodeError("limit", `${path}: array count ${count} exceeds limit ${r.limits.maxItems}`);
-  }
   // A width-zero column legitimately encodes any number of rows in a handful of
-  // bytes — that is what compression is — so input length cannot bound the count
-  // the way the row plan's one-bit-per-row floor does. The amplification limit
-  // caps the work a hostile byte can demand instead, and row objects materialize
-  // only after every column payload has decoded, so truncated input never
-  // triggers the large allocation.
-  boundAmplification(r, count, path);
+  // bytes, so input length cannot bound the count the way the row plan's one-bit
+  // floor does: the amplification bound and the item budget cap it instead. Columns
+  // stay in packed or typed form and rows materialize only after every column
+  // payload has decoded, so a truncated or malformed body fails before any per-row
+  // values exist.
+  enterArray(r, count, false, path);
 
   const leaves = flattenLeaves(element)!;
-
-  interface DecodedLeaf {
-    slots: number[];
-    values: readonly unknown[];
-    nullRows: number[];
-  }
   const decoded: DecodedLeaf[] = [];
-
-  const sourceValue: SourceValue = (ordinal, row) => {
-    const entry = decoded[ordinal - ordinalBase];
-    if (!entry) return undefined;
-    // slots ascend, so the participant index of an array row is a binary search away
-    let lo = 0;
-    let hi = entry.slots.length - 1;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      const slot = entry.slots[mid]!;
-      if (slot === row) return entry.values[mid];
-      if (slot < row) lo = mid + 1;
-      else hi = mid - 1;
-    }
-    return undefined;
-  };
+  const sourceOf = (ordinal: number): DecodedLeaf | undefined => decoded[ordinal - ordinalBase];
 
   for (const [leafIndex, leaf] of leaves.entries()) {
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const fieldPath = `${path}[].${leaf.segs.join(".")}`;
-    const presence = field.optional ? readBitmap(r, count, fieldPath) : null;
-    const nulls = field.nullable ? readBitmap(r, count, fieldPath) : null;
+    const presence = field.optional ? readPackedBitmap(r, count, fieldPath) : null;
+    const nulls = field.nullable ? readPackedBitmap(r, count, fieldPath) : null;
 
-    const slots: number[] = [];
-    const nullRows: number[] = [];
-    for (let i = 0; i < count; i++) {
-      const present = presence ? presence[i]! : true;
-      const isNull = nulls ? nulls[i]! : false;
-      if (!present) {
-        if (isNull) throw new DecodeError("bitmap", `${path}[${i}].${leafName}: null bit set for absent field`);
-        continue;
+    let participating = count;
+    if (presence || nulls) {
+      participating = 0;
+      for (let b = 0; b < Math.ceil(count / 8); b++) {
+        const p = presence ? presence[b]! : 0xff;
+        const n = nulls ? nulls[b]! : 0;
+        const orphan = n & ~p;
+        if (orphan !== 0) {
+          const row = b * 8 + 31 - Math.clz32(orphan & -orphan);
+          throw new DecodeError("bitmap", `${path}[${row}].${leafName}: null bit set for absent field`);
+        }
+        participating += popcount8(p & ~n & (b * 8 + 8 > count ? (1 << (count % 8)) - 1 : 0xff));
       }
-      if (isNull) {
-        nullRows.push(i);
-        continue;
-      }
-      slots.push(i);
     }
+    const part: Participation = { presence, nulls, count: participating };
 
     if (count > 0 && depth + leaf.segs.length > r.limits.maxDepth) {
       throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
     }
-    if (slots.length > 0 && depth + 1 + leaf.segs.length > r.limits.maxDepth) {
+    if (participating > 0 && depth + 1 + leaf.segs.length > r.limits.maxDepth) {
       throw new DecodeError("depth", `${fieldPath}: nesting deeper than ${r.limits.maxDepth}`);
     }
 
+    let values: Column;
     switch (field.type.kind) {
-      case "int": {
-        const values = decodeIntColumn(r, nodeBounds(field.type as IntNode), slots.length, fieldPath);
-        decoded[leafIndex] = { slots, values: values.map((v) => Number(v)), nullRows };
+      case "int":
+        values = decodeIntColumn(r, nodeBounds(field.type as IntNode), participating, fieldPath);
+        break;
+      case "float64":
+        values = decodeFloatColumn(r, participating, fieldPath);
+        break;
+      case "bool": {
+        const bits = readPackedBitmap(r, participating, fieldPath);
+        values = (j) => bitAt(bits, j);
         break;
       }
-      case "float64":
-        decoded[leafIndex] = { slots, values: decodeFloatColumn(r, slots.length, fieldPath), nullRows };
-        break;
-      case "bool":
-        decoded[leafIndex] = { slots, values: readBitmap(r, slots.length, fieldPath), nullRows };
-        break;
       case "string":
-        decoded[leafIndex] = {
-          slots,
-          values: decodeStringColumn(r, slots, sourceValue, fieldPath, inflate, profile, ordinalBase + leafIndex),
-          nullRows,
-        };
+        values = decodeStringColumn(r, part, count, sourceOf, fieldPath, inflate, profile, ordinalBase + leafIndex);
         break;
       case "enum":
-        decoded[leafIndex] = { slots, values: decodeEnumColumn(r, field.type, slots.length, fieldPath), nullRows };
+        values = decodeEnumColumn(r, field.type, participating, fieldPath);
         break;
+      case "literal": {
+        const value = field.type.value;
+        values = () => value;
+        break;
+      }
       default: {
-        const values = slots.map((row) =>
-          decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex),
-        );
-        decoded[leafIndex] = { slots, values, nullRows };
+        const each = (out: unknown[] | null): void => {
+          for (let row = 0, j = 0; j < participating; row++) {
+            if (!participates(part, row)) continue;
+            const value = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex);
+            if (out) out[j] = value;
+            j++;
+          }
+        };
+        // bytes: each value costs at least its length byte, so a body too short for the
+        // column fails on its first bad value or its end, before allocating
+        if (r.remaining() < participating) each(null);
+        r.need(participating);
+        const out = new Array<unknown>(participating);
+        each(out);
+        values = (j) => out[j];
       }
     }
+    decoded[leafIndex] = { part, values };
   }
 
-  const out: Record<string, unknown>[] = Array.from({ length: count }, () => ({}));
+  const out: Record<string, unknown>[] = new Array<Record<string, unknown>>(count);
+  for (let i = 0; i < count; i++) out[i] = {};
 
   const containerOf = (row: Record<string, unknown>, segs: readonly string[]): Record<string, unknown> => {
     let obj = row;
@@ -1200,15 +1371,18 @@ export function decodeColumnarArray(
 
   for (const [leafIndex, leaf] of leaves.entries()) {
     const leafName = leaf.segs[leaf.segs.length - 1]!;
+    const { part, values } = decoded[leafIndex]!;
+    const { presence, nulls } = part;
     // nested structs are required and non-nullable: materialize the container chain at
     // this leaf's declared position for every row, so an all-absent nested struct still
     // round-trips and keys stay in declared order across implementations
-    if (leaf.segs.length > 1) {
-      for (let i = 0; i < count; i++) containerOf(out[i]!, leaf.segs);
+    const nested = leaf.segs.length > 1;
+    let j = 0;
+    for (let i = 0; i < count; i++) {
+      const holder = nested ? containerOf(out[i]!, leaf.segs) : out[i]!;
+      if (presence && !bitAt(presence, i)) continue;
+      holder[leafName] = nulls && bitAt(nulls, i) ? null : values(j++);
     }
-    const entry = decoded[leafIndex]!;
-    for (const row of entry.nullRows) containerOf(out[row]!, leaf.segs)[leafName] = null;
-    entry.slots.forEach((row, j) => (containerOf(out[row]!, leaf.segs)[leafName] = entry.values[j]));
   }
 
   return out;
