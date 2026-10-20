@@ -458,6 +458,7 @@ class _Ctx:
         "longest_derived",
         "uniform_entries",
         "uniform_derived",
+        "consumers",
         "enum_bytes",
     )
 
@@ -535,6 +536,7 @@ class _Ctx:
         # the dictionaries and derivations whose values all have one length
         self.uniform_entries = {ordinal for ordinal, sizes in self.entry_bytes.items() if len(set(sizes[1:])) == 1}
         self.uniform_derived = {ordinal for ordinal, sizes in self.derived_bytes.items() if len(set(sizes[1:])) == 1}
+        self.consumers = Counter(derivation["source"] for derivation in self.derivations.values())
         self.enum_bytes: dict[int, tuple[int, ...]] = {}
 
     def column_count(self, node: dict[str, Any]) -> int:
@@ -1672,13 +1674,15 @@ def _settle(
     bound: int | None = None,
     total: Callable[[], int] | None = None,
     quick: Callable[[], int | None] | None = None,
+    learn: Callable[[], object] | None = None,
 ) -> None:
     """Charge a column's value lengths, given in participating-row order, as if value
     by value: the first value whose own checks fail or whose charge passes the byte
     budget decides the error. A column with no failure whose `bound` on the sum of its
     lengths fits defers the exact sum, `total` or else the lengths summed. One that does
     not fit sums its lengths in runs, stopping at the run that passes the budget, unless
-    `quick` gives its exact sum without reading its rows."""
+    `quick` gives its exact sum without reading its rows; `learn` runs once its runs
+    reach the end within the budget, so later columns can answer quickly."""
     budget = r.budget
     exact = total or (lambda: sum(make()))
     if failure is None and bound is not None:
@@ -1699,6 +1703,8 @@ def _settle(
         charge = quick() if quick is not None else None
         if charge is None:
             charge = _run_sums(lengths(), remaining)
+            if charge is not None and learn is not None:
+                learn()
         if charge is not None and charge <= remaining:
             budget.bytes += charge
             return
@@ -2011,7 +2017,7 @@ def _derived_column(
             conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
         elif not escaped and 4 * count >= len(sizes):
             assert source_codes is not None
-            tally = source_codes(derivation["source"], counts=True, cached=quick)
+            tally = source_codes(derivation["source"], counts=True, cheap=quick)
             if tally is None:
                 return None
             conformed = sum(sizes[code] * times for code, times in tally.items() if times)
@@ -2021,10 +2027,14 @@ def _derived_column(
             conformed = sum(derived_lengths())
         return conformed + sum(escape_lengths())
 
+    def learn() -> object:
+        # another derived column reads this source: tally it once for all of them
+        assert source_codes is not None
+        return source_codes(derivation["source"], counts=True)
+
     bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
-    _settle(
-        r, make, escape_failure or failure, path, bound, derived_total, quick_total
-    )
+    shared = not escaped and 4 * count >= len(sizes) and ctx.consumers[derivation["source"]] > 1
+    _settle(r, make, escape_failure or failure, path, bound, derived_total, quick_total, learn if shared else None)
     table = ctx.derived_tables[ordinal]
 
     if isinstance(source, int) and not escaped:
@@ -2361,19 +2371,22 @@ def _source_codes(
     part: int | None,
     ordinal: int,
     counts: bool = False,
-    cached: bool = False,
+    cheap: bool = False,
 ) -> Any:
     """A derivation source's dictionary codes at the rows a derived column with
     participation `part` covers: 0 outside the dictionary, _NOT_PARTICIPATING where
-    the source is absent; with `counts`, how often each code occurs there (None with
-    `cached` when that is not yet known). Every derived
-    column that reads one source with the same participation shares one result, held
-    in `found`."""
+    the source is absent; with `counts`, how often each code occurs there (with `cheap`,
+    None unless that is known or takes a byte count per code). Every derived column
+    that reads one source with the same participation shares one result, held in
+    `found`."""
     if counts:
         tally = found.get(("counts", ordinal, part))
-        if tally is None and not cached:
+        if tally is None:
             source = _source_codes(ctx, columns, ordinal_base, count, found, part, ordinal)
-            tally = found[("counts", ordinal, part)] = _tally(source, len(ctx.codes[ordinal]))
+            entries = len(ctx.codes[ordinal])
+            if cheap and not _counts_each(source, entries):
+                return None
+            tally = found[("counts", ordinal, part)] = _tally(source, entries)
         return tally
     known = found.get((ordinal, part))
     if known is not None:
@@ -2399,14 +2412,22 @@ def _source_codes(
     return result
 
 
-# a byte count per code beats one Counter pass up to about 60 codes
+# below this many codes a byte count per code beats one Counter pass; measured on
+# 524,000 codes, 0.13 ms per byte count against 7.9 ms per Counter pass, the break-even
+# is near 60 codes, and half that keeps a margin for slower memory scans
 _COUNT_EACH = 32
 
 
+def _counts_each(codes: Any, entries: int) -> bool:
+    """Whether byte codes of a small dictionary outnumber its codes fourfold, so that a
+    byte count per code tallies them faster than one pass would."""
+    return type(codes) is array and codes.typecode == "B" and entries < _COUNT_EACH and len(codes) >= 4 * (entries + 1)
+
+
 def _tally(codes: array, entries: int) -> dict[int, int]:
-    """How often each code occurs: by one byte count per code for byte codes of a small
-    dictionary when they outnumber its codes fourfold, else in one pass."""
-    if codes.typecode == "B" and entries < _COUNT_EACH and len(codes) >= 4 * (entries + 1):
+    """How often each code occurs: by one byte count per code where _counts_each, else in
+    one pass."""
+    if _counts_each(codes, entries):
         data = codes.tobytes()
         return {code: data.count(code) for code in range(entries + 1)}
     return Counter(codes)

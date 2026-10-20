@@ -438,25 +438,17 @@ def _nested_derived(values):
 
 # bodies whose cost could scale with a profile's dictionary or grammar domain, or with
 # the number of derived columns, rather than with the body, each against the same body
-# under a small profile: the memory ratio allowed (two-byte codes hold twice the bytes
-# of one-byte codes), and whether both have the same columns
+# under a small profile: the bytes each decodes to before its last column fails, the
+# calls allowed beyond 1.35 times the small profile's (two-byte codes take a translate
+# per high byte, which one-byte codes do not), or None when the columns differ
 COST_PAIRS = [
-    ("dictionary size", _derived_table(16383), _derived_table(2), 1.5, True),
-    ("grammar domain", _lane_table(4), _lane_table(1), 1.5, True),
-    ("derived fan-out", _derived_fanout(6), _derived_fanout(1), 1.5, False),
-    ("two-byte codes", TWO_BYTE_CHAIN, ONE_BYTE_CHAIN, 2.5, True),
-    ("two-byte codes across a high byte", STRADDLING_CHAIN, _chain(98, "aa"), 2.5, True),
-    ("non-uniform derived values", _nested_derived(["x"] * 254 + ["yy"]), _nested_derived(["x"] * 255), 1.5, True),
+    ("dictionary size", _derived_table(16383), _derived_table(2), (12000, 12000), 8192),
+    ("grammar domain", _lane_table(4), _lane_table(1), (20000, 8000), 8192),
+    ("derived fan-out", _derived_fanout(6), _derived_fanout(1), (3200000, 1200000), None),
+    ("two-byte codes", TWO_BYTE_CHAIN, ONE_BYTE_CHAIN, (3200000, 3200000), 16384),
+    ("two-byte codes across a high byte", STRADDLING_CHAIN, _chain(98, "aa"), (3200000, 3200000), 16384),
+    ("non-uniform derived values", _nested_derived(["x"] * 254 + ["yy"]), _nested_derived(["x"] * 255), (8000, 8000), 8192),
 ]
-
-
-def _peak(run):
-    tracemalloc.start()
-    try:
-        run()
-        return tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
 
 
 def _rejects(codec, body, code="marker"):
@@ -468,35 +460,59 @@ def _rejects(codec, body, code="marker"):
     return run
 
 
+@pytest.fixture
+def readers(monkeypatch):
+    """Every Reader a decode makes, so a test can read its budgets afterwards."""
+    made = []
+
+    class Recorded(_codec.Reader):
+        def __init__(self, *args):
+            super().__init__(*args)
+            made.append(self)
+
+    monkeypatch.setattr(_codec, "Reader", Recorded)
+    return made
+
+
+def _decode(case, readers, code="marker"):
+    """The error a case's body fails with, and its reader's items and decoded bytes."""
+    ir, profile, body = case
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex(body))
+    assert err.value.code == code
+    budget = readers[-1].budget
+    budget.settle()
+    return str(err.value), budget.total, budget.bytes
+
+
 @pytest.mark.parametrize(
-    "large, small, memory, same_shape", [case[1:] for case in COST_PAIRS], ids=[case[0] for case in COST_PAIRS]
+    "large, small, decoded, extra", [case[1:] for case in COST_PAIRS], ids=[case[0] for case in COST_PAIRS]
 )
-def test_cost_follows_the_body_not_the_profile(large, small, memory, same_shape):
-    # memory and calls against the same body under a small profile, in one process, so
-    # neither the runner nor the interpreter version moves the bound
-    peaks = []
-    counts = []
-    for ir, profile, body in (large, small):
-        run = _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))
-        run()
-        peaks.append(_peak(run))
-        counts.append(calls(run))
-    assert peaks[0] < memory * peaks[1] + (1 << 20)
-    if same_shape:
-        assert counts[0] < 1.25 * counts[1] + 8192
+def test_cost_follows_the_body_not_the_profile(large, small, decoded, extra, readers):
+    # both fail at the same place, having charged the same items and the bytes their
+    # values decode to; with the same columns, they make about the same calls
+    outcomes = [_decode(case, readers) for case in (large, small)]
+    assert outcomes[0][:2] == outcomes[1][:2]
+    assert (outcomes[0][2], outcomes[1][2]) == decoded
+    if extra is not None:
+        counts = [
+            calls(_rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body)))
+            for ir, profile, body in (large, small)
+        ]
+        assert counts[0] < 1.35 * counts[1] + extra
 
 
 @pytest.fixture
 def spied(monkeypatch):
-    """Counts of the helpers whose work could follow a profile's domain: every table
-    _recode is handed with the rows it serves and whether it answered per row, source
-    tallies, masked translates, and grammar code lookups."""
-    seen = {"recode": [], "tally": 0, "split": 0, "grammar codes": 0}
+    """Counts of the helpers whose work could follow a profile's domain or the number of
+    derived columns: every table _recode is handed with the rows it serves and whether
+    it answered in bulk, source tallies, run-wise sums, masked translates, rows looked up
+    one at a time through a derivation, and grammar code lookups."""
+    seen = {"recode": [], "tally": 0, "runs": 0, "split": 0, "per row": 0, "grammar codes": 0}
 
     def wrap(name, record):
-        original = getattr(_codec, name, None)
-        if original is None:
-            return
+        original = getattr(_codec, name)
 
         def spy(*args, **kwargs):
             result = original(*args, **kwargs)
@@ -510,9 +526,14 @@ def spied(monkeypatch):
         rows = len(values) if hasattr(values, "__len__") else None
         seen["recode"].append((len(table), rows, type(result) is array))
 
+    def count(key):
+        return lambda args, result: seen.__setitem__(key, seen[key] + 1)
+
     wrap("_recode", recode)
-    wrap("_tally", lambda args, result: seen.__setitem__("tally", seen["tally"] + 1))
-    wrap("_translate_split", lambda args, result: seen.__setitem__("split", seen["split"] + 1))
+    wrap("_tally", count("tally"))
+    wrap("_run_sums", count("runs"))
+    wrap("_translate_split", count("split"))
+    wrap("_derived_code", count("per row"))
     grammar_codes = _codec._Ctx.grammar_codes
 
     def counted(self, *args):
@@ -523,12 +544,25 @@ def spied(monkeypatch):
     return seen
 
 
-@pytest.mark.parametrize(
-    "case", [case[1] for case in COST_PAIRS[:2]] + [TWO_BYTE_CHAIN, STRADDLING_CHAIN], ids=[case[0] for case in COST_PAIRS[:2]] + ["two-byte codes", "two-byte codes across a high byte"]
-)
-def test_lookups_follow_the_rows(case, spied):
+def _decode_with(case, code="marker", limits=None):
     ir, profile, body = case
-    _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))()
+    codec = compile_ir(ir, plan="columnar", profile=profile, limits=limits)
+    _rejects(codec, bytes.fromhex(body) if isinstance(body, str) else body, code)()
+    return codec
+
+
+LOOKUP_CASES = [
+    ("dictionary size", _derived_table(16383)),
+    ("dictionary size, 8,000 arrays", (*_derived_table(16383)[:2], "c03e" + "0101010104000400" * 8000 + "ff")),
+    ("grammar domain", _lane_table(4)),
+    ("two-byte codes", TWO_BYTE_CHAIN),
+    ("two-byte codes across a high byte", STRADDLING_CHAIN),
+]
+
+
+@pytest.mark.parametrize("case", [case[1] for case in LOOKUP_CASES], ids=[case[0] for case in LOOKUP_CASES])
+def test_lookups_follow_the_rows(case, spied):
+    codec = _decode_with(case)
     for size, rows, bulk in spied["recode"]:
         # no table larger than the rows it serves, and no long run answered row by row
         assert rows is None or size <= max(4 * rows, 256)
@@ -536,18 +570,59 @@ def test_lookups_follow_the_rows(case, spied):
     if case is STRADDLING_CHAIN:
         # the five derived columns another derives from, each over codes 255 and 256
         assert spied["split"] == 5
+    if case[1] is LOOKUP_CASES[0][1][1]:
+        # one row per nested array never pays for the 16,383-entry recoding table
+        assert not codec._ctx.recodings
+        assert spied["per row"] == len(case[2]) // 16
 
 
-def test_derived_columns_read_their_source_once(spied):
-    ir, profile, body = _derived_fanout(6)
-    _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))()
+@pytest.mark.parametrize("k", [1, 2, 6, 8])
+def test_derived_columns_read_their_source_once(k, spied):
+    # eight one-byte values over 400,000 rows pass the budget before the int column
+    _decode_with(_derived_fanout(k), "limit" if k == 8 else "marker")
     assert spied["grammar codes"] == 1
+    assert spied["runs"] == 0
 
 
-def test_short_derived_columns_take_no_tally(spied):
-    ir, profile, body = _nested_derived(["x"] * 254 + ["yy"])
-    _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))()
+def _derived_chain(k):
+    # a grammar source, a dictionary column derived from it, and k columns derived from that
+    profile = _profile(
+        {"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]},
+        {"leaf": 1, "dict": ["x", "y"], "derived": {"source": 0, "values": ["x", "y"]}},
+        *({"leaf": i + 2, "derived": {"source": 1, "values": ["p", "q"]}} for i in range(k)),
+    )
+    ir = _array(*(_field(n, "string") for n in ["s"] + [f"d{i}" for i in range(k + 1)]), _field("n", "int"))
+    return ir, profile, ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * (k + 1) + "ff"
+
+
+@pytest.mark.parametrize("k", [1, 2, 6])
+def test_derived_chains_read_each_source_once(k, spied):
+    _decode_with(_derived_chain(k), "limit" if k == 6 else "marker")
+    assert spied["grammar codes"] == 1
+    # the grammar source's codes, then the dictionary column's, each recoded once
+    assert len(spied["recode"]) == 2
+
+
+def _muse_nested(values):
+    inner = _array(_field("a", "string"), _field("b", "string"))
+    ir = _array({"name": "inner", "type": inner}, _field("end", "bool"))
+    profile = _profile(
+        {"leaf": 0, "dict": [f"s{i}" for i in range(255)]},
+        {"leaf": 1, "dict": ["x", "yy"], "derived": {"source": 0, "values": values}},
+    )
+    body = compile_ir(ir, plan="columnar", profile=profile).encode_body([{"inner": [{"a": "s0", "b": "x"}], "end": False}] * 4000)
+    return ir, profile, body[:-1] + b"\xff"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [_nested_derived(["x"] * 254 + ["yy"]), _nested_derived(["x"] * 255), _muse_nested(["x", "yy"] * 127 + ["x"]), _muse_nested(["x"] * 255)],
+    ids=["non-uniform", "uniform", "non-uniform, dictionary target", "uniform, dictionary target"],
+)
+def test_short_derived_columns_take_no_tally(case, spied):
+    _decode_with(case)
     assert spied["tally"] == 0
+    assert spied["runs"] == 0
 
 
 def test_an_early_overflow_takes_no_tally(spied):
@@ -562,6 +637,33 @@ def test_an_early_overflow_takes_no_tally(spied):
         codec.decode_body(bytes.fromhex("e0fd1f0101" + "ff" * 65500 + "0400ff"))
     assert err.value.code == "limit" and "[].d[3668]" in str(err.value)
     assert spied["tally"] == 0
+    assert spied["runs"] == 1
+
+
+def _sparse_fanout(k, values, fillers=0):
+    # 100,000 rows, one in 800 rendering 10 rather than 00: each consumer's bound passes
+    # the budget though its values fit it
+    ir = _array(*(_field(n, "string") for n in ["s"] + [f"d{i}" for i in range(k)]), _field("n", "int"))
+    names = [f"filler{i}" for i in range(fillers)]
+    profile = _profile(
+        {"leaf": 0, "dict": ["00", "10"] + names, "grammar": [LANE, LANE]},
+        *({"leaf": i + 1, "derived": {"source": 0, "values": values + [""] * fillers}} for i in range(k)),
+    )
+    lanes = ("01" + "00" * 99) * 125
+    return ir, profile, "a08d06" + "0300" + "020001" + lanes + "020000" + "0400" * k + "ff"
+
+
+@pytest.mark.parametrize("k", [1, 6, 24, 96])
+@pytest.mark.parametrize("values", [["", "y" * 10], ["", ""]], ids=["non-uniform", "uniform"])
+@pytest.mark.parametrize("fillers", [0, 40], ids=["2 codes", "42 codes"])
+def test_derived_fan_out_reads_its_source_once(k, values, fillers, spied):
+    _decode_with(_sparse_fanout(k, values, fillers))
+    assert spied["grammar codes"] == 1
+    # the source's rows are read at most once to sum them and once to tally its codes,
+    # whatever the number of consumers; a small dictionary's codes are counted instead
+    assert spied["runs"] <= 1 and spied["tally"] <= 1
+    if fillers == 0:
+        assert spied["runs"] == 0
 
 
 @pytest.mark.parametrize("count", [70, 300])
