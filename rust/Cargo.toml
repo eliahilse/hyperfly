@@ -22,4 +22,6 @@ miniz_oxide = "0.8"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
-serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "unbounded_depth"] }
+serde_stacker = "0.1"

@@ -38,13 +38,17 @@ export interface Codec<T = unknown> {
 
 /** Freezes a fresh clone in place, storing zero unsigned: an IR or profile -0 is the integer 0. */
 function deepFreeze<T>(value: T): T {
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    for (const [key, inner] of Object.entries(record)) {
+  let current: unknown = value;
+  let stack: object[] | undefined;
+  while (current && typeof current === "object") {
+    const record = current as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      const inner = record[key];
       if (Object.is(inner, -0)) record[key] = 0;
-      else deepFreeze(inner);
+      else if (inner && typeof inner === "object") (stack ??= []).push(inner);
     }
-    Object.freeze(value);
+    Object.freeze(current);
+    current = stack?.pop();
   }
   return value;
 }
