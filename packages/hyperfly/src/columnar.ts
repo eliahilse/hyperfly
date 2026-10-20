@@ -18,10 +18,6 @@ export interface Leaf {
   field: IRField;
 }
 
-/**
- * Depth-first leaf columns in declared order. Nested structs flatten only when
- * required and non-nullable, so every leaf inherits its row's participation.
- */
 interface SharedContainers {
   /** Per leaf, the cache slot of each enclosing container, or -1 for one no other leaf shares. */
   chains: (readonly number[])[];
@@ -64,6 +60,10 @@ function sharedContainersOf(element: StructNode, leaves: readonly Leaf[]): Share
   return shared;
 }
 
+/**
+ * Depth-first leaf columns in declared order. Nested structs flatten only when
+ * required and non-nullable, so every leaf inherits its row's participation.
+ */
 export function flattenLeaves(element: StructNode): Leaf[] | null {
   const out: Leaf[] = [];
   const walk = (node: StructNode, segs: string[]): boolean => {
