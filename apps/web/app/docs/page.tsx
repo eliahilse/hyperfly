@@ -167,10 +167,10 @@ profiled = compile(EventResponse, plan="columnar", profile=profile, validate=Tru
               codec, or use <code>profiled</code> to serve the trained version.
             </p>
           </div>
-          <CodeBlock label="TypeScript · fetch handler">{`import { CodecRegistry, type Codec } from "hyperfly";
+          <CodeBlock label="TypeScript · fetch handler">{`import { CodecRegistry } from "hyperfly";
 import { discovery, respond } from "hyperfly/http";
 
-const registry = new CodecRegistry([codec as Codec<never>]);
+const registry = new CodecRegistry([codec]);
 export default {
   fetch(request: Request) {
     return discovery(request, registry) ??
@@ -239,7 +239,7 @@ async function getEvents(url: string) {
   if (decoded.kind === "unknown-codec") throw new Error("Unadvertised codec");
   const offer = result.headers.get("hyperfly-offer");
   if (decoded.kind === "json" && offer) {
-    const codec = await fetchArtifact<never>(new URL(url).origin, offer);
+    const codec = await fetchArtifact(new URL(url).origin, offer);
     if (codec) registry.add(codec);
   }
   return decoded.value;
