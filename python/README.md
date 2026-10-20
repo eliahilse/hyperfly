@@ -94,9 +94,42 @@ from hyperfly.http import negotiate, encode_for, serve_artifact
 
 registry = CodecRegistry([codec, previous_codec])
 
-decision = negotiate(request.headers.get("hyperfly-accept"), registry)
-body, headers = encode_for(decision, payload)
+decision = negotiate(
+    request.headers.get("hyperfly-accept"),
+    registry,
+    http_accept=request.headers.get("accept"),
+)
+body, headers = encode_for(decision, payload, on_fallback=lambda reason, error: log.warning("%s: %s", reason, error))
 ```
+
+`Accept: application/vnd.hyperfly;q=0` opts a client out of binary whatever it
+advertises. A value the codec refuses under its limits is answered in JSON with the
+same headers a fallback gets, and `on_fallback` hears about it. Every decision
+carries `Vary: Hyperfly-Accept, Accept`.
+
+Request bodies go through `decode_request`, which takes a `bytes` body or an
+iterable of chunks and stops reading once the body passes `max_bytes` (1 MiB by
+default):
+
+```python
+from hyperfly.http import RequestError, decode_request
+
+try:
+    kind, value = decode_request(
+        request.headers.get("content-type"),
+        request.headers.get("hyperfly-codec"),
+        request.stream(),
+        registry,
+        content_length=request.headers.get("content-length"),
+    )
+except RequestError as error:
+    return Response(status=error.status, headers=error.headers)
+```
+
+`error.status` is 415 for a content type that is neither hyperfly nor JSON, 413 past
+`max_bytes`, 400 for a malformed envelope, a contradicting `Hyperfly-Codec` header or
+a body that fails to decode, and 415 with `Hyperfly-Offer` for a fingerprint the
+registry does not hold. `error.reason` names the rule for logs.
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it
 could fetch from `serve_artifact`; once it has it, the same route answers in binary.
@@ -110,6 +143,33 @@ floats (written as `null`, as `JSON.stringify` does); `bytes` has no JSON form a
 Registering the outgoing codec alongside the incoming one is what makes retraining
 safe: a new profile is a new fingerprint, so a deployment holding only one codec
 turns every rollout into a cutover.
+
+## Errors
+
+Every failure the package raises on purpose is a `HyperflyError` with a stable
+`code`, under the same class names as the TypeScript package. A wrapped exception
+stays reachable through `__cause__`.
+
+| Class | Codes |
+| --- | --- |
+| `EncodeError` | `type`, `range`, `float`, `utf8`, `required`, `depth`, `limit`, `validation` |
+| `DecodeError` | `header`, `truncated`, `trailing`, `varint`, `bitmap`, `marker`, `float`, `utf8`, `range`, `depth`, `limit`, `packed`, `unsupported`, `json`, `validation` |
+| `FingerprintMismatchError` (a `DecodeError`) | `fingerprint` |
+| `UnsupportedSchemaError` | `unsupported` |
+| `HyperflyError` | `ir` |
+
+`json` is a malformed JSON body read by `decode_response` or `decode_request`; its
+`__cause__` is the underlying error, a `json.JSONDecodeError`, `UnicodeDecodeError`
+or `RecursionError`. `validation` is a pydantic `ValidationError` from a codec
+compiled with `validate=True`, raised as `EncodeError` on the encode paths and
+`DecodeError` on the decode paths.
+
+`RequestError` is separate: it is not a `HyperflyError` and has no `code`. It is how
+`read_body` and `decode_request` refuse a request, carrying `status` (400, 413 or
+415), a stable `reason` and the response `headers`. Only a 400 wraps a cause: the
+`DecodeError` for a body that fails to decode (so a JSON parse error is the
+`__cause__` of that `DecodeError`, one hop further down), or the stream or buffer
+error for an unreadable body. A 413 or 415 has no `__cause__`.
 
 ## Conformance
 
