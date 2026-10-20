@@ -326,7 +326,8 @@ between libraries.
 
 Codec operations (IR/profile validation and compile, encode, decode) and
 artifact loading (negotiation-v1 §3) MUST report the following stable
-lowercase codes on the implementation's error type. References to the plan below mean plan-columnar-v5.
+lowercase codes on the implementation's error type. References to the plan
+below mean plan-columnar-v5.
 
 - `varint` (decode): non-minimal ULEB128 or more than eight bytes (§3.1).
 - `range` (encode, decode): declared numeric bounds are exceeded, or a decoded
