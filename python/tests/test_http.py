@@ -9,7 +9,7 @@ import pytest
 from conftest import load
 from pydantic import BaseModel
 
-from hyperfly import HEADER_SIZE, WIRE_VERSION, CodecRegistry, DecodeError, EncodeError, Limits, compile_ir
+from hyperfly import HEADER_SIZE, WIRE_VERSION, CodecRegistry, DecodeError, EncodeError, HyperflyError, Limits, compile_ir
 from hyperfly.http import (
     DEFAULT_MAX_BODY_BYTES,
     HYPERFLY_MEDIA_TYPE,
@@ -723,14 +723,27 @@ def test_status_order():
             assert error.headers == {}
 
 
-@pytest.mark.parametrize("max_bytes", [-1, 1.5, math.inf, math.nan, True, "1", None])
-def test_invalid_max_bytes_raises_without_reading(max_bytes):
+@pytest.mark.parametrize("max_bytes", [-1, 2**53, 1.5, math.inf, math.nan, True, "1", None])
+def test_invalid_max_bytes_is_an_options_error_without_reading(max_bytes):
     chunks = Chunks([b"0"])
-    with pytest.raises((TypeError, ValueError)):
-        _request(chunks, max_bytes=max_bytes)
-    with pytest.raises((TypeError, ValueError)):
-        read_body(chunks, max_bytes=max_bytes)
+    for read in (lambda: _request(chunks, max_bytes=max_bytes), lambda: read_body(chunks, max_bytes=max_bytes)):
+        with pytest.raises(HyperflyError) as raised:
+            read()
+        assert (raised.value.code, str(raised.value)) == ("options", "max_bytes: must be a non-negative safe integer")
     assert chunks.pulls == 0
+
+
+def test_max_bytes_reads_an_int_subclass_as_its_value():
+    class Size(int):
+        def __int__(self):
+            return 100
+
+        def __gt__(self, other):
+            return False
+
+    with pytest.raises(RequestError) as raised:
+        read_body([b"[1,2]"], max_bytes=Size(2))
+    assert raised.value.status == 413
 
 
 def test_stream_stops_and_closes_as_soon_as_it_passes_the_cap():
@@ -777,7 +790,7 @@ def test_empty_chunks_within_a_zero_byte_limit():
 
 def test_zero_and_large_limits():
     assert _refusal(b"0", max_bytes=0).status == 413
-    assert _request(b"0", max_bytes=2**64) == ("json", 0)
+    assert _request(b"0", max_bytes=2**53 - 1) == ("json", 0)
     assert read_body(b"", max_bytes=0) == b""
 
 

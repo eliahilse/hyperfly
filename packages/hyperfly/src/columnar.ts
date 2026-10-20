@@ -1,7 +1,7 @@
 import { decodeNode, enterArray, type Inflate } from "./decode.js";
-import { checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
+import { chargeBytes, checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
-import type { IRField, IRNode } from "./ir.js";
+import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
@@ -304,7 +304,13 @@ type Column<T = unknown> = (j: number) => T;
 
 const noValues: Column<never> = () => undefined as never;
 
-function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: string): Column<number> {
+/** A grammar lane's first out-of-range value, held back so the column reports it in row order. */
+interface DeferredRange {
+  index: number;
+  error: DecodeError | null;
+}
+
+function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: string, deferred?: DeferredRange): Column<number> {
   const mode = r.u8();
   if (mode > 4) throw new DecodeError("marker", `${path}: invalid int column mode 0x${mode.toString(16)}`);
   if (count === 0) {
@@ -314,16 +320,28 @@ function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: stri
 
   const fromForm = (form: bigint): bigint => bounds.min !== undefined ? form + bounds.min : unzigzag(form);
 
+  const inRange = (v: bigint): boolean =>
+    v >= BigInt(INT_MIN) &&
+    v <= BigInt(INT_MAX) &&
+    (bounds.min === undefined || v >= bounds.min) &&
+    (bounds.max === undefined || v <= bounds.max);
+
+  const outOfRange = (v: bigint, i: number): void => {
+    const error =
+      v < BigInt(INT_MIN) || v > BigInt(INT_MAX)
+        ? new DecodeError("range", `${path}[${i}]: decoded integer outside the v0 domain`)
+        : bounds.min !== undefined && v < bounds.min
+          ? new DecodeError("range", `${path}[${i}]: below declared min`)
+          : new DecodeError("range", `${path}[${i}]: above declared max`);
+    if (!deferred) throw error;
+    if (!deferred.error) {
+      deferred.error = error;
+      deferred.index = i;
+    }
+  };
+
   const check = (v: bigint, i: number): number => {
-    if (v < BigInt(INT_MIN) || v > BigInt(INT_MAX)) {
-      throw new DecodeError("range", `${path}[${i}]: decoded integer outside the v0 domain`);
-    }
-    if (bounds.min !== undefined && v < bounds.min) {
-      throw new DecodeError("range", `${path}[${i}]: below declared min`);
-    }
-    if (bounds.max !== undefined && v > bounds.max) {
-      throw new DecodeError("range", `${path}[${i}]: above declared max`);
-    }
+    if (!inRange(v)) outOfRange(v, i);
     return Number(v);
   };
 
@@ -368,9 +386,7 @@ function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: stri
       // a constant step: the values are monotone, so the ends bound every one between
       const head = check(first, 0);
       const last = first + base * BigInt(count - 1);
-      try {
-        check(last, count - 1);
-      } catch {
+      if (!inRange(last)) {
         let running = first;
         for (let i = 1; i < count; i++) check((running += base), i);
       }
@@ -600,7 +616,6 @@ function decodeFloatColumn(r: Reader, count: number, path: string): Column<numbe
 }
 
 const utf8Strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-const utf8Encoder = new TextEncoder();
 
 function grammarLimit(token: Extract<GrammarToken, { num: unknown }>): bigint {
   return BigInt(token.num.base) ** BigInt(token.num.len);
@@ -636,6 +651,18 @@ export function matchGrammar(value: string, grammar: readonly GrammarToken[]): b
     offset += token.num.len;
   }
   return offset === value.length ? lanes : null;
+}
+
+const renderedCache = new WeakMap<object, number>();
+
+/** UTF-8 length of every value a frozen grammar renders: numeric tokens render exactly len ASCII digits. */
+function renderedLength(grammar: readonly GrammarToken[]): number {
+  let n = renderedCache.get(grammar);
+  if (n === undefined) {
+    n = grammar.reduce((sum, token) => sum + ("lit" in token ? utf8Length(token.lit) : token.num.len), 0);
+    renderedCache.set(grammar, n);
+  }
+  return n;
 }
 
 function renderGrammar(grammar: readonly GrammarToken[], lanes: readonly number[]): string {
@@ -694,6 +721,7 @@ function encodeStringColumn(
     if (encoded.length > ctx.maxByteLength) {
       throw new EncodeError("limit", `${path}[${i}]: string of ${encoded.length} bytes exceeds the codec limit`);
     }
+    chargeBytes(encoded.length, ctx, path, i);
     return encoded;
   });
   const strings = values as string[];
@@ -852,13 +880,15 @@ function decodeStringColumn(
     if (raw > BigInt(r.limits.maxByteLength)) {
       throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
     }
-    return decodeSlice(r.bytes(Number(raw)), i);
+    const len = Number(raw);
+    r.chargeBytes(len, path, i);
+    return decodeSlice(r.bytes(len), i);
   };
-  const checkProfileLength = (value: string, i: number): string => {
-    if (utf8Encoder.encode(value).length > r.limits.maxByteLength) {
+  const chargeReconstructed = (len: number, i: number): void => {
+    if (len > r.limits.maxByteLength) {
       throw new DecodeError("limit", `${path}[${i}]: reconstructed string length exceeds limit`);
     }
-    return value;
+    r.chargeBytes(len, path, i);
   };
   interface Escapes {
     escaped: Column<boolean>;
@@ -917,13 +947,15 @@ function decodeStringColumn(
         if (codes[i] === 0) escapeCount++;
       }
     }
+    const lengths = utf8Lengths(dict);
     const value = (i: number): string => {
       const code = codes ? codes[i]! : 0;
       if (code === 0) return readLiteral(i);
       if (code > dict.length) {
         throw new DecodeError("range", `${path}[${i}]: dictionary code ${code} out of range`);
       }
-      return checkProfileLength(dict[code - 1]!, i);
+      chargeReconstructed(lengths[code - 1]!, i);
+      return dict[code - 1]!;
     };
     // each escape costs at least its length byte: a body too short for them fails on its
     // first bad row or its end, before allocating
@@ -942,19 +974,29 @@ function decodeStringColumn(
     const escapes = readEscapes();
     const matchedCount = count - escapes.count;
     const numeric = grammar.filter((token): token is Extract<GrammarToken, { num: unknown }> => "num" in token);
+    // lane padding is structure; lane ranges are each matched row's own checks, made in row order
+    const ranges = numeric.map((): DeferredRange => ({ index: -1, error: null }));
     const lanes = numeric.map((token, lane) =>
-      decodeIntColumn(r, { min: 0n, max: grammarLimit(token) - 1n }, matchedCount, `${path}.lane[${lane}]`),
+      decodeIntColumn(r, { min: 0n, max: grammarLimit(token) - 1n }, matchedCount, `${path}.lane[${lane}]`, ranges[lane]),
     );
-    // every numeric token renders exactly len ASCII digits, so all matched rows share one length
+    let badRow = -1;
+    let badRange: DecodeError | null = null;
+    for (const range of ranges) {
+      if (range.error && (badRange === null || range.index < badRow)) {
+        badRow = range.index;
+        badRange = range.error;
+      }
+    }
+    const rendered = renderedLength(grammar);
     const resolve = (values: string[] | null): void => {
-      let checked = false;
+      let matched = 0;
       for (let i = 0; i < count; i++) {
         if (escapes.escaped(i)) {
           const value = readLiteral(i);
           if (values) values.push(value);
-        } else if (!checked) {
-          checkProfileLength(renderGrammar(grammar, lanes.map((lane) => lane(0))), i);
-          checked = true;
+        } else {
+          if (matched++ === badRow) throw badRange!;
+          chargeReconstructed(rendered, i);
         }
       }
     };
@@ -976,6 +1018,7 @@ function decodeStringColumn(
     if (!derived) throw new DecodeError("unsupported", `${path}: derived column requires a profile for this leaf`);
     const escapes = readEscapes();
     const source = sourceOf(derived.source);
+    const lengths = utf8Lengths(derived.values);
     // per participant: its escape index when escaped, else the source's dictionary code
     const resolve = (slot: Int32Array | null): void => {
       let j = 0;
@@ -995,7 +1038,7 @@ function decodeStringColumn(
             if (code === undefined) {
               throw new DecodeError("range", `${path}[${j}]: derived source value is outside its dictionary`);
             }
-            checkProfileLength(derived.values[code - 1]!, j);
+            chargeReconstructed(lengths[code - 1]!, j);
             if (slot) slot[j] = code;
           }
           j++;
@@ -1026,14 +1069,15 @@ function decodeStringColumn(
       throw new DecodeError("limit", `${path}: packed column total exceeds limit`);
     }
   }
+  r.chargeBytes(total, path);
+  if (!inflate) {
+    throw new DecodeError("unsupported", `${path}: packed string column requires an inflate hook`);
+  }
   const blobLenRaw = readUleb(r);
   if (blobLenRaw > BigInt(r.limits.maxByteLength)) {
     throw new DecodeError("limit", `${path}: packed blob exceeds limit`);
   }
   const blob = r.bytes(Number(blobLenRaw));
-  if (!inflate) {
-    throw new DecodeError("unsupported", `${path}: packed string column requires an inflate hook`);
-  }
   let inflated: Uint8Array;
   try {
     inflated = inflate(blob, total);
@@ -1069,11 +1113,14 @@ function encodeEnumColumn(
   node: Extract<IRNode, { kind: "enum" }>,
   values: readonly unknown[],
   path: string,
+  ctx: EncodeCtx,
 ): void {
+  const lengths = utf8Lengths(node.members);
   const indices = values.map((value, i) => {
     if (typeof value !== "string") throw new EncodeError("type", `${path}[${i}]: expected enum member string`);
     const index = node.members.indexOf(value);
     if (index < 0) throw new EncodeError("type", `${path}[${i}]: "${value}" is not an enum member`);
+    chargeBytes(lengths[index]!, ctx, path, i);
     return BigInt(index);
   });
   packBits(w, indices, enumWidth(node));
@@ -1087,7 +1134,11 @@ function decodeEnumColumn(
 ): Column<string> {
   const width = enumWidth(node);
   const next = unpackBits(r, count, width, path);
-  if (width === 0) return () => node.members[0]!;
+  const lengths = utf8Lengths(node.members);
+  if (width === 0) {
+    r.chargeBytes(count * lengths[0]!, path);
+    return () => node.members[0]!;
+  }
   const indices = new Uint32Array(count);
   for (let i = 0; i < count; i++) {
     const index = next();
@@ -1095,6 +1146,7 @@ function decodeEnumColumn(
       throw new DecodeError("range", `${path}[${i}]: enum index ${index} out of range`);
     }
     indices[i] = Number(index);
+    r.chargeBytes(lengths[indices[i]!]!, path, i);
   }
   return (j) => node.members[indices[j]!]!;
 }
@@ -1237,7 +1289,7 @@ export function encodeColumnarArray(
         encodeStringColumn(w, participating, slots, sourceValue, fieldPath, ctx, ordinalBase + leafIndex);
         break;
       case "enum":
-        encodeEnumColumn(w, field.type, participating, fieldPath);
+        encodeEnumColumn(w, field.type, participating, fieldPath, ctx);
         break;
       default:
         for (let i = 0; i < participating.length; i++) {
@@ -1332,6 +1384,7 @@ export function decodeColumnarArray(
         break;
       case "literal": {
         const value = field.type.value;
+        r.chargeBytes(participating * literalBytes(field.type), fieldPath);
         values = () => value;
         break;
       }
