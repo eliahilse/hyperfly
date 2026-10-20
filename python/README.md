@@ -43,6 +43,7 @@ class EventResponse(BaseModel):
 
 codec = compile(EventResponse, validate=True)
 
+response = EventResponse(events=[Event(id=1, at_ms=1_792_454_400_000, status=Status.ok)])
 data = codec.encode(response)
 value = codec.decode(data)  # an EventResponse; without validate=True, plain dicts
 ```
@@ -52,7 +53,11 @@ optionality — never reaches the wire. Models it cannot encode fail loudly at c
 time, with the path:
 
 ```python
-compile(Model)  # UnsupportedSchemaError: $.meta: dict[str, int] has no v0 encoding
+class Model(BaseModel):
+    meta: dict[str, int]
+
+
+compile(Model)  # UnsupportedSchemaError: $.meta: type dict[str, int] has no v0 encoding
 ```
 
 ## Columns
