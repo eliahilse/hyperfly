@@ -2852,12 +2852,16 @@ fn dec_string_column(
                         "{path}[{i}]: grammar lane is shorter than the matched row count"
                     ),
                 })?;
-                let value = decoded_int(
-                    Some(0),
-                    Some(*maximum),
-                    value,
-                    &format!("{path}.lane[{lane_index}][{matched}]"),
-                )?;
+                let value = if (0..=i128::from((*maximum).min(INT_MAX))).contains(&value) {
+                    value as i64
+                } else {
+                    decoded_int(
+                        Some(0),
+                        Some(*maximum),
+                        value,
+                        &format!("{path}.lane[{lane_index}][{matched}]"),
+                    )?
+                };
                 values.push(u64::try_from(value).map_err(|_| Error {
                     code: ErrorCode::Range,
                     message: format!("{path}[{i}]: grammar lane value is negative"),
