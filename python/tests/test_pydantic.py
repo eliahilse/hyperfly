@@ -24,6 +24,11 @@ from hyperfly.pydantic import _same_schema, _SchemaMismatch
 PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:2])
 
 
+class _EqualFloat(float):
+    def __eq__(self, other):
+        return True
+
+
 def _assert_integer_leaf_matches_model_output(model):
     definitions = {}
 
@@ -786,6 +791,41 @@ def test_model_validators_keep_declared_field_bounds(mode, nested, plan):
 
 
 @pytest.mark.parametrize("plan,fingerprint", [
+    ("row", "675e12f1a83dd9e0bf3ed14a6c1083ba"),
+    ("columnar", "c5a1c60c5399f7ebf387cb63ff13a884"),
+])
+@pytest.mark.parametrize("mode", ["after", "wrap"])
+def test_model_validator_with_nan_default_keeps_bounds(mode, plan, fingerprint):
+    class Model(BaseModel):
+        x: int = Field(ge=0, le=100)
+        y: float = float("nan")
+
+        if mode == "after":
+            @model_validator(mode="after")
+            def check(self):
+                return self
+        else:
+            @model_validator(mode="wrap")
+            @classmethod
+            def check(cls, value, handler):
+                return handler(value)
+
+    # IR, fingerprints and finite body bytes match origin/main (5e555fe).
+    expected = {"kind": "struct", "fields": [
+        {"name": "x", "type": {"kind": "int", "min": 0, "max": 100}},
+        {"name": "y", "type": {"kind": "float64"}},
+    ]}
+    assert to_ir(Model) == expected
+    codec = compile(Model, validate=False, plan=plan)
+    assert codec.ir == expected
+    assert codec.fingerprint == fingerprint
+    instance = Model(x=10, y=1.5)
+    assert codec.encode_body(instance).hex() == "0a000000000000f83f"
+    assert codec.decode(codec.encode(instance)) == instance.model_dump()
+    assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("plan,fingerprint", [
     ("row", "8c35cc9a22d846a6bc8e96a173a21f2f"),
     ("columnar", "7892c2301f77b48b4c72cab3401810d1"),
 ])
@@ -895,7 +935,11 @@ def test_field_schema_hook_moving_model_ref_is_a_bounds_barrier(
 
 
 @pytest.mark.parametrize("mode", ["after", "wrap"])
-@pytest.mark.parametrize("lower_bound", [0, 999])
+@pytest.mark.parametrize("lower_bound", [
+    0, 999,
+    pytest.param(10.0, id="float-instead-of-int"),
+    pytest.param(_EqualFloat(10), id="spoofed-float-equality"),
+])
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 def test_field_hook_replacing_model_validator_with_modified_body_is_a_barrier(
     mode, lower_bound, plan,
@@ -929,6 +973,38 @@ def test_field_hook_replacing_model_validator_with_modified_body_is_a_barrier(
     assert instance.a.x == max(10, lower_bound) - 100
     assert codec.decode(codec.encode(instance)) == instance.model_dump()
     assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("left,right,equal", [
+    (None, None, True),
+    (10, 10, True),
+    (10, 11, False),
+    (10.0, 10.0, True),
+    (float("nan"), float("nan"), True),
+    (_EqualFloat("nan"), float("nan"), True),
+    (float("nan"), 10.0, False),
+    (True, 1, False),
+    (1, True, False),
+    (True, 1.0, False),
+    (10.0, 10, False),
+    (10, 10.0, False),
+    (_EqualFloat(10), 10.0, False),
+    (10.0, _EqualFloat(10), False),
+    (_EqualFloat(999), 10, False),
+    (10, _EqualFloat(999), False),
+    (_EqualFloat(999), _EqualFloat(10), True),
+])
+def test_model_schema_comparison_matches_scalar_identity_nan_or_exact_type(left, right, equal):
+    assert _same_schema({"value": left}, {"value": right}, {}, {}) is equal
+
+
+def test_model_schema_comparison_matches_scalar_identity_before_equality():
+    class IdentityOnly:
+        def __eq__(self, other):
+            raise AssertionError("identity must not call equality")
+
+    value = IdentityOnly()
+    assert _same_schema({"value": value}, {"value": value}, {}, {})
 
 
 def test_model_schema_comparison_resolves_nested_and_recursive_definitions():

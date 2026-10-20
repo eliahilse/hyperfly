@@ -11,6 +11,7 @@ from __future__ import annotations
 import enum as _enum
 import types
 import typing
+from math import isnan
 from typing import Any, Literal, NoReturn, cast
 
 from ._codec import Codec, PackHooks, checked_options
@@ -209,7 +210,13 @@ def _same_schema(
             if len(left) != len(right):
                 return False
             pending.extend(zip(left, right))
-        elif isinstance(left, (dict, list, tuple)) or isinstance(right, (dict, list, tuple)) or left != right:
+        elif isinstance(left, (dict, list, tuple)) or isinstance(right, (dict, list, tuple)):
+            return False
+        elif not (
+            left is right
+            or (isinstance(left, float) and isinstance(right, float) and isnan(left) and isnan(right))
+            or (type(left) is type(right) and left == right)
+        ):
             return False
     return True
 
