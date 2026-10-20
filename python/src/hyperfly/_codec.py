@@ -2932,9 +2932,6 @@ class Codec(Generic[T]):
         Raise EncodeError with ``type``, ``required``, ``range``, ``float``,
         ``utf8``, ``depth``, or ``limit`` for invalid values or resource bounds.
         """
-        return self._encode_body_raw(value)
-
-    def _encode_body_raw(self, value: Any) -> bytes:
         out = bytearray()
         budget = Budget(self._limits.max_total_items, self._limits.max_total_bytes)
         _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
@@ -2950,12 +2947,10 @@ class Codec(Generic[T]):
         """Decode an entire body from a bytes-like buffer.
 
         Raise DecodeError with ``truncated``, ``trailing``, ``varint``, ``bitmap``,
-        ``marker``, ``range``, ``float``, ``utf8``, ``pack``, ``depth``, or ``limit``
-        for malformed data or resource bounds.
+        ``marker``, ``range``, ``float``, ``utf8``, ``packed``, ``unsupported``,
+        ``depth``, or ``limit`` for malformed data, unavailable decoding features,
+        or resource bounds.
         """
-        return self._decode_body_raw(data)
-
-    def _decode_body_raw(self, data: bytes | bytearray | memoryview) -> T:
         r = Reader(bytes(data), self._limits)
         value = _decode_node(r, self._ir, "$", 0, self._ctx)
         r.expect_end()
@@ -2965,7 +2960,7 @@ class Codec(Generic[T]):
 
     def encode(self, value: T) -> bytes:
         """Encode a value with its fingerprinted envelope; errors follow encode_body."""
-        return MAGIC + bytes([WIRE_VERSION]) + self._fp + self._encode_body_raw(value)
+        return MAGIC + bytes([WIRE_VERSION]) + self._fp + self.encode_body(value)
 
     def decode(self, data: bytes | bytearray | memoryview) -> T:
         """Decode an envelope; raise codes ``header``, ``fingerprint``, or body errors."""
@@ -2979,7 +2974,7 @@ class Codec(Generic[T]):
         actual = data[3:HEADER_SIZE].hex()
         if data[3:HEADER_SIZE] != self._fp:
             raise FingerprintMismatchError(self._fp.hex(), actual)
-        return self._decode_body_raw(data[HEADER_SIZE:])
+        return self.decode_body(data[HEADER_SIZE:])
 
 
 _LIMIT_FIELDS = tuple(field.name for field in dataclasses.fields(Limits))
@@ -3032,7 +3027,7 @@ def compile_ir(
     plan: str = "row",
     limits: Limits | None = None,
     pack: PackHooks | Literal[False] | None = None,
-    profile: Any = None,
+    profile: dict[str, Any] | None = None,
 ) -> Codec[Any]:
     """Compile an IR schema, checking options before IR and optional columnar profile.
 
