@@ -27,14 +27,18 @@ In scope:
 
 - Decoder behaviour on hostile input: crashes, hangs, or memory or CPU use
   beyond the configured [wire v0 section 6 limits](spec/wire-v0.md#6-limits).
-- Artifact fingerprint verification bypass in `fetchArtifact` or `loadArtifact`.
-- HTTP body caps and negotiation in `readBody`, `respond` and Accept parsing,
+- Artifact fingerprint verification bypass in `fetchArtifact` or
+  `loadArtifact` (TypeScript).
+- HTTP body caps and negotiation in the TypeScript and Python HTTP helpers
+  (`readBody`, `respond`, `read_body`, `decode_request` and Accept parsing),
   including the bounds in [negotiation v1 section 6](spec/negotiation-v1.md#6-security).
+  The Rust crate has no HTTP API.
 - Cross-implementation disagreements that let one peer accept bytes another
   rejects in a security-relevant way.
 
-Deployments that raise or disable limits, benchmark claims and the website
-are out of scope.
+Resource use within a deployment's configured limits, including raised
+limits, is out of scope; exceeding those limits is in scope. Benchmark
+claims and the website are out of scope.
 
 Fixes are released as patch versions of every affected package and published
 as GitHub security advisories.

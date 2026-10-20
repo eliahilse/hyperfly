@@ -8,7 +8,7 @@ repository through Changesets. Their versions do not have to match.
 
 - TypeScript: the `hyperfly`, `hyperfly/zod` and `hyperfly/http` entry points,
   including their exported types.
-- Python: the names in `hyperfly.__all__`, and the public APIs of
+- Python: the names in `hyperfly.__all__`, plus the non-underscore names in
   `hyperfly.registry`, `hyperfly.http` and `hyperfly.pydantic`.
 - Rust: the public items re-exported by `hyperfly-core` in `rust/src/lib.rs`,
   including their public fields, variants and methods.
@@ -27,14 +27,20 @@ Error codes are part of each package's public API. These include `limit`,
 `validation` and `json`. Message text is not part of the contract.
 Match on the code rather than the message.
 
+HTTP request failures are also part of the contract: the status codes
+`readBody` answers with in TypeScript, and the `status` and `reason` values of
+Python's `RequestError`, as the package READMEs list them.
+HTTP error message text is not part of the contract.
+
 ## Wire compatibility
 
 The wire format, canonical artifact serialization and fingerprint, and
 negotiation headers are frozen for all of 1.x as described in
 [the spec's stability section](spec/wire-v0.md#stability).
 Any 1.x encoder's bytes decode with any 1.x decoder of the same artifact,
-across TypeScript, Python and Rust, subject to the receiver's local limits
-and required packing support.
+across TypeScript, Python and Rust, subject to the receiver's decode limits.
+Every package decodes packed columns by default; a decoder configured without
+packing support (for example `pack: false` in TypeScript) rejects them.
 
 Encoder output size, the plan or columns `train` picks, and benchmark numbers
 are not part of the contract. They may improve in minor releases while the
@@ -51,8 +57,9 @@ release. Loosening a default is allowed in a minor release.
 ## Runtimes and deprecations
 
 The supported minimums are Node.js 18, Python 3.10 and Rust 1.82 (the MSRV).
-Raising a minimum happens only in a minor release and is called out in the
-changelog.
+Raising a minimum is an exception to the breaking-change rule: it is not
+treated as breaking, happens only in a minor release and is called out in
+the changelog.
 
 An API is deprecated in a minor release with a changelog note and a
 replacement. It is removed no earlier than the next major release.
