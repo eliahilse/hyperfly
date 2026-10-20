@@ -10,10 +10,11 @@ protocol for one exact route — and speaks JSON to anything that hasn't been to
 > it byte-for-byte, but nothing is stable yet. Expect breaking changes before 1.0.
 
 ```bash
-npm install hyperfly zod
+npm install hyperfly@next zod
 ```
 
-Zod 4 is needed only for `hyperfly/zod`; the codec and HTTP entry points do not require it.
+Pre-releases are published under the `next` tag. Zod 4 is needed only for `hyperfly/zod`; the codec and HTTP entry
+points do not require it.
 
 ## Two lines at the boundary
 
@@ -48,7 +49,7 @@ Zod refinements and string/array length constraints are checked only with
 
 ## Columns and profiles
 
-Arrays of records encode far better column-wise, which is a different plan for the same schema:
+Arrays of many records usually encode smaller column-wise, which is a different plan for the same schema:
 
 ```ts
 const columnar = compile(EventResponse, { plan: "columnar" });
@@ -70,8 +71,9 @@ const profile = train(toIR(EventResponse), [response]); // Supply representative
 const profiled = compile(EventResponse, { plan: "columnar", profile });
 ```
 
-The dictionary is an out-of-band artifact: it ships once, not per request. On an audit-log route in the repo's
-benchmark it costs 17 KB and pays for itself after twelve requests.
+The dictionary is part of the out-of-band artifact: it ships once, not per request. On an audit-log route in the
+repo's benchmark the dictionary is estimated at 17 KB and pays for itself after about twelve requests; the estimate
+excludes the rest of the artifact.
 
 ## Serving it
 
@@ -101,7 +103,8 @@ When the encoder refuses a value under its [limits](#limits) (an `EncodeError` w
 `respond` and `encodeFor` send the same value as JSON with `Hyperfly-Offer` naming the codec, and call
 `onFallback(error)`. The client reads it like any other JSON response. Any other `EncodeError` (`type`, `required`,
 `range`, `validation`, ...) means the value does not match the schema; it is thrown, not answered as JSON. Pass
-`enabled: false` to answer JSON without consulting the registry, as an operator switch or to shed load.
+`enabled: false` to `respond` or `negotiate` to answer JSON without consulting the registry, as an operator switch
+or to shed load.
 
 ### Request bodies
 
@@ -220,7 +223,11 @@ async function getEvents(url: string) {
   if (decoded.kind === "unknown-codec") throw new Error("Unadvertised codec");
   const offer = result.headers.get("hyperfly-offer");
   if (decoded.kind === "json" && offer && !registry.has(offer)) {
-    const codec = await fetchArtifact(new URL(url).origin, offer);
+    // an offer is advisory: a failed upgrade leaves this client on JSON, not failing the request
+    const codec = await fetchArtifact(new URL(url).origin, offer).catch((error: unknown) => {
+      console.warn("hyperfly artifact fetch failed", error);
+      return undefined;
+    });
     if (codec) registry.add(codec);
   }
   return decoded.value;
@@ -243,11 +250,16 @@ import { CodecRegistry } from "hyperfly";
 import { discovery, respond } from "hyperfly/http";
 
 const registries = new Map<string, CodecRegistry>();
+function registryFor(tenantId: string): CodecRegistry {
+  let registry = registries.get(tenantId);
+  if (!registry) registries.set(tenantId, (registry = new CodecRegistry(codecsFor(tenantId))));
+  return registry;
+}
 
 async function handle(request: Request): Promise<Response> {
   const tenant = await authenticate(request);
   if (!tenant) return new Response(null, { status: 401 });
-  const registry = registries.get(tenant.id) ?? new CodecRegistry();
+  const registry = registryFor(tenant.id);
   const artifact = discovery(request, registry);
   if (artifact) {
     if (artifact.ok) artifact.headers.set("Cache-Control", "private, max-age=31536000, immutable");
@@ -257,8 +269,11 @@ async function handle(request: Request): Promise<Response> {
 }
 ```
 
-`discovery` marks a hit `public, max-age=31536000, immutable`, which suits a public schema. For anything
-tenant-scoped, override it as above so a shared cache or CDN never hands one tenant's artifact to another. On the
+Here `codecsFor` stands for your own lookup of a tenant's codecs, such as one compiled with a profile trained on
+that tenant's traffic. `discovery` marks a hit `public, max-age=31536000, immutable`, which suits a public schema.
+For anything tenant-scoped, override it as above so a shared cache or CDN never hands one tenant's artifact to
+another. Protected discovery does not hide everything: with a profile, a response's length still shows roughly
+whether its values were dictionary hits, across requests (negotiation v1 §6). On the
 client, `fetchArtifact` accepts `headers` for credentials, plus `fetch`, `signal`, `maxBytes`, `limits` and `pack`
 options.
 
@@ -314,8 +329,10 @@ default to artifact downloads and throws code `limit` past it.
 Compiling, encoding, decoding and loading artifacts throw `HyperflyError` with a `code`; match on `code`, not on the
 message. `EncodeError` and `DecodeError` say which direction failed, `FingerprintMismatchError` is a `DecodeError`
 with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `path`. When an underlying error caused
-it, such as a `SyntaxError`, a `ZodError` or an inflate failure, that error is the standard `cause`. Network errors
-and aborts from `fetchArtifact` propagate unchanged.
+it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate hook, that error is the standard
+`cause`; an error that describes the input itself has none. Two exceptions are not `HyperflyError`s: network errors
+and aborts from `fetchArtifact` propagate unchanged, and a `maxBytes` that is not a non-negative safe integer throws
+`RangeError`.
 
 ```ts
 import { HyperflyError } from "hyperfly";
@@ -374,8 +391,8 @@ ESM only, three entry points:
 | Node 22 | Yes | Yes | From 22.3 | Supported |
 | Node 24 | Yes | Yes | Yes | Supported |
 | Bun | Yes | Yes | Yes | Tested in CI |
-| Deno 2 | Yes | Yes | Yes | Supported; use `npm:` imports |
-| Cloudflare Workers | Yes | Yes | Only where `node:zlib` resolves | Supported; bundle ESM |
+| Deno 2 | Yes | Yes | Where `process.getBuiltinModule` exists | Supported; use `npm:` imports |
+| Cloudflare Workers | Yes | Yes | Where `process.getBuiltinModule` exists | Supported; bundle ESM |
 | Browsers | Yes | Yes | No | Supported; use a bundler |
 
 Every runtime decodes packed string columns: where `node:zlib` is unavailable, a bundled pure-JS inflater with the
@@ -416,10 +433,12 @@ production traffic has been measured yet.
 
 ## Guarantees
 
-- **Exact-schema compatibility.** Any change to the schema or plan is a new
-  fingerprint. A mismatch fails before the body is parsed; it never misreads.
+- **Exact-schema compatibility.** Any change to the canonical IR, the plan or the
+  profile is a new fingerprint. Zod refinements and string/array length constraints
+  are not part of the IR, so they do not change it. A mismatch fails before the body
+  is parsed; it never misreads.
 - **Canonical output.** Encoding is canonical for a given implementation, version and set of pack hooks;
-  re-encoding a decoded value reproduces the bytes that implementation emits.
+  decoding what it emitted and encoding the result again reproduces the same bytes.
 - **Bounded decoding.** Nesting, item counts and byte lengths are limited. Per-body
   item and byte budgets bound the sum of all array counts and of all decoded string
   and bytes lengths, and amplification bounds cap how many rows or bytes a hostile
