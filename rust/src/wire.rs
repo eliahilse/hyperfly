@@ -1,27 +1,49 @@
 use std::fmt;
 
+/// A machine-readable reason for a compilation, encoding, or decoding failure.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
+    /// `varint`: an overlong ULEB128 encoding or one exceeding eight bytes.
     Varint,
+    /// `range`: a numeric value, index, or derived source is outside its allowed domain.
     Range,
+    /// `type`: an input value does not match its schema type, literal, enum, or fixed length.
     Type,
+    /// `required`: an input object lacks a required field.
     Required,
+    /// `utf8`: decoded string bytes are not valid UTF-8.
     Utf8,
+    /// `float`: a non-finite float, or on decode a negative-zero bit pattern or a non-minimal XOR
+    /// float column encoding.
     Float,
+    /// `marker`: an invalid boolean, nullable marker, column mode, or mode parameter.
     Marker,
+    /// `bitmap`: nonzero bitmap or bit-packing padding, an absent field marked null, inconsistent
+    /// escape bits, or a patched-frame exception with a zero high part.
     Bitmap,
+    /// `trailing`: bytes remain after a complete body.
     Trailing,
+    /// `truncated`: input ends before the declared value is complete.
     Truncated,
+    /// `depth`: value traversal exceeds the configured nesting depth.
     Depth,
+    /// `limit`: an item, byte, amplification, or remaining-input bound is exceeded.
     Limit,
+    /// `header`: the envelope is too short or has invalid magic or wire major version.
     Header,
+    /// `fingerprint`: the envelope fingerprint differs from the codec's fingerprint.
     Fingerprint,
+    /// `ir`: the schema, layout, or profile is invalid.
     Ir,
+    /// `packed`: a DEFLATE blob is invalid, has trailing bytes, or has the wrong output length.
     Packed,
+    /// `unsupported`: packed input is disabled or a column requires a missing profile entry.
     Unsupported,
 }
 
 impl ErrorCode {
+    /// Returns the lowercase wire error code name.
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Varint => "varint",
@@ -45,9 +67,12 @@ impl ErrorCode {
     }
 }
 
+/// A codec failure with a stable code and a human-readable explanation.
 #[derive(Debug)]
 pub struct Error {
+    /// The machine-readable failure category.
     pub code: ErrorCode,
+    /// The explanation, including a value path when available.
     pub message: String,
 }
 
@@ -59,6 +84,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A codec operation's value or typed failure.
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
@@ -68,17 +94,32 @@ pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
     })
 }
 
+/// The smallest wire integer, `-(2^53 - 1)`.
 pub const INT_MIN: i64 = -((1i64 << 53) - 1);
+/// The largest wire integer, `2^53 - 1`.
 pub const INT_MAX: i64 = (1i64 << 53) - 1;
 const ULEB_DOMAIN_MAX: u64 = (1u64 << 56) - 1;
 const MAX_ULEB_BYTES: usize = 8;
 
+/// Resource bounds enforced during encoding and decoding.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
+    /// Maximum nesting depth from root depth zero; default 64. Structs, arrays, and nullable nodes count.
     pub max_depth: u32,
+    /// Maximum number of elements per array; default `2^24`.
     pub max_items: u64,
+    /// Maximum bytes per string or byte value, and per packed blob and inflated column; default `2^28`.
     pub max_byte_length: u64,
+    /// Array count multiplier for the bound `count <= max_amplification * (remaining_bytes + 1)`;
+    /// default 32. On decode it bounds columnar arrays and row arrays of zero-bit elements;
+    /// other row arrays are held to the stricter one-bit floor, `count <= remaining_bytes * 8`.
+    /// Encoding applies it to every array, with the array's own bytes after its count in place
+    /// of remaining bytes.
     pub max_amplification: u64,
+    /// Maximum sum of the element counts of every array in one body; default `2^24`. The
+    /// effective item budget is `min(max_total_items, max_amplification * (body_length + 1))`,
+    /// charged as each array's count is read and checked against the final body on encode.
+    pub max_total_items: u64,
 }
 
 impl Default for Limits {
@@ -87,15 +128,43 @@ impl Default for Limits {
             max_depth: 64,
             max_items: 1 << 24,
             max_byte_length: 1 << 28,
-            max_amplification: 4096,
+            max_amplification: 32,
+            max_total_items: 1 << 24,
         }
+    }
+}
+
+impl Limits {
+    pub(crate) fn item_budget(&self, body_length: usize) -> u64 {
+        let amplified =
+            (body_length as u128 + 1).saturating_mul(u128::from(self.max_amplification));
+        u128::from(self.max_total_items).min(amplified) as u64
+    }
+}
+
+pub(crate) struct ItemBudget {
+    pub total: u64,
+    cap: u64,
+}
+
+impl ItemBudget {
+    pub fn new(cap: u64) -> Self {
+        ItemBudget { total: 0, cap }
+    }
+
+    pub fn charge(&mut self, count: u64, path: &str) -> Result<()> {
+        if count > self.cap - self.total {
+            return err(ErrorCode::Limit, format!("{path}: item budget exceeded"));
+        }
+        self.total += count;
+        Ok(())
     }
 }
 
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
-    pub limits: Limits,
+    items: ItemBudget,
 }
 
 impl<'a> Reader<'a> {
@@ -103,8 +172,12 @@ impl<'a> Reader<'a> {
         Reader {
             buf,
             pos: 0,
-            limits,
+            items: ItemBudget::new(limits.item_budget(buf.len())),
         }
+    }
+
+    pub fn charge_items(&mut self, count: usize, path: &str) -> Result<()> {
+        self.items.charge(count as u64, path)
     }
 
     pub fn u8(&mut self) -> Result<u8> {

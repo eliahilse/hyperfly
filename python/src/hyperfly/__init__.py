@@ -1,6 +1,7 @@
 from .registry import CodecRegistry
 from ._codec import Codec, HEADER_SIZE, MAGIC, WIRE_VERSION, compile_ir
 from ._ir import fingerprint_of, serialize_artifact, serialize_node, validate_ir
+from ._train import train
 from ._wire import (
     DEFAULT_LIMITS,
     INT_MAX,
@@ -32,5 +33,6 @@ __all__ = [
     "fingerprint_of",
     "serialize_artifact",
     "serialize_node",
+    "train",
     "validate_ir",
 ]

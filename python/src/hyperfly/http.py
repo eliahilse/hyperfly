@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from ._codec import Codec
@@ -85,10 +87,39 @@ def negotiate(
     return Negotiation("json", headers)
 
 
+def _json_key(key: Any) -> Any:
+    if isinstance(key, Enum):
+        key = key.value
+    if isinstance(key, float) and not math.isfinite(key):
+        return "NaN" if key != key else ("Infinity" if key > 0 else "-Infinity")
+    return key
+
+
+def _json_value(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        value = model_dump(mode="json", by_alias=True)
+    if isinstance(value, Enum):
+        value = value.value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {_json_key(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
 def encode_for(decision: Negotiation, value: Any) -> tuple[bytes, dict[str, str]]:
     if decision.kind == "hyperfly" and decision.codec is not None:
         return decision.codec.encode(value), decision.headers
-    return json.dumps(value, separators=(",", ":")).encode("utf-8"), decision.headers
+    try:
+        plain = _json_value(value)
+    except RecursionError:
+        raise ValueError("JSON fallback value is circular or nested too deeply") from None
+    text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
+    return text.encode("utf-8", "backslashreplace"), decision.headers
 
 
 @dataclass(frozen=True)
@@ -131,7 +162,11 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     """
     if not (content_type or "").lower().startswith(HYPERFLY_MEDIA_TYPE):
         text = body.decode("utf-8") if isinstance(body, bytes) else body
-        return "json", json.loads(text)
+
+        def reject_constant(value: str) -> Any:
+            raise json.JSONDecodeError(f"invalid JSON constant {value}", text, 0)
+
+        return "json", json.loads(text, parse_constant=reject_constant)
     data = body.encode("utf-8") if isinstance(body, str) else body
     fingerprint = data[3:19].hex()
     codec = registry.get(fingerprint)
