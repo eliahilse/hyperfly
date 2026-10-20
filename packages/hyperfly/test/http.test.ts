@@ -891,6 +891,28 @@ describe("request body limits", () => {
     if (!result.ok) expect(result.response.status).toBe(400);
   });
 
+  const withContentLength = (contentLength: string) => {
+    const request = new Request(url, { method: "POST", body: new TextEncoder().encode("0") });
+    const get = request.headers.get.bind(request.headers);
+    request.headers.get = (name) => (name.toLowerCase() === "content-length" ? contentLength : get(name));
+    return request;
+  };
+
+  test.each([" 2 ", "\t2", "2\t ", "0002", "9".repeat(400)])("honours Content-Length %j", async (contentLength) => {
+    const request = withContentLength(contentLength);
+    const result = await readBody(request, registry, { maxBytes: 1 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(413);
+    expect(request.bodyUsed).toBe(false);
+  });
+
+  test.each(["\u00a02", "2\n", "\v2", "2\r", "\u0662", "２", `${"0".repeat(400)}1`])(
+    "counts bytes instead of trusting Content-Length %j",
+    async (contentLength) => {
+      expect(await readBody(withContentLength(contentLength), registry, { maxBytes: 1 })).toEqual({ ok: true, value: 0 });
+    },
+  );
+
   test.each(["-1", "1.5", "1x"])("ignores invalid Content-Length %s", async (contentLength) => {
     const result = await readBody(new Request(url, {
       method: "POST",

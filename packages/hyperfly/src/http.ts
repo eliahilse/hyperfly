@@ -472,8 +472,8 @@ async function readBodyWithinLimit<T>(
   if (!isHyperfly && !isJson) {
     return { ok: false, response: new Response(null, { status: 415 }) };
   }
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && /^\d+$/.test(contentLength.trim()) && Number(contentLength) > maxBytes) {
+  const contentLength = trimOws(request.headers.get("content-length") ?? "");
+  if (/^[0-9]+$/.test(contentLength) && Number(contentLength) > maxBytes) {
     return { ok: false, response: new Response(null, { status: 413 }) };
   }
   const result = await readLimited(request.body, maxBytes);
