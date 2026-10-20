@@ -10,13 +10,32 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [{ name = "Elia Hilse" }]
+keywords = ["serialization", "compression", "binary", "pydantic", "http"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: System :: Archiving :: Compression",
+    "Typing :: Typed",
+]
 
 [project.optional-dependencies]
 pydantic = ["pydantic>=2.5"]
 test = ["pytest>=8", "pydantic>=2.5", "hypothesis>=6"]
 
 [project.urls]
+Homepage = "https://hyperfly.dev"
 Repository = "https://github.com/eliahilse/hyperfly"
+Issues = "https://github.com/eliahilse/hyperfly/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hyperfly"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["tests", "package.json"]
