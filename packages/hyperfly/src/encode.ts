@@ -12,13 +12,23 @@ function fail(code: ErrorCode, path: string, message: string): never {
   throw new EncodeError(code, `${path}: ${message}`);
 }
 
-const objectTag = Function.prototype.call.bind(Object.prototype.toString) as (value: unknown) => string;
+/** The byte length of a Uint8Array of any realm, or undefined for anything else, a Proxy included. */
+function bytesLength(value: unknown): number | undefined {
+  try {
+    if (value instanceof Uint8Array || isUint8Array(value)) return value.length;
+  } catch {
+    // a proxy, or a value whose prototype cannot be read, is not bytes
+  }
+  return undefined;
+}
+
+const objectToString = Object.prototype.toString;
 
 /** A struct value is an object tagged "[object Object]": typed arrays, Map, Set, Date and boxed primitives are not. */
 export function isStructValue(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null) return false;
   try {
-    return objectTag(value) === "[object Object]";
+    return objectToString.call(value) === "[object Object]";
   } catch {
     return false;
   }
@@ -170,12 +180,7 @@ export function encodeNode(
       return;
     }
     case "bytes": {
-      let length: number | undefined;
-      try {
-        if (value instanceof Uint8Array || isUint8Array(value)) length = value.length;
-      } catch {
-        // a proxy or a value whose prototype cannot be read is not bytes
-      }
+      const length = bytesLength(value);
       if (length === undefined) fail("type", path, "expected Uint8Array");
       if (length > ctx.maxByteLength) fail("limit", path, `bytes of ${length} exceeds the codec limit`);
       chargeBytes(length, ctx, path);

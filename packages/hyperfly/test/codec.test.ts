@@ -607,6 +607,23 @@ describe("struct values", () => {
     );
   });
 
+  test("dotted field names at two depths keep their own containers", () => {
+    const leaf: IRNode = { kind: "struct", fields: [{ name: "v", type: { kind: "int" } }] };
+    const DOTTED: IRNode = {
+      kind: "array",
+      element: {
+        kind: "struct",
+        fields: [
+          { name: "a.b", type: { kind: "struct", fields: [{ name: "c", type: leaf }] } },
+          { name: "a", type: { kind: "struct", fields: [{ name: "b.c", type: leaf }] } },
+        ],
+      },
+    };
+    const codec = compileIR(DOTTED, { plan: "columnar" });
+    const value = [{ "a.b": { c: { v: 1 } }, a: { "b.c": { v: 2 } } }];
+    expect(codec.decodeBody(codec.encodeBody(value))).toEqual(value);
+  });
+
   test("the first failure is reported in leaf order, then row order", () => {
     const TWO: IRNode = {
       kind: "array",

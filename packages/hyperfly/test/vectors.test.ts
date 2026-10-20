@@ -54,7 +54,7 @@ describe("golden vectors: invalid decode", () => {
   }
 });
 
-function expectEncodeError(v: { ir: unknown; value: unknown; error: string }): void {
+function expectEncodeError(v: { name?: string; ir: unknown; value: unknown; error: string }): void {
   const codec = compileIR(v.ir as IRNode);
   try {
     codec.encodeBody(revive(v.value));
@@ -72,8 +72,9 @@ describe("golden vectors: invalid encode", () => {
 
   test("a $bytes marker revives to a Uint8Array, which is not a struct value", () => {
     expectEncodeError({
-      ir: { kind: "struct", fields: [{ name: "a", type: { kind: "bool" } }] },
-      value: { $bytes: "0001" },
+      name: "struct-bytes-not-object",
+      ir: { kind: "struct", fields: [{ name: "a", type: { kind: "bool" }, optional: true }] },
+      value: { $bytes: "00" },
       error: "type",
     });
     expect(revive({ s: { $bytes: "0001" }, t: [{ $bytes: "" }], u: { $bytes: "00", v: 1 } })).toEqual({
