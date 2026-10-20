@@ -9,6 +9,7 @@ import sys
 import zlib
 from array import array
 from bisect import bisect_right
+from collections import Counter
 from collections.abc import Mapping
 from functools import partial
 from itertools import accumulate, chain, compress, islice, repeat
@@ -445,6 +446,7 @@ class _Ctx:
         "grammar_bytes",
         "renderers",
         "grammar_keys",
+        "recodings",
         "derived_tables",
         "long_derived",
         "leaf_plans",
@@ -501,6 +503,9 @@ class _Ctx:
         }
         self.renderers = {ordinal: _grammar_renderer(grammar) for ordinal, grammar in self.grammars.items()}
         self.grammar_keys: dict[int, dict[Any, int]] = {}
+        # per derived string column, its own dictionary's code for each derivation code,
+        # built once a column is long enough to pay for it
+        self.recodings: dict[int, dict[int, int]] = {}
         self.column_counts: dict[int, int] = {}
         columnar_leaves = [leaves for leaves, _zero_bit in self.arrays.values() if leaves is not None]
         self.leaf_plans = {
@@ -1640,9 +1645,12 @@ def _invalid_utf8(buf: bytes, starts: array, ends: array, count: int) -> int | N
 
 def _escapes(
     r: Reader, count: int, path: str, at: Callable[[int], int] | None = None, what: str = "string"
-) -> tuple[array, array, _Failure | None, Callable[[], Iterator[int]]]:
+) -> tuple[array, array, _Failure | None, Callable[[], Iterable[int]]]:
     """Up to `count` length-prefixed values in row order: their offsets, the first
     that fails at its participating row, and their lengths as far as they were read."""
+    if not count:
+        none = array(_UINT[4])
+        return none, none, None, tuple
     starts, ends, failure, pending = _read_slices(r, count, path, what, at)
     if what == "string":
         bad = _invalid_utf8(r.buf, starts, ends, len(starts))
@@ -1651,6 +1659,9 @@ def _escapes(
     if failure is not None and at is not None:
         failure = (at(failure[0]), failure[1], failure[2])
     return starts, ends, failure, lambda: chain(map(sub, ends, starts), (pending,))
+
+
+_SUM_NOW = 1024
 
 
 def _settle(
@@ -1667,8 +1678,14 @@ def _settle(
     lengths fits defers the exact sum, `total` or else the lengths summed."""
     budget = r.budget
     exact = total or (lambda: sum(make()))
-    if failure is None and bound is not None and budget.defer_bytes(bound, exact):
-        return
+    if failure is None and bound is not None:
+        # a small column is summed at once: its rows are no more than its bound, unless
+        # all its values share one length and its sum is a product
+        if bound <= _SUM_NOW and bound <= budget.byte_cap - budget.bytes - budget.owed:
+            budget.bytes += exact()
+            return
+        if bound > _SUM_NOW and budget.defer_bytes(bound, exact):
+            return
     budget.settle()
     remaining = budget.byte_cap - budget.bytes
     lengths = make
@@ -1760,7 +1777,7 @@ def _decode_string_column(
     path: str,
     ctx: _Ctx,
     ordinal: int,
-    source_codes: Callable[[int], int | array] | None,
+    source_codes: Callable[..., Any] | None,
 ) -> _Values:
     mode = r.u8()
     if mode > 4:
@@ -1769,207 +1786,238 @@ def _decode_string_column(
         if mode != 0:
             _dfail("marker", path, "empty column must use mode 0x00")
         return _NONE
+    if mode == 0x00:
+        return _plain(r.buf, *_literals(r, count, path))
+    if mode == 0x01:
+        return _dictionary_column(r, count, path, ctx, ordinal)
+    if mode == 0x03:
+        return _grammar_column(r, count, path, ctx, ordinal)
+    if mode == 0x04:
+        return _derived_column(r, count, path, ctx, ordinal, source_codes)
+    return _packed_column(r, count, path, ctx)
+
+
+def _dictionary_column(r: Reader, count: int, path: str, ctx: _Ctx, ordinal: int) -> _Values:
     buf = r.buf
     failure: _Failure | None = None
     make: Callable[[], Iterable[int]]
-
-    if mode == 0x00:
+    entries = ctx.dicts.get(ordinal)
+    if entries is None:
+        _dfail("unsupported", path, "dictionary column requires a profile for this leaf")
+    width = r.u8()
+    if width > 14:
+        _dfail("marker", path, f"dictionary width {width} exceeds 14")
+    packed = _unpack_bits(r, count, width, path)
+    if packed is None:
         return _plain(buf, *_literals(r, count, path))
-
-    if mode == 0x01:
-        entries = ctx.dicts.get(ordinal)
-        if entries is None:
-            _dfail("unsupported", path, "dictionary column requires a profile for this leaf")
-        width = r.u8()
-        if width > 14:
-            _dfail("marker", path, f"dictionary width {width} exceeds 14")
-        packed = _unpack_bits(r, count, width, path)
-        if packed is None:
-            return _plain(buf, *_literals(r, count, path))
-        codes: array = packed
-        if max(codes) > len(entries):
-            index = next(compress(itertools.count(), map(len(entries).__lt__, codes)))
-            failure = (index, False, DecodeError("range", f"{path}[{index}]: dictionary code {codes[index]} out of range"))
-        long_codes = ctx.long_codes[ordinal]
-        if long_codes:
-            too_long = next(compress(itertools.count(), map(long_codes.__contains__, codes)), None)
-            if too_long is not None and (failure is None or too_long < failure[0]):
-                failure = (too_long, False, _too_long(path, too_long))
-        escaped = codes.count(0) if failure is None else codes[: failure[0]].count(0)
-        starts, ends, escape_failure, escape_lengths = _escapes(
-            r, escaped, path, lambda j: next(islice(_zeros(codes), j, None))
+    codes: array = packed
+    if max(codes) > len(entries):
+        index = next(compress(itertools.count(), map(len(entries).__lt__, codes)))
+        failure = (index, False, DecodeError("range", f"{path}[{index}]: dictionary code {codes[index]} out of range"))
+    long_codes = ctx.long_codes[ordinal]
+    if long_codes:
+        too_long = next(compress(itertools.count(), map(long_codes.__contains__, codes)), None)
+        if too_long is not None and (failure is None or too_long < failure[0]):
+            failure = (too_long, False, _too_long(path, too_long))
+    escaped = codes.count(0) if failure is None else codes[: failure[0]].count(0)
+    starts, ends, escape_failure, escape_lengths = _escapes(
+        r, escaped, path, lambda j: next(islice(_zeros(codes), j, None))
+    )
+    sizes = ctx.entry_bytes[ordinal]
+    if escaped:
+        make = lambda: map(add, map(sizes.__getitem__, codes), _merge(map(not_, codes), repeat(0), escape_lengths()))
+    else:
+        make = lambda: map(sizes.__getitem__, codes)
+    _settle(
+        r,
+        make,
+        escape_failure or failure,
+        path,
+        (count - escaped) * ctx.longest_entry[ordinal] + _span(starts, ends),
+        lambda: (
+            (count - escaped) * sizes[1] if ordinal in ctx.uniform_entries else sum(map(sizes.__getitem__, codes))
         )
-        sizes = ctx.entry_bytes[ordinal]
-        if escaped:
-            make = lambda: map(add, map(sizes.__getitem__, codes), _merge(map(not_, codes), repeat(0), escape_lengths()))
+        + sum(escape_lengths()),
+    )
+    table = ctx.tables[ordinal]
+
+    def lookup_values() -> list[Any]:
+        values = list(map(table.__getitem__, codes))
+        for i, text in zip(_zeros(codes), _texts(buf, starts, ends)):
+            values[i] = text
+        return values
+
+    def dict_codes(lookup: dict[str, int]) -> array:
+        if not escaped:
+            return codes
+        out = array("H", codes)
+        for i, text in zip(_zeros(codes), _texts(buf, starts, ends)):
+            out[i] = lookup.get(text, 0)
+        return out
+
+    return _Values(lookup_values, codes=dict_codes)
+
+
+def _grammar_column(r: Reader, count: int, path: str, ctx: _Ctx, ordinal: int) -> _Values:
+    buf = r.buf
+    failure: _Failure | None = None
+    make: Callable[[], Iterable[int]]
+    grammar = ctx.grammars.get(ordinal)
+    if grammar is None:
+        _dfail("unsupported", path, "grammar column requires a profile for this leaf")
+    escapes, escaped = _read_escapes(r, count, path)
+    matched = count - escaped
+    bounds = ctx.lane_bounds[ordinal]
+    lanes = [
+        _decode_int_column(r, node, matched, f"{path}.lane[{lane_index}]", lane=True)
+        for lane_index, node in enumerate(bounds)
+    ]
+    rows = _selector(escapes, count) if 0 < escaped < count else b""
+    at = _nth_set(rows) if rows else None
+    outside: tuple[int, int] | None = None
+    for lane_index, lane in enumerate(lanes):
+        beyond = lane.outside
+        if beyond is not None and (outside is None or beyond < outside[0]):
+            outside = (beyond, lane_index)
+    # every rendering of one grammar has the same length, known from its tokens
+    length = ctx.grammar_bytes[ordinal]
+    too_long = matched > 0 and length > r.limits.max_byte_length
+    before = escaped
+    if outside is not None or too_long:
+        index = outside[0] if outside is not None and not too_long else 0
+        row = next(islice(compress(itertools.count(), map(not_, rows)), index, None)) if rows else index
+        if outside is not None and outside[0] == index:
+            lane_index = outside[1]
+            value = next(islice(lanes[lane_index].make(), index, None))
+            failure = (row, False, _range_error(bounds[lane_index], f"{path}.lane[{lane_index}]", index, value))
         else:
-            make = lambda: map(sizes.__getitem__, codes)
+            failure = (row, False, _too_long(path, row))
+        before = (escapes & ((1 << row) - 1)).bit_count()
+    starts, ends, escape_failure, escape_lengths = _escapes(r, before, path, at)
+    if not escaped:
+        _settle_uniform(r, length, count, failure, path)
+    else:
+        make = escape_lengths if escaped == count else lambda: _merge(rows, repeat(length), escape_lengths())
         _settle(
             r,
             make,
             escape_failure or failure,
             path,
-            (count - escaped) * ctx.longest_entry[ordinal] + _span(starts, ends),
-            lambda: (
-                (count - escaped) * sizes[1] if ordinal in ctx.uniform_entries else sum(map(sizes.__getitem__, codes))
-            )
-            + sum(escape_lengths()),
+            length * matched + _span(starts, ends),
+            lambda: length * matched + sum(escape_lengths()),
         )
-        table = ctx.tables[ordinal]
+    render = ctx.renderers[ordinal]
 
-        def lookup_values() -> list[Any]:
-            values = list(map(table.__getitem__, codes))
-            for i, text in zip(_zeros(codes), _texts(buf, starts, ends)):
-                values[i] = text
-            return values
+    def keys() -> Iterator[Any]:
+        lane_values = [lane.make() for lane in lanes]
+        return iter(lane_values[0]) if len(lane_values) == 1 else zip(*lane_values)
 
-        def dict_codes(lookup: dict[str, int]) -> array:
-            if not escaped:
-                return codes
-            out = array("H", codes)
-            for i, text in zip(_zeros(codes), _texts(buf, starts, ends)):
-                out[i] = lookup.get(text, 0)
-            return out
+    if not escaped and all(lane.const is not _ABSENT for lane in lanes):
+        return _constant(render(next(keys())), count)
 
-        return _Values(lookup_values, codes=dict_codes)
-
-    if mode == 0x03:
-        grammar = ctx.grammars.get(ordinal)
-        if grammar is None:
-            _dfail("unsupported", path, "grammar column requires a profile for this leaf")
-        escapes, escaped = _read_escapes(r, count, path)
-        matched = count - escaped
-        bounds = ctx.lane_bounds[ordinal]
-        lanes = [
-            _decode_int_column(r, node, matched, f"{path}.lane[{lane_index}]", lane=True)
-            for lane_index, node in enumerate(bounds)
-        ]
-        rows = _selector(escapes, count) if 0 < escaped < count else b""
-        at = _nth_set(rows) if rows else None
-        outside: tuple[int, int] | None = None
-        for lane_index, lane in enumerate(lanes):
-            beyond = lane.outside
-            if beyond is not None and (outside is None or beyond < outside[0]):
-                outside = (beyond, lane_index)
-        # every rendering of one grammar has the same length, known from its tokens
-        length = ctx.grammar_bytes[ordinal]
-        too_long = matched > 0 and length > r.limits.max_byte_length
-        before = escaped
-        if outside is not None or too_long:
-            index = outside[0] if outside is not None and not too_long else 0
-            row = next(islice(compress(itertools.count(), map(not_, rows)), index, None)) if rows else index
-            if outside is not None and outside[0] == index:
-                lane_index = outside[1]
-                value = next(islice(lanes[lane_index].make(), index, None))
-                failure = (row, False, _range_error(bounds[lane_index], f"{path}.lane[{lane_index}]", index, value))
-            else:
-                failure = (row, False, _too_long(path, row))
-            before = (escapes & ((1 << row) - 1)).bit_count()
-        starts, ends, escape_failure, escape_lengths = _escapes(r, before, path, at)
+    def rendered() -> Iterator[str]:
         if not escaped:
-            _settle_uniform(r, length, count, failure, path)
-        else:
-            make = escape_lengths if escaped == count else lambda: _merge(rows, repeat(length), escape_lengths())
-            _settle(
-                r,
-                make,
-                escape_failure or failure,
-                path,
-                length * matched + _span(starts, ends),
-                lambda: length * matched + sum(escape_lengths()),
-            )
-        render = ctx.renderers[ordinal]
-
-        def keys() -> Iterator[Any]:
-            lane_values = [lane.make() for lane in lanes]
-            return iter(lane_values[0]) if len(lane_values) == 1 else zip(*lane_values)
-
-        if not escaped and all(lane.const is not _ABSENT for lane in lanes):
-            return _constant(render(next(keys())), count)
-
-        def rendered() -> Iterator[str]:
-            if not escaped:
-                return map(render, keys())
-            if escaped == count:
-                return _texts(buf, starts, ends)
-            return _merge(rows, map(render, keys()), _texts(buf, starts, ends))
-
-        def grammar_codes(lookup: dict[str, int]) -> array:
-            literal = map(lookup.get, _texts(buf, starts, ends), repeat(0))
-            if escaped == count:
-                return array("H", literal)
-            derived = _lane_codes(lanes, bounds, ctx.grammar_codes(ordinal, lookup))
-            if not escaped:
-                return derived if type(derived) is array else array("H", derived)
-            return array("H", _merge(rows, derived, literal))
-
-        return _Values(rendered, codes=grammar_codes)
-
-    if mode == 0x04:
-        derivation = ctx.derivations.get(ordinal)
-        if derivation is None:
-            _dfail("unsupported", path, "derived column requires a profile for this leaf")
-        escapes, escaped = _read_escapes(r, count, path)
-        rows = _selector(escapes, count) if 0 < escaped < count else b""
-        at = _nth_set(rows) if rows else None
-        assert source_codes is not None
-        source: Any = source_codes(derivation["source"]) if escaped < count else 0
-        if escaped < count:
-            found = _first_derived_failure(source, escapes, escaped, ctx.long_derived[ordinal])
-            if found is not None:
-                failure = (found[0], False, DecodeError(found[1], f"{path}[{found[0]}]: {found[2]}"))
-        before = escaped if failure is None else (escapes & ((1 << failure[0]) - 1)).bit_count()
-        starts, ends, escape_failure, escape_lengths = _escapes(r, before, path, at)
-        sizes = ctx.derived_bytes[ordinal]
-
-        def conforming() -> Iterable[int]:
-            if isinstance(source, int):
-                return repeat(source)
-            return compress(source, map(not_, rows)) if escaped else source
-
-        def derived_lengths() -> Iterable[int]:
-            if isinstance(source, int):
-                return map(sizes.__getitem__, repeat(source, count - escaped))
-            return map(sizes.__getitem__, conforming())
-
+            return map(render, keys())
         if escaped == count:
-            make = escape_lengths
-        elif escaped:
-            make = lambda: _merge(rows, derived_lengths(), escape_lengths())
+            return _texts(buf, starts, ends)
+        return _merge(rows, map(render, keys()), _texts(buf, starts, ends))
+
+    def grammar_codes(lookup: dict[str, int]) -> array:
+        literal = map(lookup.get, _texts(buf, starts, ends), repeat(0))
+        if escaped == count:
+            return array("H", literal)
+        derived = _lane_codes(lanes, matched, ctx.grammar_codes(ordinal, lookup))
+        if not escaped:
+            return derived if type(derived) is array else array("H", derived)
+        return array("H", _merge(rows, derived, literal))
+
+    return _Values(rendered, codes=grammar_codes)
+
+
+def _derived_column(
+    r: Reader, count: int, path: str, ctx: _Ctx, ordinal: int, source_codes: Callable[..., Any] | None
+) -> _Values:
+    buf = r.buf
+    failure: _Failure | None = None
+    make: Callable[[], Iterable[int]]
+    derivation = ctx.derivations.get(ordinal)
+    if derivation is None:
+        _dfail("unsupported", path, "derived column requires a profile for this leaf")
+    escapes, escaped = _read_escapes(r, count, path)
+    rows = _selector(escapes, count) if 0 < escaped < count else b""
+    at = _nth_set(rows) if rows else None
+    assert source_codes is not None
+    source: Any = source_codes(derivation["source"]) if escaped < count else 0
+    if escaped < count:
+        found = _first_derived_failure(source, escapes, escaped, ctx.long_derived[ordinal])
+        if found is not None:
+            failure = (found[0], False, DecodeError(found[1], f"{path}[{found[0]}]: {found[2]}"))
+    before = escaped if failure is None else (escapes & ((1 << failure[0]) - 1)).bit_count()
+    starts, ends, escape_failure, escape_lengths = _escapes(r, before, path, at)
+    sizes = ctx.derived_bytes[ordinal]
+
+    def conforming() -> Iterable[int]:
+        if isinstance(source, int):
+            return repeat(source)
+        return compress(source, map(not_, rows)) if escaped else source
+
+    def derived_lengths() -> Iterable[int]:
+        if isinstance(source, int):
+            return map(sizes.__getitem__, repeat(source, count - escaped))
+        return map(sizes.__getitem__, conforming())
+
+    if escaped == count:
+        make = escape_lengths
+    elif escaped:
+        make = lambda: _merge(rows, derived_lengths(), escape_lengths())
+    else:
+        make = derived_lengths
+    def derived_total() -> int:
+        if isinstance(source, int) or ordinal in ctx.uniform_derived:
+            conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
+        elif not escaped:
+            assert source_codes is not None
+            tally = source_codes(derivation["source"], counts=True)
+            conformed = sum(sizes[code] * times for code, times in tally.items() if times)
         else:
-            make = derived_lengths
-        def derived_total() -> int:
-            if isinstance(source, int) or ordinal in ctx.uniform_derived:
-                conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
-            else:
-                conformed = sum(derived_lengths())
-            return conformed + sum(escape_lengths())
+            conformed = sum(derived_lengths())
+        return conformed + sum(escape_lengths())
 
-        bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
-        _settle(r, make, escape_failure or failure, path, bound, derived_total)
-        table = ctx.derived_tables[ordinal]
+    bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
+    _settle(r, make, escape_failure or failure, path, bound, derived_total)
+    table = ctx.derived_tables[ordinal]
 
-        if isinstance(source, int) and not escaped:
-            return _constant(table[source], count)
+    if isinstance(source, int) and not escaped:
+        return _constant(table[source], count)
 
-        def derived_values() -> Iterator[Any]:
-            if escaped == count:
-                return _texts(buf, starts, ends)
-            values = map(table.__getitem__, conforming())
-            return _merge(rows, values, _texts(buf, starts, ends)) if escaped else values
+    def derived_values() -> Iterator[Any]:
+        if escaped == count:
+            return _texts(buf, starts, ends)
+        values = map(table.__getitem__, conforming())
+        return _merge(rows, values, _texts(buf, starts, ends)) if escaped else values
 
-        def derived_codes(lookup: dict[str, int]) -> array:
-            literal = map(lookup.get, _texts(buf, starts, ends), repeat(0))
-            if escaped == count:
-                return array("H", literal)
-            by_code = [0, *(lookup.get(value, 0) for value in derivation["values"])]
-            if escaped:
-                return array("H", _merge(rows, map(by_code.__getitem__, conforming()), literal))
+    def derived_codes(lookup: dict[str, int]) -> array:
+        if escaped == count:
+            return array("H", map(lookup.get, _texts(buf, starts, ends), repeat(0)))
+        by_code = ctx.recodings.get(ordinal)
+        if by_code is None and 4 * (count - escaped) >= len(table):
+            by_code = ctx.recodings[ordinal] = {
+                code: lookup.get(value, 0) for code, value in enumerate(derivation["values"], 1)
+            }
+        if by_code is None:
+            recoded: Iterable[int] = map(_derived_code, repeat(table), repeat(lookup), conforming())
+        elif escaped:
+            recoded = map(by_code.get, conforming(), repeat(0))
+        else:
             recoded = _recode(source, by_code)
-            return recoded if type(recoded) is array else array("H", recoded)
+        if escaped:
+            return array("H", _merge(rows, recoded, map(lookup.get, _texts(buf, starts, ends), repeat(0))))
+        return recoded if type(recoded) is array else array("H", recoded)
 
-        return _Values(derived_values, codes=derived_codes)
+    return _Values(derived_values, codes=derived_codes)
 
+
+def _packed_column(r: Reader, count: int, path: str, ctx: _Ctx) -> _Values:
     lengths, err = read_ulebs(r, count)
     limit = r.limits.max_byte_length
     if lengths:
@@ -2020,38 +2068,56 @@ def _joined_utf8(data: bytes, starts: array, total: int) -> bool:
     return 1 not in heads.translate(_CONTINUATION)
 
 
-def _lane_codes(lanes: list[_Values], bounds: list[dict[str, Any]], keys: dict[Any, int]) -> Iterable[int]:
-    """The dictionary codes of a grammar column's matched rows, from their lanes. When
-    one lane varies and the others are constant, a table indexed by that lane's value
-    replaces a lookup per row, and a byte-wide lane translates in one step."""
-    varying = [i for i, lane in enumerate(lanes) if lane.const is _ABSENT]
-    if len(varying) > 1:
-        return map(keys.get, zip(*(lane.make() for lane in lanes)), repeat(0))
+def _lane_codes(lanes: list[_Values], rows: int, keys: dict[Any, int]) -> Iterable[int]:
+    """The dictionary codes of a grammar column's `rows` matched rows, from their lanes:
+    by the varying lane's value when one lane varies (the entries that match the
+    constant lanes sorted out first, when there are rows enough to pay for it), else by
+    the tuple of lane values."""
     fixed = [lane.const for lane in lanes]
+    varying = [i for i, value in enumerate(fixed) if value is _ABSENT]
     if not varying:
         return repeat(keys.get(fixed[0] if len(fixed) == 1 else tuple(fixed), 0))
-    (i,) = varying
     if len(lanes) == 1:
-        by_value = keys
-    else:
-        by_value = {
-            key[i]: code for key, code in keys.items() if all(part == fixed[j] for j, part in enumerate(key) if j != i)
-        }
-    values = lanes[i].make()
-    size = bounds[i]["max"] + 1
-    if size > 1 << 16:
-        return map(by_value.get, values, repeat(0))
-    table = [0] * size
-    for value, code in by_value.items():
-        table[value] = code
-    return _recode(values, table)
+        return _recode(lanes[0].make(), keys)
+    i = varying[0]
+    if len(varying) > 1 or 4 * rows < len(keys):
+        return map(keys.get, zip(*(lane.make() for lane in lanes)), repeat(0))
+    by_value = {
+        key[i]: code for key, code in keys.items() if all(part == fixed[j] for j, part in enumerate(key) if j != i)
+    }
+    return _recode(lanes[i].make(), by_value)
 
 
-def _recode(values: Iterable[int], table: list[int]) -> Iterable[int]:
-    """table[value] for every value, in one translate for bytes through a byte table."""
-    if type(values) is array and values.typecode == "B" and len(table) <= 256 and max(table) < 256:
-        return array("B", bytes(values).translate(bytes(table).ljust(256, b"\0")))
-    return map(table.__getitem__, values)
+def _recode(values: Iterable[int], table: dict[int, int]) -> Iterable[int]:
+    """table.get(value, 0) for every value. Long runs of byte values, or of two-byte
+    values that share their high byte, translate in bulk through 256 of the entries."""
+    if type(values) is array and len(values) >= 256:
+        if values.typecode == "B":
+            return _translate(values.tobytes(), table, 0)
+        if values.typecode == "H":
+            data = values.tobytes()
+            low, high = (data[1::2], data[0::2]) if _BIG_ENDIAN else (data[0::2], data[1::2])
+            top = high[0]
+            if high.count(top) == len(high):
+                return _translate(low, table, top << 8)
+    return map(table.get, values, repeat(0))
+
+
+def _translate(data: bytes, table: dict[int, int], base: int) -> array:
+    """table.get(base + byte, 0) for every byte: a byte array when every entry fits a
+    byte, else two translates, one per byte of the two-byte result."""
+    entries = [table.get(base + byte, 0) for byte in range(256)]
+    if max(entries) < 256:
+        return array("B", data.translate(bytes(entries)))
+    out = bytearray(2 * len(data))
+    low = 1 if _BIG_ENDIAN else 0
+    out[low::2] = data.translate(bytes(entry & 0xFF for entry in entries))
+    out[1 - low :: 2] = data.translate(bytes(entry >> 8 for entry in entries))
+    return array("H", out)
+
+
+def _derived_code(table: tuple[Any, ...], lookup: dict[str, int], code: int) -> int:
+    return lookup.get(table[code], 0) if 0 < code < len(table) else 0
 
 
 def _too_long(path: str, index: int) -> DecodeError:
@@ -2069,11 +2135,11 @@ _FULL_FLAGS = bytes.maketrans(bytes(range(256)), bytes(255) + b"\1")
 def _missing_flags(codes: array) -> bytes:
     """One byte per code, 1 where it is 0 or _NOT_PARTICIPATING. A two-byte code is
     either when its low and high bytes, taken as two integers, OR to zero or AND to 0xFF."""
-    data = codes.tobytes()
     if codes.itemsize == 1:
-        return data.translate(_ZERO_FLAGS)
-    if codes.itemsize != 2:
+        return codes.tobytes().translate(_ZERO_FLAGS)
+    if codes.itemsize != 2 or len(codes) < 64:
         return bytes(map(_MISSING_CODES.__contains__, codes))
+    data = codes.tobytes()
     count = len(codes)
     low = int.from_bytes(data[0::2], "little")
     high = int.from_bytes(data[1::2], "little")
@@ -2153,7 +2219,7 @@ def _decode_columnar(
     # columns stay packed, typed or arithmetic until the whole body has decoded, so a
     # malformed later column fails before any earlier one expands per row
     columns: list[_Column] = []
-    sources: dict[Any, int | array] = {}
+    sources: dict[Any, Any] = {}
     max_depth = r.limits.max_depth
     for leaf_index, (suffix, name, nesting, optional, nullable, t) in enumerate(ctx.leaf_plans[id(leaves)]):
         field_path = path + suffix
@@ -2220,14 +2286,22 @@ def _source_codes(
     columns: list[_Column],
     ordinal_base: int,
     count: int,
-    found: dict[Any, int | array],
+    found: dict[Any, Any],
     part: int | None,
     ordinal: int,
-) -> int | array:
+    counts: bool = False,
+) -> Any:
     """A derivation source's dictionary codes at the rows a derived column with
     participation `part` covers: 0 outside the dictionary, _NOT_PARTICIPATING where
-    the source is absent. Every derived column that reads one source with the same
-    participation shares one result, held in `found`."""
+    the source is absent; with `counts`, how often each code occurs there. Every derived
+    column that reads one source with the same participation shares one result, held
+    in `found`."""
+    if counts:
+        tally = found.get(("counts", ordinal, part))
+        if tally is None:
+            source = _source_codes(ctx, columns, ordinal_base, count, found, part, ordinal)
+            tally = found[("counts", ordinal, part)] = _tally(source, len(ctx.codes[ordinal]))
+        return tally
     known = found.get((ordinal, part))
     if known is not None:
         return known
@@ -2250,6 +2324,15 @@ def _source_codes(
         result = array("H", by_row if part is None else compress(by_row, _selector(part, count)))
     found[(ordinal, part)] = result
     return result
+
+
+def _tally(codes: array, entries: int) -> dict[int, int]:
+    """How often each code occurs: by one byte count per code for byte codes of a small
+    dictionary, else in one pass."""
+    if codes.typecode == "B" and entries < 256:
+        data = codes.tobytes()
+        return {code: data.count(code) for code in range(entries + 1)}
+    return Counter(codes)
 
 
 _Shape = tuple[list[str], list[Any]]

@@ -1,10 +1,12 @@
 import time
 import tracemalloc
+from array import array
 
 import pytest
 
 from conftest import load
 from hyperfly import HyperflyError, Limits, compile_ir
+from hyperfly._codec import _constant, _derived_code, _lane_codes, _recode, _Values
 from test_limits import codec_for, revive
 from test_vectors import deep_eq
 
@@ -365,3 +367,213 @@ def test_derived_sources_outside_the_dictionary(ir, profile, body, expected):
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(bytes.fromhex(body))
     assert err.value.code == expected
+
+
+def _nested(*names):
+    rows = {"kind": "array", "element": _array(*(_field(n, "string") for n in names))}
+    return {"kind": "struct", "fields": [{"name": "rows", "type": rows}, _field("end", "bool")]}
+
+
+def _derived_table(size):
+    entries = ["s"] + [f"f{i}" for i in range(size - 1)]
+    return (
+        _nested("a", "b", "c"),
+        _profile(
+            {"leaf": 0, "dict": entries},
+            {"leaf": 1, "dict": ["x"], "derived": {"source": 0, "values": ["x"] * size}},
+            {"leaf": 2, "derived": {"source": 1, "values": ["y"]}},
+        ),
+        "a01f" + "0101010104000400" * 4000 + "ff",
+    )
+
+
+def _lane_table(digits):
+    return (
+        _nested("s", "d"),
+        _profile(
+            {"leaf": 0, "dict": ["0" * digits], "grammar": [{"num": {"base": 16, "len": digits, "case": "lower"}}]},
+            {"leaf": 1, "derived": {"source": 0, "values": ["x"]}},
+        ),
+        "a01f" + "010300020001000400" * 4000 + "ff",
+    )
+
+
+def _derived_fanout(k):
+    profile = _profile(
+        {"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]},
+        *({"leaf": i + 1, "derived": {"source": 0, "values": ["x", "y"]}} for i in range(k)),
+    )
+    ir = _array(_field("s", "string"), *(_field(f"d{i}", "string") for i in range(k)), _field("n", "int"))
+    return ir, profile, ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * k + "ff"
+
+
+FILLERS = [f"filler{i}" for i in range(298)]
+TWO_BYTE_CHAIN = (
+    _array(*(_field(f"s{i}", "string") for i in range(7)), _field("n", "int")),
+    _profile(
+        {"leaf": 0, "dict": FILLERS + ["00", "10"], "grammar": [LANE, LANE]},
+        *({"leaf": i, "dict": FILLERS + ["x", "y"], "derived": {"source": i - 1, "values": ["x"] * 299 + ["y"]}} for i in range(1, 7)),
+    ),
+    ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * 6 + "ff",
+)
+
+# bodies whose cost could scale with a profile's dictionary or grammar domain, or with
+# the number of derived columns, rather than with the body. Each of 4,000 nested arrays
+# holds its columns until the body has decoded, hence their larger peak.
+DOMAIN = [
+    ("derived from a 16,383-entry dictionary, one row per nested array", *_derived_table(16383), 24),
+    ("a 4-digit hex grammar, one row per nested array", *_lane_table(4), 24),
+    ("six derived columns of one grammar source", *_derived_fanout(6), 8),
+    ("a chain of six derivations over two-byte codes", *TWO_BYTE_CHAIN, 8),
+]
+
+
+def _decode_ms(codec, body, code):
+    times = []
+    for _ in range(5):
+        start = time.perf_counter()
+        with pytest.raises(HyperflyError) as err:
+            codec.decode_body(body)
+        times.append(time.perf_counter() - start)
+        assert err.value.code == code
+    return sorted(times)[2]
+
+
+@pytest.mark.parametrize("ir, profile, body, mib", [case[1:] for case in DOMAIN], ids=[case[0] for case in DOMAIN])
+def test_profile_domains_and_fanout_stay_cheap(ir, profile, body, mib):
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    body = bytes.fromhex(body)
+    assert len(body) < 64 * 1024
+    assert _decode_ms(codec, body, "marker") < 0.2
+    tracemalloc.start()
+    try:
+        with pytest.raises(HyperflyError):
+            codec.decode_body(body)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < mib << 20
+
+
+@pytest.mark.parametrize(
+    "large, small",
+    [
+        (_derived_table(16383), _derived_table(2)),
+        (_lane_table(4), _lane_table(1)),
+        (_derived_fanout(6), _derived_fanout(1)),
+    ],
+    ids=["dictionary size", "grammar domain", "derived fan-out"],
+)
+def test_cost_follows_the_body_not_the_profile(large, small):
+    # relative to the same body under a small profile, so a slow runner slows both
+    timings = []
+    for ir, profile, body in (large, small):
+        codec = compile_ir(ir, plan="columnar", profile=profile)
+        timings.append(_decode_ms(codec, bytes.fromhex(body), "marker"))
+    assert timings[0] < 2 * timings[1] + 0.005
+
+
+@pytest.mark.parametrize("count", [70, 300])
+def test_two_byte_codes_recode_in_bulk(count):
+    ir, profile, _body = TWO_BYTE_CHAIN
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    rows = []
+    for i in range(count):
+        s0 = ["00", "10", "37", "filler3"][i % 4]
+        row = {"s0": s0}
+        for j in range(1, 7):
+            previous = row[f"s{j - 1}"]
+            row[f"s{j}"] = "y" if previous in ("10", "y") else "x" if previous in FILLERS + ["00", "x"] else "z"
+        row["n"] = i
+        rows.append(row)
+    body = codec.encode_body(rows)
+    assert codec.decode_body(body) == rows
+
+
+def _non_uniform_fanout(values):
+    ir = _array(*(_field(name, "string") for name in ["s"] + [f"d{i}" for i in range(96)]))
+    profile = _profile(
+        {"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]},
+        *({"leaf": i + 1, "derived": {"source": 0, "values": values}} for i in range(96)),
+    )
+    # 100,000 rows alternating 00 and 10: one lane of alternating bits, one constant
+    body = "a08d06" + "0300" + "020001" + "aa" * 12500 + "020000" + "0400" * 96
+    return ir, profile, body
+
+
+def test_derived_totals_count_codes_once_per_source():
+    timings = []
+    for values in (["x", "yy"], ["x", "y"]):
+        ir, profile, body = _non_uniform_fanout(values)
+        codec = compile_ir(ir, plan="columnar", profile=profile, limits=Limits(max_total_bytes=9_000_000))
+        timings.append(_decode_ms(codec, bytes.fromhex(body), "limit"))
+    assert timings[0] < 0.2
+    assert timings[0] < 2 * timings[1] + 0.005
+
+
+TABLE = {0: 1, 3: 2, 9: 3}
+
+
+@pytest.mark.parametrize("typecode", ["B", "H", "q", None])
+def test_recoding_is_total(typecode):
+    values = [0, 10, 3, 9, 300] if typecode != "B" else [0, 10, 3, 9, 255]
+    if typecode in ("q", None):
+        values.append(-1)
+    run = values if typecode is None else array(typecode, values)
+    assert list(_recode(run, TABLE)) == [TABLE.get(value, 0) for value in values]
+
+
+@pytest.mark.parametrize(
+    "typecode, values",
+    [
+        ("B", [i % 13 for i in range(300)]),
+        ("B", [250 + i % 6 for i in range(300)]),
+        ("H", [256 + i % 13 for i in range(300)]),
+        ("H", [256 + i % 13 for i in range(299)] + [3]),
+        ("H", [0x3F00 + i % 256 for i in range(300)]),
+    ],
+)
+@pytest.mark.parametrize("wide", [False, True])
+def test_bulk_recoding_matches_lookups(typecode, values, wide):
+    table = {value: (value * 37 + 5) % (1000 if wide else 200) for value in range(0, 0x4000, 3)}
+    assert list(_recode(array(typecode, values), table)) == [table.get(value, 0) for value in values]
+
+
+def test_lane_codes_are_total():
+    keys = {0: 1, 3: 2, 9: 3}
+    assert list(_lane_codes([_Values(lambda: array("B", [0, 10]))], 2, keys)) == [1, 0]
+    assert list(_lane_codes([_Values(lambda: array("q", [-1, 3]))], 2, keys)) == [0, 2]
+    pairs = {(0, 0): 1, (3, 0): 2, (9, 0): 3, (3, 1): 4}
+    varying = _Values(lambda: array("q", [-1, 3, 9, 10] * 2))
+    for rows in (8, 1):
+        assert list(_lane_codes([varying, _constant(0, 8)], rows, pairs)) == [0, 2, 3, 0] * 2
+
+
+def test_derived_code_lookup_is_total():
+    table = (None, "x", "y")
+    assert [_derived_code(table, {"x": 5}, code) for code in (0, 1, 2, 3, -1, 0xFFFF)] == [0, 5, 0, 0, 0, 0]
+
+
+@pytest.mark.parametrize("total, code", [(3000, "ok"), (2999, "limit")])
+def test_deferred_derived_totals_are_exact(total, code):
+    ir = _array(_field("s", "string"), _field("d", "string"), _field("t", "string"))
+    profile = _profile(
+        {"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]},
+        {"leaf": 1, "derived": {"source": 0, "values": ["x", "yyy"]}},
+    )
+    rows = [{"s": "00", "d": "x", "t": "a"} if i % 2 else {"s": "10", "d": "yyy", "t": "a"} for i in range(600)]
+    loose = Limits(max_total_bytes=2**40, max_byte_amplification=2**40)
+    body = compile_ir(ir, plan="columnar", profile=profile, limits=loose).encode_body(rows)
+    # s as a grammar column, its second lane constant, then d derived without escapes
+    assert body[2:4] == b"\x03\x00" and b"\x02\x00\x00\x04\x00" in body
+    # 1,200 bytes of s, 1,200 of d and 600 of t
+    codec = compile_ir(ir, plan="columnar", profile=profile, limits=Limits(max_total_bytes=total, max_byte_amplification=2**40))
+    assert _code_of(codec, body) == code
+
+
+def _code_of(codec, body):
+    try:
+        codec.decode_body(body)
+    except HyperflyError as err:
+        return err.code
+    return "ok"
