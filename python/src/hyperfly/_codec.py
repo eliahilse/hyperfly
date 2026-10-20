@@ -9,6 +9,7 @@ from typing import Any
 
 from ._ir import (
     LEAF_KINDS,
+    _fail,
     column_count,
     fingerprint_of,
     has_payload,
@@ -98,7 +99,10 @@ def _bits_float(bits: int) -> float:
 def _canon_float(v: Any, path: str) -> float:
     if type(v) is bool or not isinstance(v, (int, float)):
         _efail("type", path, "expected number")
-    f = float(v)
+    try:
+        f = float(v)
+    except OverflowError:
+        _efail("float", path, "float64 must be finite")
     if not math.isfinite(f):
         _efail("float", path, "float64 must be finite")
     return 0.0 if f == 0 else f
@@ -1441,11 +1445,10 @@ class Codec:
         # isolate from later caller mutation: the fingerprint is fixed at compile time
         ir = copy.deepcopy(ir)
         self._ir = ir
-        self.plan = plan
+        self._plan = plan
         self._profile = copy.deepcopy(profile) if profile is not None else None
-        self.artifact = serialize_artifact(ir, plan, self._profile)
-        self._fp = fingerprint_of(self.artifact)
-        self.fingerprint = self._fp.hex()
+        self._artifact = serialize_artifact(ir, plan, self._profile)
+        self._fp = fingerprint_of(self._artifact)
         self._limits = limits
         if pack is False:
             deflate = inflate = None
@@ -1454,6 +1457,18 @@ class Codec:
         else:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
         self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self._profile)
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fp.hex()
+
+    @property
+    def artifact(self) -> str:
+        return self._artifact
+
+    @property
+    def plan(self) -> str:
+        return self._plan
 
     @property
     def profile(self) -> dict[str, Any] | None:
@@ -1488,17 +1503,23 @@ class Codec:
         if data[2] != WIRE_VERSION:
             raise DecodeError("header", f"unsupported wire major {data[2]}")
         actual = data[3:HEADER_SIZE].hex()
-        if actual != self.fingerprint:
-            raise FingerprintMismatchError(self.fingerprint, actual)
+        if data[3:HEADER_SIZE] != self._fp:
+            raise FingerprintMismatchError(self._fp.hex(), actual)
         return self.decode_body(data[HEADER_SIZE:])
 
 
 def compile_ir(
-    ir: dict[str, Any],
+    ir: Any,
     *,
     plan: str = "row",
     limits: Limits | None = None,
     pack=None,
-    profile: dict[str, Any] | None = None,
+    profile: Any = None,
 ) -> Codec:
-    return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)
+    try:
+        return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)
+    except RecursionError:
+        # TS has no schema depth limit. Python's recursive validation, copying,
+        # serialization and profile column walk share an interpreter limit;
+        # report it as invalid IR rather than leaking an interpreter exception.
+        _fail("$", "IR or profile nesting exceeds Python's recursion limit")

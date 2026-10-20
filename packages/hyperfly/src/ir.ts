@@ -26,6 +26,10 @@ function fail(path: string, message: string): never {
   throw new HyperflyError("ir", `${path}: ${message}`);
 }
 
+function isObject(v: unknown): boolean {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
 function isSafeInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v);
 }
@@ -59,6 +63,7 @@ function checkFieldName(name: string, path: string): void {
 }
 
 export function validateIR(node: IRNode, path = "$"): void {
+  if (!isObject(node)) fail(path, "IR node must be an object");
   switch (node.kind) {
     case "bool":
     case "float64":
@@ -89,6 +94,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       return;
     }
     case "enum": {
+      if (!Array.isArray(node.members)) fail(path, "enum members must be an array");
       if (node.members.length === 0) fail(path, "enum needs at least one member");
       let width = 0;
       let highest = BigInt(node.members.length - 1);
@@ -107,6 +113,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       return;
     }
     case "nullable": {
+      if (!isObject(node.inner)) fail(path, "nullable inner must be an IR object");
       if (node.inner.kind === "nullable") fail(path, "nullable(nullable) is invalid");
       if (node.inner.kind === "literal" && node.inner.value === null) {
         fail(path, "nullable(literal null) has two encodings for null");
@@ -122,13 +129,19 @@ export function validateIR(node: IRNode, path = "$"): void {
       return;
     }
     case "struct": {
+      if (!Array.isArray(node.fields)) fail(path, "struct fields must be an array");
       const seen = new Set<string>();
       for (const f of node.fields) {
+        if (!isObject(f)) fail(path, "struct fields must be objects");
         if (typeof f.name !== "string" || f.name.length === 0) fail(path, "field names must be non-empty strings");
         checkString(f.name, path, "field name");
         checkFieldName(f.name, path);
         if (seen.has(f.name)) fail(path, `duplicate field "${f.name}"`);
         seen.add(f.name);
+        for (const flag of ["optional", "nullable"] as const) {
+          if (f[flag] !== undefined && typeof f[flag] !== "boolean") fail(`${path}.${f.name}`, `${flag} flag must be a boolean`);
+        }
+        if (!isObject(f.type)) fail(`${path}.${f.name}`, "field type must be an IR object");
         if (f.nullable && f.type.kind === "nullable") {
           fail(`${path}.${f.name}`, "nullable flag on a nullable type is ambiguous");
         }

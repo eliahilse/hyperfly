@@ -39,28 +39,36 @@ def _check_field_name(name: str, path: str) -> None:
             _fail(path, f'field name "{name}" is an array index and would reorder as an object key')
 
 
-def validate_ir(node: dict[str, Any], path: str = "$") -> None:
+def validate_ir(node: Any, path: str = "$") -> None:
+    if not isinstance(node, dict):
+        _fail(path, "IR node must be an object")
     kind = node.get("kind")
+    if not isinstance(kind, str):
+        _fail(path, "IR kind must be a string")
     if kind in ("bool", "float64", "string", "bytes"):
         return
     if kind == "int":
         lo, hi = node.get("min"), node.get("max")
-        if lo is not None and not _is_safe_int(lo):
+        if "min" in node and not _is_safe_int(lo):
             _fail(path, "int min must be a safe integer in the v0 domain")
-        if hi is not None and not _is_safe_int(hi):
+        if "max" in node and not _is_safe_int(hi):
             _fail(path, "int max must be a safe integer in the v0 domain")
         if lo is not None and hi is not None and lo > hi:
             _fail(path, "int min exceeds max")
         return
     if kind == "literal":
-        v = node.get("value")
+        if "value" not in node:
+            _fail(path, "literal needs a value")
+        v = node["value"]
         if not (v is None or type(v) is str or type(v) is bool or _is_safe_int(v)):
             _fail(path, "literal must be string, boolean, null, or a safe integer")
         if type(v) is str:
             _check_string(v, path, "literal string")
         return
     if kind == "enum":
-        members = node.get("members") or []
+        members = node.get("members")
+        if not isinstance(members, (list, tuple)):
+            _fail(path, "enum members must be an array")
         if not members:
             _fail(path, "enum needs at least one member")
         if (len(members) - 1).bit_length() > 56:
@@ -75,7 +83,9 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
             seen.add(m)
         return
     if kind == "nullable":
-        inner = node["inner"]
+        inner = node.get("inner")
+        if not isinstance(inner, dict):
+            _fail(path, "nullable inner must be an IR object")
         if inner.get("kind") == "nullable":
             _fail(path, "nullable(nullable) is invalid")
         if inner.get("kind") == "literal" and inner.get("value") is None:
@@ -84,13 +94,18 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
         return
     if kind == "array":
         length = node.get("length")
-        if length is not None and (type(length) is not int or length < 0 or length > INT_MAX):
+        if "length" in node and (type(length) is not int or length < 0 or length > INT_MAX):
             _fail(path, "fixed array length must be a non-negative safe integer")
-        validate_ir(node["element"], path + "[]")
+        validate_ir(node.get("element"), path + "[]")
         return
     if kind == "struct":
+        fields = node.get("fields")
+        if not isinstance(fields, (list, tuple)):
+            _fail(path, "struct fields must be an array")
         seen = set()
-        for f in node.get("fields", []):
+        for f in fields:
+            if not isinstance(f, dict):
+                _fail(path, "struct fields must be objects")
             name = f.get("name")
             if type(name) is not str or not name:
                 _fail(path, "field names must be non-empty strings")
@@ -99,11 +114,18 @@ def validate_ir(node: dict[str, Any], path: str = "$") -> None:
             if name in seen:
                 _fail(path, f'duplicate field "{name}"')
             seen.add(name)
-            if f.get("nullable") and f["type"].get("kind") == "nullable":
+            field_path = f"{path}.{name}"
+            for flag in ("optional", "nullable"):
+                if flag in f and type(f[flag]) is not bool:
+                    _fail(field_path, f"{flag} flag must be a boolean")
+            field_type = f.get("type")
+            if not isinstance(field_type, dict):
+                _fail(field_path, "field type must be an IR object")
+            if f.get("nullable") and field_type.get("kind") == "nullable":
                 _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
-            if f.get("nullable") and f["type"].get("kind") == "literal" and f["type"].get("value") is None:
+            if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
                 _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
-            validate_ir(f["type"], f"{path}.{name}")
+            validate_ir(field_type, field_path)
         return
     _fail(path, f"unknown IR kind {kind}")
 
@@ -138,7 +160,7 @@ def _literal(v: Any) -> str:
 def serialize_node(node: dict[str, Any]) -> str:
     kind = node["kind"]
     if kind in ("bool", "float64", "string", "bytes"):
-        return f'{{"kind":"{kind}"}}'
+        return '{"kind":"' + kind + '"}'
     if kind == "int":
         out = '{"kind":"int"'
         if node.get("min") is not None:
@@ -278,9 +300,9 @@ def _walk_column_refs(
         return
 
 
-def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
+def validate_profile(ir: dict[str, Any], profile: Any) -> None:
     def fail(message: str) -> None:
-        raise HyperflyError("ir", f"profile: {message}")
+        _fail("profile", message)
 
     def record(value: Any, path: str) -> dict[str, Any]:
         if type(value) is not dict:
@@ -308,7 +330,9 @@ def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
     check_keys(root, "document", {"version", "shared", "hints"}, {"version", "shared"})
     version = root["version"]
     if type(version) is not int or version not in (1, 2):
-        fail(f"unsupported profile version {version}")
+        # Do not stringify unchecked JSON: huge integers can exceed Python's
+        # decimal conversion limit, and nested containers can exceed recursion.
+        fail("unsupported profile version (expected 1 or 2)")
     if "hints" in root and type(root["hints"]) is not dict:
         fail("hints must be an object when present")
 
@@ -335,7 +359,7 @@ def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
                 fail(f"{path} must carry at least one of dict, grammar, or derived")
 
         leaf = raw["leaf"]
-        if type(leaf) is not int:
+        if not _is_safe_int(leaf):
             fail(f"{path}.leaf must be an integer")
         if leaf < 0 or leaf >= len(refs):
             fail(f"leaf {leaf} is not a column in this schema")
@@ -393,7 +417,7 @@ def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
                 if type(base) is not int or base not in (10, 16, 36):
                     fail(f"{num_path}.base must be 10, 16, or 36")
                 length = num["len"]
-                if type(length) is not int:
+                if not _is_safe_int(length):
                     fail(f"{num_path}.len must be an integer")
                 cap = 15 if base == 10 else 13 if base == 16 else 10
                 if length < 1 or length > cap:
@@ -415,7 +439,7 @@ def validate_profile(ir: dict[str, Any], profile: dict[str, Any]) -> None:
             derived = record(raw["derived"], derived_path)
             check_keys(derived, derived_path, {"source", "values"}, {"source", "values"})
             source = derived["source"]
-            if type(source) is not int:
+            if not _is_safe_int(source):
                 fail(f"{derived_path}.source must be an integer")
             raw_values = derived["values"]
             if type(raw_values) is not list:
