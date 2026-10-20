@@ -34,6 +34,11 @@ def _flatten_metadata(metadata: typing.Iterable[Any]) -> list[Any]:
     for item in metadata:
         if isinstance(item, FieldInfo):
             flattened.extend(_flatten_metadata(item.metadata))
+        elif _at is not None and isinstance(item, _at.Interval):
+            for kind, bound_type in (("ge", _at.Ge), ("gt", _at.Gt), ("le", _at.Le), ("lt", _at.Lt)):
+                value = getattr(item, kind)
+                if value is not None:
+                    flattened.append(bound_type(value))
         elif _at is not None and isinstance(item, _at.GroupedMetadata):
             flattened.extend(_flatten_metadata(item))
         elif item is not None:
@@ -42,42 +47,29 @@ def _flatten_metadata(metadata: typing.Iterable[Any]) -> list[Any]:
 
 
 def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]:
-    lo: int | None = None
-    hi: int | None = None
     if _at is None:
         return None, None
-
-    def tighten_lo(candidate: int) -> None:
-        nonlocal lo
-        lo = candidate if lo is None else max(lo, candidate)
-
-    def tighten_hi(candidate: int) -> None:
-        nonlocal hi
-        hi = candidate if hi is None else min(hi, candidate)
-
-    def apply(m: Any) -> None:
-        if isinstance(m, _at.Ge):
-            tighten_lo(_ceil_int(m.ge, path))
-        elif isinstance(m, _at.Gt):
-            tighten_lo(_floor_int(m.gt, path) + 1)
-        elif isinstance(m, _at.Le):
-            tighten_hi(_floor_int(m.le, path))
-        elif isinstance(m, _at.Lt):
-            tighten_hi(_ceil_int(m.lt, path) - 1)
-
+    bounds: dict[str, Any] = {}
     for m in metadata:
-        if isinstance(m, _at.Interval):
-            for part in (
-                _at.Ge(m.ge) if m.ge is not None else None,
-                _at.Gt(m.gt) if m.gt is not None else None,
-                _at.Le(m.le) if m.le is not None else None,
-                _at.Lt(m.lt) if m.lt is not None else None,
-            ):
-                if part is not None:
-                    apply(part)
-        else:
-            apply(m)
-    return lo, hi
+        if isinstance(m, _at.Ge):
+            bounds["ge"] = m.ge
+        elif isinstance(m, _at.Gt):
+            bounds["gt"] = m.gt
+        elif isinstance(m, _at.Le):
+            bounds["le"] = m.le
+        elif isinstance(m, _at.Lt):
+            bounds["lt"] = m.lt
+    lower = []
+    upper = []
+    if "ge" in bounds:
+        lower.append(_ceil_int(bounds["ge"], path))
+    if "gt" in bounds:
+        lower.append(_floor_int(bounds["gt"], path) + 1)
+    if "le" in bounds:
+        upper.append(_floor_int(bounds["le"], path))
+    if "lt" in bounds:
+        upper.append(_ceil_int(bounds["lt"], path) - 1)
+    return max(lower, default=None), min(upper, default=None)
 
 
 def _is_integral(v: Any) -> bool:
@@ -107,7 +99,8 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
 
     if origin is typing.Annotated:
         base, *inner_metadata = typing.get_args(annotation)
-        return _node_of(base, _flatten_metadata([*metadata, *inner_metadata]), path)
+        # Outer metadata applies after metadata on the wrapped type.
+        return _node_of(base, _flatten_metadata([*inner_metadata, *metadata]), path)
 
     if origin in (typing.Union, types.UnionType):
         args = [a for a in typing.get_args(annotation) if a is not type(None)]

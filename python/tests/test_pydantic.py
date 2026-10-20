@@ -88,6 +88,13 @@ class _Bounds(GroupedMetadata):
         yield Lt(9)
 
 
+class _RepeatedBounds(GroupedMetadata):
+    def __iter__(self):
+        yield Ge(10)
+        yield Interval(ge=0, gt=-1, le=0, lt=11)
+        yield Le(10)
+
+
 class _WireName(str):
     pass
 
@@ -204,6 +211,64 @@ def test_optional_inner_metadata_merges_with_field_metadata():
     assert to_ir(Constrained) == to_ir(FieldLevel) == expected
     assert compile(Constrained).artifact == compile(FieldLevel).artifact
     assert compile(Constrained).fingerprint == compile(FieldLevel).fingerprint
+
+
+@pytest.mark.parametrize("annotation,default,depth", [
+    pytest.param(Annotated[int, Ge(10), Ge(0)], ..., 0, id="ge-relaxed"),
+    pytest.param(Annotated[int, Gt(10), Gt(0)], ..., 0, id="gt-relaxed"),
+    pytest.param(Annotated[int, Le(0), Le(10)], ..., 0, id="le-relaxed"),
+    pytest.param(Annotated[int, Lt(0), Lt(10)], ..., 0, id="lt-relaxed"),
+    pytest.param(Annotated[int, Ge(0), Ge(10)], ..., 0, id="ge-tightened"),
+    pytest.param(Annotated[int, Le(10), Le(0)], ..., 0, id="le-tightened"),
+    pytest.param(Annotated[int, Ge(10), Gt(0)], ..., 0, id="mixed-lower"),
+    pytest.param(Annotated[int, Le(0), Lt(10)], ..., 0, id="mixed-upper"),
+    pytest.param(Annotated[int, Interval(ge=-1.0, gt=0.0, le=10.0, lt=9.0)], ..., 0,
+                 id="integral-float-interval"),
+    pytest.param(Annotated[int, Interval(ge=10, le=10), Interval(ge=0, le=12)], ..., 0,
+                 id="repeated-interval"),
+    pytest.param(Annotated[int, Interval(ge=10, gt=-1, le=0, lt=11), Ge(0), Le(10)], ..., 0,
+                 id="interval-before-bounds"),
+    pytest.param(Annotated[int, Ge(10), Le(0), Interval(ge=0, le=10)], ..., 0,
+                 id="interval-after-bounds"),
+    pytest.param(Annotated[int, Field(ge=10), Field(ge=0)], ..., 0, id="repeated-field"),
+    pytest.param(Annotated[int, Ge(10)], Field(ge=0), 0, id="field-before-type-tightened"),
+    pytest.param(Annotated[int, Field(ge=0)], Field(ge=10), 0, id="field-before-type-relaxed"),
+    pytest.param(Annotated[Annotated[int, Ge(10)], Ge(0)], ..., 0, id="nested-annotated"),
+    pytest.param(Annotated[Optional[Annotated[int, Ge(10)]], Ge(0)], ..., 0,
+                 id="optional-outer-relaxed"),
+    pytest.param(Annotated[Optional[Annotated[int, Ge(0)]], Ge(10)], ..., 0,
+                 id="optional-outer-tightened"),
+    pytest.param(Optional[Annotated[int, Ge(10)]], Field(ge=0), 0, id="optional-field-outer"),
+    pytest.param(Annotated[Optional[Annotated[int, Ge(10)]], Field(ge=5)], Field(ge=0), 0,
+                 id="optional-three-scopes"),
+    pytest.param(list[Annotated[int, Ge(10), Ge(0)]], ..., 1, id="list-repeated"),
+    pytest.param(list[Annotated[Optional[Annotated[int, Le(0)]], Le(10)]], ..., 1,
+                 id="list-optional-scopes"),
+    pytest.param(Annotated[int, _RepeatedBounds()], ..., 0, id="grouped-repeated"),
+    pytest.param(list[Annotated[int, _RepeatedBounds()]], ..., 1, id="list-grouped-repeated"),
+])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_integer_bounds_accept_exactly_pydantic_values(annotation, default, depth, plan):
+    model = create_model("Constrained", x=(annotation, default))
+    codec = compile(model, validate=False, plan=plan)
+    for candidate in [*range(-3, 14), None]:
+        value = candidate
+        for _ in range(depth):
+            value = [value]
+        payload = {"x": value}
+        try:
+            model.model_validate(payload)
+            model_accepts = True
+        except ValidationError:
+            model_accepts = False
+        try:
+            encoded = codec.encode(payload)
+            codec_accepts = True
+        except EncodeError:
+            codec_accepts = False
+        assert codec_accepts == model_accepts, payload
+        if codec_accepts:
+            assert codec.decode(encoded) == payload
 
 
 @pytest.mark.parametrize("annotation,path", [
