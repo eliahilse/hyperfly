@@ -56,6 +56,16 @@ impl StrColumn {
         self.ends.push(self.text.len());
     }
 
+    fn push_with(&mut self, render: impl FnOnce(&mut String) -> Result<()>) -> Result<()> {
+        let start = self.text.len();
+        if let Err(error) = render(&mut self.text) {
+            self.text.truncate(start);
+            return Err(error);
+        }
+        self.ends.push(self.text.len());
+        Ok(())
+    }
+
     fn get(&self, index: usize) -> Option<&str> {
         let end = *self.ends.get(index)?;
         let start = if index == 0 { 0 } else { self.ends[index - 1] };
@@ -2430,15 +2440,14 @@ fn match_grammar(value: &str, grammar: &[GrammarToken]) -> Result<Option<Vec<u64
     Ok((offset == bytes.len()).then_some(lanes))
 }
 
-fn render_grammar(grammar: &[GrammarToken], lanes: &[u64]) -> Result<String> {
+fn render_grammar(out: &mut String, grammar: &[GrammarToken], lanes: &[u64]) -> Result<()> {
     const LOWER: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     const UPPER: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-    let mut out = Vec::new();
     let mut lane_index = 0usize;
     for token in grammar {
         match token {
-            GrammarToken::Lit(literal) => out.extend_from_slice(literal.as_bytes()),
+            GrammarToken::Lit(literal) => out.push_str(literal),
             GrammarToken::Num(num) => {
                 let mut value = *lanes.get(lane_index).ok_or_else(|| Error {
                     code: ErrorCode::Range,
@@ -2454,19 +2463,18 @@ fn render_grammar(grammar: &[GrammarToken], lanes: &[u64]) -> Result<String> {
                 } else {
                     UPPER
                 };
-                let start = out.len();
-                let end = start.checked_add(len).ok_or_else(|| Error {
-                    code: ErrorCode::Limit,
-                    message: "rendered grammar length exceeds the host size domain".into(),
+                let mut buffer = [0u8; 20];
+                let digits = buffer.get_mut(..len).ok_or_else(|| Error {
+                    code: ErrorCode::Ir,
+                    message: "grammar token length exceeds the render buffer".into(),
                 })?;
-                out.resize(end, b'0');
-                for position in (start..end).rev() {
+                for slot in digits.iter_mut().rev() {
                     let digit =
                         usize::try_from(value % u64::from(num.base)).map_err(|_| Error {
                             code: ErrorCode::Range,
                             message: "grammar digit exceeds the host size domain".into(),
                         })?;
-                    out[position] = *alphabet.get(digit).ok_or_else(|| Error {
+                    *slot = *alphabet.get(digit).ok_or_else(|| Error {
                         code: ErrorCode::Range,
                         message: "grammar digit exceeds its alphabet".into(),
                     })?;
@@ -2478,6 +2486,7 @@ fn render_grammar(grammar: &[GrammarToken], lanes: &[u64]) -> Result<String> {
                         "grammar lane exceeds its declared token width",
                     );
                 }
+                out.extend(digits.iter().copied().map(char::from));
             }
         }
     }
@@ -2487,10 +2496,7 @@ fn render_grammar(grammar: &[GrammarToken], lanes: &[u64]) -> Result<String> {
             "too many grammar lanes during reconstruction",
         );
     }
-    String::from_utf8(out).map_err(|_| Error {
-        code: ErrorCode::Utf8,
-        message: "profile grammar reconstructed invalid UTF-8".into(),
-    })
+    Ok(())
 }
 
 fn escaped_payload(values: &[&str], escaped: &[bool]) -> Result<Vec<u8>> {
@@ -2928,12 +2934,13 @@ fn dec_string_column(
             })
         })?;
         let mut matched = 0usize;
+        let mut values = Vec::with_capacity(lanes.len());
         for (i, is_escaped) in escaped.iter().copied().enumerate() {
             if is_escaped {
                 out.push(read_string_literal(r, limits, path, i)?);
                 continue;
             }
-            let mut values = Vec::with_capacity(lanes.len());
+            values.clear();
             for (lane_index, (maximum, lane)) in lanes.iter_mut().enumerate() {
                 let value = lane.next().ok_or_else(|| Error {
                     code: ErrorCode::Truncated,
@@ -2941,19 +2948,23 @@ fn dec_string_column(
                         "{path}[{i}]: grammar lane is shorter than the matched row count"
                     ),
                 })?;
-                let value = decoded_int(
-                    Some(0),
-                    Some(*maximum),
-                    value,
-                    &format!("{path}.lane[{lane_index}][{matched}]"),
-                )?;
+                let value = if (0..=i128::from((*maximum).min(INT_MAX))).contains(&value) {
+                    value as i64
+                } else {
+                    decoded_int(
+                        Some(0),
+                        Some(*maximum),
+                        value,
+                        &format!("{path}.lane[{lane_index}][{matched}]"),
+                    )?
+                };
                 values.push(u64::try_from(value).map_err(|_| Error {
                     code: ErrorCode::Range,
                     message: format!("{path}[{i}]: grammar lane value is negative"),
                 })?);
             }
             check_reconstructed_len(r, rendered_len, limits, path, i)?;
-            out.push(&render_grammar(grammar, &values)?);
+            out.push_with(|text| render_grammar(text, grammar, &values))?;
             matched += 1;
         }
         return Ok(out);
