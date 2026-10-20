@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any, Callable, Iterable, Literal, NamedTuple
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
-from ._wire import DecodeError, EncodeError, HyperflyError
+from ._wire import INT_MAX, DecodeError, EncodeError, HyperflyError
 from .registry import CodecRegistry
 
 HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly"
@@ -369,11 +369,12 @@ class DecodedRequest(NamedTuple):
     value: Any
 
 
-def _check_max_bytes(max_bytes: int) -> None:
-    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool):
-        raise TypeError("max_bytes must be an int")
-    if max_bytes < 0:
-        raise ValueError("max_bytes must be non-negative")
+def _checked_max_bytes(max_bytes: Any) -> int:
+    kind = type(max_bytes)
+    number = int.__index__(max_bytes) if issubclass(kind, int) and kind is not bool else -1
+    if not 0 <= number <= INT_MAX:
+        raise HyperflyError("options", "max_bytes: must be a non-negative safe integer")
+    return number
 
 
 def _exceeds(content_length: str | int, max_bytes: int) -> bool:
@@ -400,7 +401,7 @@ def read_body(
     bound is pulled; Content-Length only rejects early. A chunk source that fails is
     a 400.
     """
-    _check_max_bytes(max_bytes)
+    max_bytes = _checked_max_bytes(max_bytes)
     if content_length is not None and _exceeds(content_length, max_bytes):
         raise RequestError(413, "too-large")
     if isinstance(body, (bytes, bytearray, memoryview)):
@@ -479,7 +480,7 @@ def decode_request(
     a Hyperfly-Codec header that contradicts it, 415 with Hyperfly-Offer for an
     unknown fingerprint, 400 for a body that fails to decode.
     """
-    _check_max_bytes(max_bytes)
+    max_bytes = _checked_max_bytes(max_bytes)
     essence = _essence(content_type)
     hyperfly = essence == HYPERFLY_MEDIA_TYPE
     if not hyperfly and not _is_json(essence):
