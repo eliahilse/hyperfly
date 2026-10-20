@@ -343,30 +343,36 @@ _Leaves = list[tuple[tuple[str, ...], dict[str, Any]]]
 _HEADED_KINDS = frozenset({"int", "float64", "string"})
 
 
-def _wire_empty(node: dict[str, Any], columnar: bool) -> bool:
-    """Whether a zero-bit type also occupies no bytes: an eligible array's int, float64
-    and string columns write their mode byte even when no rows participate."""
+_Arrays = dict[int, tuple[_Leaves | None, bool, bool]]
+
+
+def _wire_empty(node: dict[str, Any], arrays: _Arrays) -> bool:
+    """Whether a zero-bit type also occupies no bytes, with every array under `node`
+    already indexed: an eligible array's int, float64 and string columns write their
+    mode byte even when no rows participate. Only meaningful for zero-bit nodes; any
+    other kind outside an array (int, nullable, ...) answers True."""
     kind = node["kind"]
     if kind == "struct":
-        return all(_wire_empty(f["type"], columnar) for f in node["fields"])
+        return all(_wire_empty(f["type"], arrays) for f in node["fields"])
     if kind == "array":
-        if columnar and _columnar_eligible(node):
-            return all(f["type"]["kind"] not in _HEADED_KINDS for _segs, f in _flatten_leaves(node["element"]) or ())
-        return node["length"] == 0 or _wire_empty(node["element"], columnar)
+        leaves = arrays[id(node)][0]
+        if leaves is not None:
+            return all(f["type"]["kind"] not in _HEADED_KINDS for _segs, f in leaves)
+        return node["length"] == 0 or _wire_empty(node["element"], arrays)
     return True
 
 
-def _index_arrays(node: dict[str, Any], columnar: bool, out: dict[int, tuple[_Leaves | None, bool, bool]]) -> None:
+def _index_arrays(node: dict[str, Any], columnar: bool, out: _Arrays) -> None:
     """Per array node: its columnar leaves (None when row-encoded), whether its element
     is zero-bit, and whether that element also occupies no bytes."""
     kind = node["kind"]
     if kind == "array":
         element = node["element"]
+        _index_arrays(element, columnar, out)
         if id(node) not in out:
             leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
             zero_bit = not has_payload(element)
-            out[id(node)] = (leaves, zero_bit, zero_bit and _wire_empty(element, columnar))
-        _index_arrays(element, columnar, out)
+            out[id(node)] = (leaves, zero_bit, zero_bit and _wire_empty(element, out))
     elif kind == "nullable":
         _index_arrays(node["inner"], columnar, out)
     elif kind == "struct":
@@ -505,7 +511,7 @@ class _Ctx:
         inflate: Callable[[bytes, int], bytes] | None,
         profile: dict[str, Any] | None = None,
     ) -> None:
-        self.arrays: dict[int, tuple[_Leaves | None, bool, bool]] = {}
+        self.arrays: _Arrays = {}
         _index_arrays(ir, columnar, self.arrays)
         self.dicts: dict[int, list[str]] = {}
         self.codes: dict[int, dict[str, int]] = {}

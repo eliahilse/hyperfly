@@ -117,3 +117,37 @@ def test_zero_bit_elements_still_decode_from_nothing(plan):
     assert decoded == value
     decoded[0][0]["t"] = 8
     assert decoded[1][0]["t"] == 7
+
+
+@pytest.mark.parametrize("kind", ["int", "float64", "string"])
+@pytest.mark.parametrize("body", ["0201", "0202", "0204", "020100", "0200ff"])
+def test_empty_fixed_columnar_arrays_reject_a_nonzero_mode_byte(kind, body):
+    codec = compile_ir(_rows(_fixed(0, _struct(a={"kind": kind}))), plan="columnar")
+    assert _decode_error(codec, body) == "marker"
+
+
+def _profile(*columns):
+    return {"version": 2, "shared": {"columns": list(columns)}}
+
+
+PROFILED = [
+    ("dictionary", {"a": {"kind": "string"}}, _profile({"leaf": 0, "dict": ["x", "y"]}), "00", ["0201", "020001"]),
+    (
+        "derived from a dictionary",
+        {"a": {"kind": "string"}, "c": {"kind": "string"}},
+        _profile({"leaf": 0, "dict": ["x"]}, {"leaf": 1, "derived": {"source": 0, "values": ["y"]}}),
+        "0000",
+        ["0201000000", "0200010000", "0200040000"],
+    ),
+]
+
+
+@pytest.mark.parametrize("fields, profile, headers, invalid", [case[1:] for case in PROFILED], ids=[case[0] for case in PROFILED])
+def test_profiled_empty_fixed_arrays(fields, profile, headers, invalid):
+    codec = compile_ir(_rows(_fixed(0, _struct(**fields))), plan="columnar", profile=profile, pack=False)
+    body = "02" + headers * 2
+    assert codec.encode_body([[], []]).hex() == body
+    assert codec.decode_body(bytes.fromhex(body)) == [[], []]
+    assert _decode_error(codec, body[:-2]) == "truncated"
+    for bad in invalid:
+        assert _decode_error(codec, bad) == "marker"
