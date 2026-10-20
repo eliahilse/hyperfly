@@ -1,6 +1,7 @@
 use crate::ir::{
-    column_count, fingerprint_of, has_payload, serialize_artifact, validate, validate_profile,
-    Derivation, Field, GrammarCase, GrammarToken, Literal, Node, Plan, Profile,
+    check_artifact_nesting, column_count, dismantle, fingerprint_of, has_payload,
+    serialize_artifact, validate, validate_profile, Derivation, Field, GrammarCase, GrammarToken,
+    Literal, Node, Plan, Profile,
 };
 use crate::value::Value;
 use crate::wire::*;
@@ -468,7 +469,8 @@ impl Codec {
     /// Compiles `ir` with the plan, limits, packing, and profile in `options`.
     ///
     /// Returns [`ErrorCode::Ir`] for an invalid schema, layout, profile, or a
-    /// profile supplied with [`Plan::Row`].
+    /// profile supplied with [`Plan::Row`], and for a schema or profile whose
+    /// canonical artifact would nest JSON containers deeper than 512.
     ///
     /// ```
     /// use hyperfly_core::{Codec, CompileOptions, Field, Node, Plan, Value};
@@ -500,6 +502,10 @@ impl Codec {
             pack,
             profile,
         } = options;
+        if let Err(e) = check_artifact_nesting(&ir, profile.as_ref()) {
+            dismantle(ir);
+            return Err(e);
+        }
         validate(&ir, "$")?;
         if plan == Plan::Columnar {
             validate_columnar_layout(&ir)?;

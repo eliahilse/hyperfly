@@ -191,6 +191,74 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
     }
 }
 
+const MAX_ARTIFACT_NESTING: usize = 512;
+
+fn profile_nesting(profile: &Profile) -> usize {
+    profile
+        .columns
+        .iter()
+        .map(|c| {
+            let grammar = c.grammar.as_deref();
+            if grammar.is_some_and(|g| g.iter().any(|t| matches!(t, GrammarToken::Num(_)))) {
+                7
+            } else if c.derived.is_some() || grammar.is_some_and(|g| !g.is_empty()) {
+                6
+            } else if c.dict.is_some() || grammar.is_some() {
+                5
+            } else {
+                4
+            }
+        })
+        .max()
+        .unwrap_or(3)
+}
+
+/// Rejects an artifact that would nest JSON containers deeper than 512, without recursion.
+pub fn check_artifact_nesting(ir: &Node, profile: Option<&Profile>) -> Result<()> {
+    let mut deepest = profile.map_or(2, profile_nesting);
+    let mut stack = vec![(ir, 2usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if deepest > MAX_ARTIFACT_NESTING {
+            break;
+        }
+        deepest = deepest.max(depth);
+        match node {
+            Node::Enum(_) => deepest = deepest.max(depth + 1),
+            Node::Nullable(inner) => stack.push((inner, depth + 1)),
+            Node::Array { element, .. } => stack.push((element, depth + 1)),
+            Node::Struct(fields) => {
+                deepest = deepest.max(if fields.is_empty() {
+                    depth + 1
+                } else {
+                    depth + 2
+                });
+                stack.extend(fields.iter().map(|f| (&f.ty, depth + 3)));
+            }
+            _ => {}
+        }
+    }
+    if deepest > MAX_ARTIFACT_NESTING {
+        return err(
+            ErrorCode::Ir,
+            format!("$: artifact nests deeper than {MAX_ARTIFACT_NESTING}"),
+        );
+    }
+    Ok(())
+}
+
+/// Drops `node` without recursion, for schemas too deep for the recursive drop.
+pub fn dismantle(node: Node) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Nullable(inner) => stack.push(*inner),
+            Node::Array { element, .. } => stack.push(*element),
+            Node::Struct(fields) => stack.extend(fields.into_iter().map(|f| f.ty)),
+            _ => {}
+        }
+    }
+}
+
 fn esc(s: &str, out: &mut String) {
     out.push('"');
     for ch in s.chars() {

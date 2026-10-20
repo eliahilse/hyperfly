@@ -117,6 +117,10 @@ fn main() -> Result<(), hyperfly_core::Error> {
 - `max_amplification` and `max_byte_amplification` scale item and byte budgets
   with the body length, so a short body cannot declare a large result.
 
+Schemas have their own bound, independent of `max_depth`: `Codec::compile`
+returns `ErrorCode::Ir` for a schema or profile whose canonical artifact would
+nest JSON containers deeper than 512.
+
 ## Errors
 
 Every failure carries an `ErrorCode` and a message. The codes are the same
