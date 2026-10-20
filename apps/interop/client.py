@@ -50,7 +50,7 @@ def main() -> int:
     status, headers, body = get("/v1/events", accept_header([codec.fingerprint]))
     kind, decoded = decode_response(headers.get("content-type"), body, registry)
     assert kind == "hyperfly", kind
-    assert headers.get("vary") == "Hyperfly-Accept"
+    assert {t.strip().lower() for t in headers.get("vary", "").split(",")} >= {"hyperfly-accept", "accept"}
     print(f"3. binary -> {len(body)} B ({json_bytes / len(body):.1f}x smaller than the JSON)")
 
     assert decoded == value, "the two representations must carry the same value"
