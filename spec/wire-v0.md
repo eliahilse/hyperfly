@@ -315,7 +315,7 @@ partial values.
 
 ## 8. Vectors
 
-The seven vector files are listed under [Vectors](#vectors) in Stability.
+The vector files are listed under [Vectors](#vectors) in Stability.
 
 Hex is body bytes only. `decodeOnly` rows are decoded without requiring an
 encode round trip; in `limits.json`, the encoder MUST refuse their values
@@ -346,7 +346,8 @@ below mean plan-columnar-v5.
   null, inconsistent escape bits or a zero patched-frame exception high part
   (§3.5, §4.10, plan §3).
 - `trailing` (decode): bytes remain after a complete body (§2).
-- `truncated` (decode): input ends before a value is complete (§6).
+- `truncated` (decode): input ends before a value is complete (§3–§4, §6,
+  plan §3).
 - `depth` (encode, decode): traversal exceeds `maxDepth` (§6).
 - `limit` (encode, decode): an item, byte, amplification or remaining-input
   bound is exceeded (§6).
@@ -355,7 +356,7 @@ below mean plan-columnar-v5.
   from the codec's fingerprint (§2), loaded artifact content does not hash
   to the fingerprint it was fetched under, or a fingerprint supplied for
   artifact loading is not 32 hex characters (negotiation-v1 §3).
-- `ir` (compile): invalid IR or profile (§4, plan §6.2–§6.4), or an artifact
+- `ir` (compile): invalid IR or profile (§4, plan §6.1–§6.5), or an artifact
   naming an unimplemented wire, plan layout or plan version (Stability).
 - `packed` (decode): invalid DEFLATE, trailing bytes in its blob or wrong
   inflated length (plan §3–§4).
@@ -372,7 +373,7 @@ The code is the contract; messages are not. Wherever a vector pins a code,
 every implementation MUST report that code. §6 fixes the order of limit
 checks so the same input yields the same code. Implementations may define
 further codes for failures outside this document (option validation,
-host-language schema adapters, JSON parsing); those MUST NOT replace a code
+host-adapter validation failures, JSON parsing outside artifact loading); those MUST NOT replace a code
 above for a failure this document defines.
 
 ## Stability
@@ -387,11 +388,13 @@ Every hyperfly 1.x release preserves:
 - Canonical serialization and fingerprinting (§5, plan-columnar-v5 §6.5):
   an IR, plan and profile yield the same artifact text and fingerprint in
   every 1.x release.
-- The set of valid IR and profile documents (§4, plan-columnar-v5 §6.2). It
-  is never narrowed, and widens only by the additions below.
-- For every existing artifact, the exact set of bodies a decoder accepts at
-  the same limits and the decoded value of each. A 1.x release MUST NOT start
-  rejecting a body or start accepting one.
+- The set of valid IR and profile documents, as this document (§4,
+  plan-columnar-v5 §6.2) and the vectors define it. It is never narrowed,
+  and widens only by the additions below.
+- For every existing artifact, the set of bodies a decoder accepts at the
+  same limits and the decoded value of each, as this document and the
+  vectors define them. A 1.x release MUST NOT change that set in either
+  direction.
 - The error codes of §9 for the failures they cover.
 - The limit names and defaults of §6. A decoder configured with the defaults
   MUST accept every valid body within them (a deflate-packed column also
@@ -402,6 +405,10 @@ Every hyperfly 1.x release preserves:
   `/.well-known/hyperfly/<fingerprint>` path; the `Accept` and
   `Hyperfly-Accept` parsing rules; fallback conditions; `Vary`; and the
   status rules of negotiation-v1 §4 in their order.
+
+An implementation that accepts or rejects differently from the sets above
+has a defect. Fixing it to conform is not a breaking change, and the fix
+adds a vector row that pins the corrected behaviour.
 
 ### Additions
 
@@ -445,7 +452,7 @@ It MUST NOT compile it as a different version.
 
 ### Vectors
 
-The seven JSON files under `spec/vectors/` are the 1.x compatibility suite:
+The JSON files under `spec/vectors/` are the 1.x compatibility suite:
 
 - `accept.json` — `Hyperfly-Accept` parsing (negotiation-v1 §6).
 - `bytes.json` — byte budgets at and past their bounds (§6).
