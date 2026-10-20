@@ -14,9 +14,11 @@ import binascii
 import json
 import math
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterable, Literal, NamedTuple, cast
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
 from ._wire import INT_MAX, DecodeError, EncodeError, HyperflyError
@@ -42,6 +44,13 @@ _CLOSING_QUOTE = re.compile(r'(?<!\\)\\*"')
 _RANKS = {HYPERFLY_MEDIA_TYPE: 3, "application/*": 2, "*/*": 1}
 _QVALUE = re.compile(r"0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?")
 _JSON_SUFFIX = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+/[!#$%&'*+.^_`|~0-9a-z-]+\+json")
+_MODEL_HAS_BYTES: WeakKeyDictionary[type[Any], bool] = WeakKeyDictionary()
+_MODEL_BYTES_SERIALIZERS: WeakKeyDictionary[type[Any], ReferenceType[_ModelBytesSerializer]] = WeakKeyDictionary()
+
+
+@dataclass
+class _ModelBytesSerializer:
+    serializer: Any
 
 
 def parse_accept(header: str | None) -> list[str]:
@@ -222,17 +231,98 @@ def _json_key(key: Any) -> Any:
     return key
 
 
+def _model_has_bytes(cls: type[Any]) -> bool:
+    cached = _MODEL_HAS_BYTES.get(cls)
+    if cached is not None:
+        return cached
+    pending = [cls.__pydantic_core_schema__]
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, dict):
+            if node.get("type") == "bytes":
+                _MODEL_HAS_BYTES[cls] = True
+                return True
+            pending.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            pending.extend(node)
+    _MODEL_HAS_BYTES[cls] = False
+    return False
+
+
+def _overlay_model_bytes(plain: Any, python: Any) -> Any:
+    root = [plain]
+    pending: list[tuple[Any, Any, Any]] = [(root, 0, python)]
+    while pending:
+        parent, key, source = pending.pop()
+        target = parent[key]
+        if isinstance(source, (bytes, bytearray)) and isinstance(target, str):
+            parent[key] = base64.b64encode(source).decode("ascii")
+        elif isinstance(source, dict) and isinstance(target, dict):
+            pending.extend((target, name, item) for name, item in source.items() if name in target)
+        elif isinstance(source, (list, tuple)) and isinstance(target, list):
+            pending.extend((target, index, item) for index, item in enumerate(source[:len(target)]))
+    return root[0]
+
+
+def _model_bytes_serializer(cls: type[Any]) -> Any:
+    cached = _MODEL_BYTES_SERIALIZERS.get(cls)
+    holder = cached() if cached is not None else None
+    if holder is not None:
+        return holder.serializer
+    from pydantic_core import SchemaSerializer
+
+    schema = deepcopy(cls.__pydantic_core_schema__)
+    core_config = {"ser_json_bytes": "base64"}
+    pending = [schema]
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, dict):
+            config = node.get("config")
+            if isinstance(config, dict):
+                config["ser_json_bytes"] = "base64"
+                if node.get("cls") is cls:
+                    core_config = config
+            pending.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            pending.extend(node)
+    constructor: Any = SchemaSerializer
+    try:
+        serializer = constructor(schema, core_config, _use_prebuilt=False)
+    except TypeError as error:
+        if "_use_prebuilt" not in str(error):
+            raise
+        # Older pydantic-core versions build directly from the supplied schema.
+        serializer = constructor(schema, core_config)
+    holder = _ModelBytesSerializer(serializer)
+    # Serializers retain their model classes, so only the class owns the holder.
+    cls.__hyperfly_http_bytes_serializer__ = holder
+    _MODEL_BYTES_SERIALIZERS[cls] = ref(holder)
+    return serializer
+
+
 def _json_value(value: Any) -> Any:
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
             from pydantic import BaseModel
-            from pydantic_core import to_jsonable_python
         except ImportError:
             pass
         else:
             if isinstance(value, BaseModel):
-                return to_jsonable_python(_json_value(model_dump(mode="python", by_alias=True)))
+                if _model_has_bytes(type(value)):
+                    plain = _model_bytes_serializer(type(value)).to_python(value, mode="json", by_alias=True)
+                    plain = _overlay_model_bytes(plain, model_dump(mode="python", by_alias=True))
+                else:
+                    plain = model_dump(mode="json", by_alias=True)
+                return _json_value(plain)
         value = model_dump(mode="json", by_alias=True)
     if isinstance(value, Enum):
         value = value.value
@@ -268,7 +358,8 @@ def encode_for(
     A value the codec refuses under its limits is answered in JSON, never an error
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
     JSON fallback writes bytes and bytearray values as standard padded base64,
-    including model fields, without requiring a codec.
+    without requiring a codec. Models are dumped in JSON mode with bytes values
+    as standard padded base64.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:
         try:

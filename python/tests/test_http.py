@@ -245,6 +245,188 @@ def test_json_fallback_preserves_model_json_types_alongside_bytes():
     assert json.loads(body) == {"time": "2026-01-01T00:00:00Z", "amount": "1.25", "payload": "/w=="}
 
 
+@pytest.mark.parametrize("with_bytes", [False, True])
+def test_json_fallback_preserves_json_only_field_serializer(with_bytes):
+    from datetime import datetime
+    from pydantic import field_serializer
+
+    class Response(BaseModel):
+        t: datetime
+
+        @field_serializer("t", when_used="json")
+        def serialize_time(self, value):
+            return "T"
+
+    class BinaryResponse(Response):
+        payload: bytes
+
+    value = BinaryResponse(t=datetime(2026, 1, 1), payload=b"hi") if with_bytes else Response(t=datetime(2026, 1, 1))
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == ({"t": "T", "payload": "aGk="} if with_bytes else {"t": "T"})
+
+
+def test_json_fallback_preserves_nested_json_serializers_with_non_utf8_bytes():
+    from pydantic import ConfigDict, field_serializer
+
+    class Child(BaseModel):
+        model_config = ConfigDict(title="nested", ser_json_bytes="utf8")
+        payload: bytes
+        number: int
+
+        @field_serializer("number", when_used="json")
+        def serialize_number(self, value):
+            return f"number:{value}"
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="hex")
+        child: Child
+
+    value = Response(child=Child(payload=b"\xfb\xff\xfe\x00", number=7))
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"child": {"payload": "+//+AA==", "number": "number:7"}}
+    assert Child.model_config["ser_json_bytes"] == "utf8"
+    assert Response.model_config["ser_json_bytes"] == "hex"
+    with pytest.raises(UnicodeDecodeError):
+        value.child.model_dump(mode="json")
+
+
+def test_json_fallback_preserves_json_only_plain_serializer():
+    from typing import Annotated
+    from pydantic import PlainSerializer
+
+    class Response(BaseModel):
+        number: Annotated[int, PlainSerializer(lambda value: f"number:{value}", when_used="json")]
+        payload: bytes
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(number=7, payload=b"hi"))
+    assert json.loads(body) == {"number": "number:7", "payload": "aGk="}
+
+
+def test_json_fallback_preserves_model_serializer_divergent_shapes():
+    from pydantic import model_serializer
+
+    class Response(BaseModel):
+        payload: bytes
+        items: list[bytes]
+
+        @model_serializer(mode="wrap")
+        def serialize(self, handler, info):
+            if info.mode == "json":
+                return {"message": "custom", "items": "collapsed"}
+            return handler(self)
+
+    value = Response(payload=b"hi", items=[b"hi"])
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"message": "custom", "items": "collapsed"}
+
+
+def test_json_fallback_preserves_bytes_serializer_divergent_shape():
+    from pydantic import field_serializer
+
+    class Response(BaseModel):
+        payload: bytes
+
+        @field_serializer("payload", when_used="json")
+        def serialize_payload(self, value):
+            return {"size": len(value)}
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(payload=b"hi"))
+    assert json.loads(body) == {"payload": {"size": 2}}
+
+
+def test_json_fallback_preserves_model_json_config():
+    from datetime import timedelta
+    from pydantic import ConfigDict
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_timedelta="float")
+        duration: timedelta
+        payload: bytes
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(duration=timedelta(seconds=90), payload=b"hi"))
+    assert json.loads(body) == {"duration": 90.0, "payload": "aGk="}
+
+
+@pytest.mark.parametrize("bytes_mode", ["utf8", "hex", "base64"])
+@pytest.mark.parametrize("optional", [None, b"optional"])
+def test_json_fallback_overlays_model_bytes_positions(bytes_mode, optional):
+    from pydantic import ConfigDict, Field
+
+    class Child(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        payload: bytes = Field(alias="data")
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        payload: bytes = Field(alias="data")
+        child: Child
+        items: list[bytes]
+        optional: bytes | None
+
+    value = Response(data=b"hi", child=Child(data=b"hi"), items=[b"hi"], optional=optional)
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {
+        "data": "aGk=", "child": {"data": "aGk="}, "items": ["aGk="],
+        "optional": "b3B0aW9uYWw=" if optional else None,
+    }
+
+
+def test_json_fallback_overlays_root_model_bytes():
+    from pydantic import ConfigDict, RootModel
+
+    class Response(RootModel[bytes]):
+        model_config = ConfigDict(ser_json_bytes="base64")
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(b"\xfb\xff\xfe\x00"))
+    assert json.loads(body) == "+//+AA=="
+
+
+def test_json_fallback_finds_bytes_in_recursive_schema_definitions():
+    class Response(BaseModel):
+        payload: bytes
+        children: list["Response"]
+
+    value = Response(payload=b"hi", children=[Response(payload=b"hi", children=[])])
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"payload": "aGk=", "children": [{"payload": "aGk=", "children": []}]}
+
+
+def test_json_fallback_dumps_models_without_bytes_once(monkeypatch):
+    class Response(BaseModel):
+        message: str
+
+    calls = []
+    dump = Response.model_dump
+
+    def counted(self, **kwargs):
+        calls.append(kwargs)
+        return dump(self, **kwargs)
+
+    monkeypatch.setattr(Response, "model_dump", counted)
+    value = Response(message="hello")
+    for _ in range(2):
+        body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+        assert json.loads(body) == {"message": "hello"}
+    assert calls == [{"mode": "json", "by_alias": True}] * 2
+
+
+def test_json_fallback_cache_does_not_retain_model_classes():
+    import gc
+    import weakref
+
+    def encode_temporary_model():
+        class Response(BaseModel):
+            payload: bytes
+
+        body, _ = encode_for(negotiate(None, CodecRegistry()), Response(payload=b"hi"))
+        assert json.loads(body) == {"payload": "aGk="}
+        return weakref.ref(Response)
+
+    model = encode_temporary_model()
+    gc.collect()
+    assert model() is None
+
+
 def test_json_fallback_uses_model_dump_without_pydantic():
     class Response:
         def model_dump(self, *, mode, by_alias):
