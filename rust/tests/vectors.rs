@@ -303,18 +303,48 @@ fn limits_codec(vector: &Json) -> Codec {
                 "maxByteLength" => limits.max_byte_length = value,
                 "maxAmplification" => limits.max_amplification = value,
                 "maxTotalItems" => limits.max_total_items = value,
+                "maxTotalBytes" => limits.max_total_bytes = value,
+                "maxByteAmplification" => limits.max_byte_amplification = value,
                 other => panic!("unknown limit {other}"),
             }
         }
     }
-    Codec::compile(node_of(&vector["ir"]).unwrap(), plan, limits, true).unwrap()
+    let profile = vector.get("profile").map(profile_of).transpose().unwrap();
+    let inflate = vector
+        .get("inflate")
+        .is_none_or(|value| value.as_bool().unwrap());
+    Codec::compile_with_profile(
+        node_of(&vector["ir"]).unwrap(),
+        plan,
+        limits,
+        inflate,
+        profile,
+    )
+    .unwrap()
 }
 
 #[test]
 fn limits_vectors() {
-    let file = load("limits.json");
-    for section in ["valid", "invalidDecode", "invalidEncode", "decodeOnly"] {
-        for vector in file[section].as_array().unwrap() {
+    run_limit_vectors(&load("limits.json"));
+}
+
+#[test]
+fn byte_budget_vectors() {
+    run_limit_vectors(&load("bytes.json"));
+}
+
+fn run_limit_vectors(file: &Json) {
+    for section in [
+        "valid",
+        "invalidDecode",
+        "invalidEncode",
+        "decodeOnly",
+        "packedDecode",
+    ] {
+        let Some(vectors) = file.get(section) else {
+            continue;
+        };
+        for vector in vectors.as_array().unwrap() {
             let name = vector["name"].as_str().unwrap();
             let codec = limits_codec(vector);
             match section {
@@ -357,17 +387,19 @@ fn limits_vectors() {
                         "{name}"
                     );
                 }
-                "decodeOnly" => {
+                "decodeOnly" | "packedDecode" => {
                     let value = value_of(&vector["value"]);
                     let decoded = codec
                         .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
                         .unwrap_or_else(|e| panic!("{name}: {e}"));
                     assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
-                    assert_eq!(
-                        codec.encode_body(&value).expect_err(name).code.as_str(),
-                        "limit",
-                        "{name}"
-                    );
+                    if section == "decodeOnly" {
+                        assert_eq!(
+                            codec.encode_body(&value).expect_err(name).code.as_str(),
+                            "limit",
+                            "{name}"
+                        );
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -856,6 +888,67 @@ fn profiled_vectors() {
             },
         };
         assert_eq!(code, v["error"].as_str().unwrap(), "{name}");
+    }
+}
+
+#[test]
+fn profiled_values_obey_total_byte_budget() {
+    fn decoded_bytes(value: &Value) -> u64 {
+        match value {
+            Value::Str(s) => s.len() as u64,
+            Value::Bytes(bytes) => bytes.len() as u64,
+            Value::Array(values) => values.iter().map(decoded_bytes).sum(),
+            Value::Object(fields) => fields.iter().map(|(_, v)| decoded_bytes(v)).sum(),
+            _ => 0,
+        }
+    }
+
+    let file = load("columnar.json");
+    for vector in file["profiled"]["valid"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let value = value_of(&vector["value"]);
+        let total = decoded_bytes(&value);
+        if total == 0 {
+            continue;
+        }
+        let body = from_hex(vector["hex"].as_str().unwrap());
+        for cap in [total, total - 1] {
+            let limits = Limits {
+                max_total_bytes: cap,
+                ..Limits::default()
+            };
+            let codec = Codec::compile_with_profile(
+                node_of(&vector["ir"]).unwrap(),
+                Plan::Columnar,
+                limits,
+                false,
+                Some(profile_of(&vector["profile"]).unwrap()),
+            )
+            .unwrap();
+            if cap == total {
+                assert_eq!(codec.encode_body(&value).expect(name), body, "{name}");
+                assert!(
+                    deep_eq(&codec.decode_body(&body).expect(name), &value),
+                    "{name}"
+                );
+            } else {
+                assert_eq!(
+                    codec.encode_body(&value).expect_err(name).code,
+                    ErrorCode::Limit,
+                    "{name}"
+                );
+                assert_eq!(
+                    codec.encode(&value).expect_err(name).code,
+                    ErrorCode::Limit,
+                    "{name}"
+                );
+                assert_eq!(
+                    codec.decode_body(&body).expect_err(name).code,
+                    ErrorCode::Limit,
+                    "{name}"
+                );
+            }
+        }
     }
 }
 

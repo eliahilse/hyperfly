@@ -228,6 +228,19 @@ Implementations MUST enforce configurable limits with these v0 defaults:
   columnar eligible array is charged its row count `n` only, never per leaf
   or per participating row. Per-array checks bound one count; the budget
   bounds their product, which nesting otherwise multiplies.
+- `maxTotalBytes` 2^26 per message and `maxByteAmplification` 64, and the
+  **byte budget**: the sum of the decoded byte lengths of every string and
+  bytes value in one body (UTF-8 bytes for a string; at every depth, in both
+  plans) MUST NOT exceed
+  `min(maxTotalBytes, maxByteAmplification × (body length + 1))`, computed
+  once from the full body length as for the item budget. The sum includes
+  values a decoder reconstructs rather than reads: literals, enum members,
+  and the dictionary, grammar and derived values of plan-columnar-v5. Those,
+  and deflate-packed string columns, are why the byte budget exists beside
+  the item budget: a row can cost one bit or nothing on the wire and still
+  decode to a long string, and a packed column inflates about a thousand
+  bytes per body byte. `maxByteLength` bounds one value; the byte budget
+  bounds their sum.
 
 For each array, before reading any element or allocating anything
 proportional to its count, a decoder applies `maxDepth` on entering the
@@ -237,22 +250,51 @@ and charges the budget, in that order. A failure of any check but depth is
 reported as `limit`. The fixed order makes every implementation report the
 same failure for the same input.
 
+A decoder charges each string or bytes value against the byte budget as soon
+as its length is known, before reading or allocating its bytes, and reports
+an exceeded budget as `limit`:
+
+- a length-prefixed value (including an escaped value in a dictionary,
+  grammar or derived column), after `maxByteLength` is applied to its prefix
+  and before its bytes are read;
+- a deflate-packed string column (plan-columnar-v5 §3), once, with its
+  declared inflated total, after `maxByteLength` is applied to each declared
+  length and to the total, and before the blob length is read; a decoder
+  without an inflate capability charges it the same way and only then
+  rejects the column as `unsupported`; its values are not charged again;
+- a dictionary, grammar or derived value, when it is resolved, after its own
+  checks (code range, source lookup) and after `maxByteLength` is applied to
+  its length, and before it is built (a grammar value's length follows from
+  its tokens, so it is known before rendering);
+- a literal or enum member, each time it is decoded; a columnar literal leaf
+  is charged for all of its participating rows at once. Literals and enum
+  members are schema constants: `maxByteLength` does not apply to them, the
+  byte budget does.
+
+Within a column, a decoder first reads the column's structure (mode, escape
+count and bitmap, packed codes, indexes or grammar lanes, with their padding
+checks), then resolves values one at a time in participating-row order,
+completing each value's checks and charge before examining the next, so the
+first failing value determines the error.
+
 An encoder applies `maxDepth`, `maxItems` and `maxByteLength` as a decoder
 does. It applies the amplification bound to every array with, in place of
 remaining bytes, the number of bytes the array's own encoding occupies after
-its count (for a fixed-length array, all of its bytes), and the budget with
-the final body length. It applies the same one-bit floor as a decoder, to the
-same arrays, measured by those same bytes. An encoder that would violate any
-of these MUST refuse the value, with `depth` for `maxDepth` and `limit`
-otherwise. An encoder may
-therefore refuse a value whose body a decoder would accept (the decoder's
-remaining bytes include later siblings), never the reverse.
+its count (for a fixed-length array, all of its bytes), and the item and byte
+budgets with the final body length, counting values exactly as a decoder
+charges them. It applies the same one-bit floor as a decoder, to the same
+arrays, measured by those same bytes. An encoder that would violate any of
+these MUST refuse the value, with `depth` for `maxDepth` and `limit`
+otherwise. An encoder may therefore refuse a value whose body a decoder
+would accept (the decoder's remaining bytes include later siblings), never
+the reverse.
 
 Limits are local to each peer and are not negotiated. A peer holding lower
 limits rejects a body its sender accepted; over HTTP, an encoder's refusal
 is covered by the JSON fallback (negotiation-v1 §2). A route that
 legitimately ships denser payloads (long runs of width-zero columns, arrays
-of literals) raises the limits on both peers.
+of literals, strings that are mostly dictionary hits) raises the limits on
+both peers: `maxAmplification` for items, `maxByteAmplification` for bytes.
 
 Truncation anywhere is an error. Errors are errors — never best-effort
 partial values.
@@ -277,5 +319,8 @@ partial values.
 canonical text → fingerprint, locking §5. `spec/vectors/limits.json` — each
 §6 limit just at and just past its bound, for decoders and encoders; its
 `decodeOnly` vectors are bodies a decoder MUST accept whose values an encoder
-MUST refuse (§6). `spec/vectors/ir.json` — invalid IR and valid near misses,
-locking §4 acceptance. Every implementation runs all four.
+MUST refuse (§6). `spec/vectors/bytes.json` — the §6 byte budget at and
+just past its bound, in the same format, with `packedDecode` vectors that
+decoders run alone because deflate output differs between libraries.
+`spec/vectors/ir.json` — invalid IR and valid near misses, locking §4
+acceptance. Every implementation runs all five.
