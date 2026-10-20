@@ -1,6 +1,6 @@
 import { columnarEligible, flattenLeaves } from "./columnar.js";
 import { HyperflyError } from "./errors.js";
-import { hasLoneSurrogate } from "./ir.js";
+import { describeValue, hasLoneSurrogate, validateIR, withinStack } from "./ir.js";
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 
@@ -174,7 +174,11 @@ export function validateProfile(ir: IRNode, profile: Profile): void {
 }
 
 export function checkedProfile(ir: IRNode, profile: Profile): Profile {
-  profile = snapshotProfile(profile);
+  return withinStack(() => checkProfile(ir, snapshotProfile(profile)));
+}
+
+function checkProfile(ir: IRNode, profile: Profile): Profile {
+  validateIR(ir);
   const fail = (message: string): never => {
     throw new HyperflyError("ir", `profile: ${message}`);
   };
@@ -204,8 +208,7 @@ export function checkedProfile(ir: IRNode, profile: Profile): Profile {
   const root = record(profile, "document");
   keys(root, "document", ["version", "shared", "hints"], ["version", "shared"]);
   if (root.version !== 1 && root.version !== 2) {
-    const version = root.version;
-    fail(`unsupported profile version ${typeof version === "number" || typeof version === "string" ? version : typeof version}`);
+    fail(`unsupported profile version ${describeValue(root.version)}`);
   }
   const version = root.version;
   if (own(root, "hints") && !isRecord(root.hints)) fail("hints must be an object when present");
