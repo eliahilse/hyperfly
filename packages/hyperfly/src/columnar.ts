@@ -1,6 +1,6 @@
 import { decodeNode, enterArray, type Inflate } from "./decode.js";
 import { chargeBytes, checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
-import { DecodeError, EncodeError } from "./errors.js";
+import { DecodeError, EncodeError, isInstance } from "./errors.js";
 import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
@@ -757,7 +757,7 @@ function encodeStringColumn(
     } catch (err) {
       throw new EncodeError("packed", `${path}: string column failed to deflate`, { cause: err });
     }
-    if (!(packed instanceof Uint8Array)) {
+    if (!isInstance(packed, Uint8Array)) {
       throw new EncodeError("packed", `${path}: deflate hook must return a Uint8Array`);
     }
     packedCost =

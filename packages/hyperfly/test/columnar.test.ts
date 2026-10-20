@@ -118,6 +118,17 @@ describe("packed string columns", () => {
     expect(() => codec.encodeBody(prose)).toThrow(expect.objectContaining({ code: "packed" }));
   });
 
+  test("a deflate hook returning a revoked proxy is EncodeError packed", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const codec = compileIR(IR, {
+      plan: "columnar",
+      pack: { deflate: () => proxy as never, inflate: (bytes) => bytes },
+    });
+    expect(() => codec.encodeBody(prose)).toThrow(EncodeError);
+    expect(() => codec.encodeBody(prose)).toThrow(expect.objectContaining({ code: "packed" }));
+  });
+
   test("tiny strings stay plain even with hooks available", () => {
     const codec = compileIR(IR, { plan: "columnar" });
     const value = [{ body: "a" }, { body: "b" }];

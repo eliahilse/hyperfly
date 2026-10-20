@@ -238,6 +238,23 @@ describe("coded validation errors", () => {
     expect(() => codec.encode("value")).toThrow(expect.objectContaining({ code: "validation", cause }));
   });
 
+  test("wraps a revoked proxy thrown by parse", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const schema = z.string();
+    schema.parse = () => { throw proxy; };
+    const codec = compile(schema, { validate: true });
+    let caught: unknown;
+    try {
+      codec.encode("value");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EncodeError);
+    expect((caught as EncodeError).code).toBe("validation");
+    expect((caught as EncodeError).cause).toBe(proxy);
+  });
+
   test.each([null, "invalid", { toString: null }].map((cause) => [cause] as const))(
     "wraps non-Error parse failures: %p", (cause) => {
       const schema = z.string();

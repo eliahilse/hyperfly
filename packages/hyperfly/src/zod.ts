@@ -1,5 +1,5 @@
 import { checkedOptions, compileIR, type Codec, type CompileOptions } from "./codec.js";
-import { DecodeError, EncodeError, UnsupportedSchemaError } from "./errors.js";
+import { DecodeError, EncodeError, messageOf, UnsupportedSchemaError } from "./errors.js";
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
@@ -232,7 +232,7 @@ export function compile<S extends ZodSchemaLike>(
     try {
       return schema.parse!(value) as InferOutput<S>;
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "schema parse failed";
+      const message = messageOf(cause, "schema parse failed");
       throw new ErrorClass("validation", `$: ${message}`, { cause });
     }
   };

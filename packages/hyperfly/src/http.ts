@@ -1,5 +1,5 @@
 import { checkedOptions, compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
-import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
+import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError, isInstance, messageOf } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
@@ -116,7 +116,7 @@ function jsonBody(value: unknown): string {
   try {
     body = JSON.stringify(value);
   } catch (cause) {
-    throw new EncodeError("json", `$: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    throw new EncodeError("json", `$: ${messageOf(cause, "value could not be encoded as JSON")}`, { cause });
   }
   if (body === undefined) throw new EncodeError("json", "$: value has no JSON representation");
   return body;
@@ -128,7 +128,7 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Negoti
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
     } catch (error) {
-      if (!(error instanceof EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
+      if (!isInstance(error, EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
       options.onFallback?.(error);
       return {
         body: jsonBody(value),
@@ -244,8 +244,8 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
   try {
     codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits, pack });
   } catch (error) {
-    if (error instanceof HyperflyError) throw error;
-    throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);
+    if (isInstance(error, HyperflyError)) throw error;
+    throw new HyperflyError("ir", `artifact does not compile: ${messageOf(error, "unknown error")}`);
   }
   const compiled = JSON.parse(codec.artifact) as { plan: { version: number } };
   if (compiled.plan.version !== plan.version) {
@@ -509,7 +509,7 @@ async function readBodyWithinLimit<T>(
     }
     return { ok: true, value: codec.decode(bytes) as T };
   } catch (error) {
-    if (error instanceof HyperflyError) return { ok: false, response: new Response(null, { status: 400 }) };
+    if (isInstance(error, HyperflyError)) return { ok: false, response: new Response(null, { status: 400 }) };
     throw error;
   }
 }

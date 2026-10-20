@@ -488,6 +488,21 @@ describe("fetch adapter", () => {
     expect(() => encodeFor(decision, unencodable)).toThrow(expect.objectContaining({ code: "json" }));
   });
 
+  test("a revoked proxy thrown by toJSON is EncodeError json with the proxy as cause", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const decision = negotiate(undefined, registry);
+    let caught: unknown;
+    try {
+      encodeFor(decision, { toJSON: () => { throw proxy; } });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EncodeError);
+    expect((caught as EncodeError).code).toBe("json");
+    expect((caught as EncodeError).cause).toBe(proxy);
+  });
+
   test("a JSON fallback that cannot be encoded is EncodeError json with the cause", () => {
     const limited = compileIR({ kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] }, {
       limits: { maxByteLength: 1 },
@@ -1091,6 +1106,23 @@ describe("binary request validation", () => {
       headers: { "Content-Type": HYPERFLY_MEDIA_TYPE },
     });
     await expect(readBody(request, broken)).rejects.toBe(error);
+  });
+
+  test("rethrows a revoked proxy thrown by a codec unchanged", async () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const broken = new CodecRegistry([{
+      ...codecA,
+      decode() { throw proxy; },
+    } as never]);
+    const request = new Request(url, {
+      method: "POST",
+      body: codecA.encode(value as never) as BodyInit,
+      headers: { "Content-Type": HYPERFLY_MEDIA_TYPE },
+    });
+    let caught: unknown;
+    await readBody(request, broken).catch((error: unknown) => { caught = error; });
+    expect(caught).toBe(proxy);
   });
 });
 
