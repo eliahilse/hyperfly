@@ -124,3 +124,40 @@ def test_literal_elements_respect_max_depth():
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(b"\x01")
     assert err.value.code == "depth"
+
+
+PACKS_TO_NOTHING = {
+    "kind": "array",
+    "length": 2,
+    "element": {"kind": "struct", "fields": [{"name": "e", "type": {"kind": "enum", "members": ["only"]}}]},
+}
+
+
+@pytest.mark.parametrize("count", [1, 9])
+def test_encoder_holds_row_arrays_to_the_one_bit_floor(count):
+    # the inner fixed columnar array is not zero-bit yet encodes to no bytes, so
+    # the row-encoded outer array has nothing to pay its count with
+    codec = compile_ir({"kind": "array", "element": PACKS_TO_NOTHING}, plan="columnar")
+    with pytest.raises(HyperflyError) as encoded:
+        codec.encode_body([[{"e": "only"}] * 2] * count)
+    assert encoded.value.code == "limit"
+    with pytest.raises(HyperflyError) as decoded:
+        codec.decode_body(bytes([count]))
+    assert decoded.value.code == "limit"
+    assert codec.encode_body([]) == b"\x00"
+
+
+def test_encoder_floor_counts_only_the_arrays_own_bytes():
+    ir = {
+        "kind": "struct",
+        "fields": [
+            {"name": "a", "type": {"kind": "array", "element": PACKS_TO_NOTHING}},
+            {"name": "b", "type": {"kind": "bytes"}},
+        ],
+    }
+    codec = compile_ir(ir, plan="columnar")
+    value = {"a": [[{"e": "only"}] * 2], "b": b"\xff"}
+    assert codec.decode_body(bytes.fromhex("0101ff")) == value
+    with pytest.raises(HyperflyError) as err:
+        codec.encode_body(value)
+    assert err.value.code == "limit"

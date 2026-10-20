@@ -67,13 +67,19 @@ def _bound_by_input(r: Reader, count: int, zero_bit: bool, path: str) -> None:
         _dfail("limit", path, f"declared {count} items but only {r.remaining()} byte(s) remain")
 
 
-def _check_amplification(count: int, payload_bytes: int, ctx: _Ctx, path: str) -> None:
+def _check_amplification(count: int, payload_bytes: int, floor: bool, ctx: _Ctx, path: str) -> None:
+    """The decoder's bounds with the array's own bytes after its count in place of
+    remaining bytes, so whatever the encoder accepts its decoder accepts too. The
+    floor applies to a row-encoded array of non-zero-bit elements, which can still
+    pack to nothing (a fixed columnar array of single-member enums)."""
     if count > (payload_bytes + 1) * ctx.max_amplification:
         _efail(
             "limit",
             path,
             f"{count} rows in {payload_bytes} payload byte(s) exceeds the amplification limit",
         )
+    if floor and count > payload_bytes * 8:
+        _efail("limit", path, f"{count} items in {payload_bytes} payload byte(s) fall below the one-bit floor")
 
 
 def _efail(code: str, path: str, message: str) -> None:
@@ -405,7 +411,7 @@ def _encode_node(
             out.append(1)
             _encode_node(out, node["inner"], value, path, depth + 1, ctx, budget, column)
     elif kind == "array":
-        leaves = ctx.arrays[id(node)][0]
+        leaves, zero_bit = ctx.arrays[id(node)]
         if leaves is not None:
             _encode_columnar(out, node, value, path, depth, ctx, budget, leaves, column)
             return
@@ -423,7 +429,7 @@ def _encode_node(
         payload_start = len(out)
         for i, item in enumerate(value):
             _encode_node(out, node["element"], item, f"{path}[{i}]", depth + 1, ctx, budget, column)
-        _check_amplification(len(value), len(out) - payload_start, ctx, path)
+        _check_amplification(len(value), len(out) - payload_start, not zero_bit, ctx, path)
     elif kind == "struct":
         if not isinstance(value, dict):
             _efail("type", path, "expected object")
@@ -955,7 +961,7 @@ def _encode_columnar(
             for i, v in enumerate(participating):
                 _encode_node(out, t, v, f"{field_path}[{i}]", depth + 2, ctx, budget)
 
-    _check_amplification(len(rows), len(out) - payload_start, ctx, path)
+    _check_amplification(len(rows), len(out) - payload_start, False, ctx, path)
 
 
 def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _Ctx, column: int = 0) -> Any:
