@@ -186,3 +186,63 @@ describe("allocation and limit safety", () => {
     expect(codec.decodeBody(codec.encodeBody(rows))).toEqual(rows);
   });
 });
+
+describe("IR acceptance", () => {
+  test("zero is the integer 0 whatever its sign", () => {
+    const negative = compileIR({ kind: "literal", value: -0 });
+    const zero = compileIR({ kind: "literal", value: 0 });
+    expect(negative.fingerprint).toBe(zero.fingerprint);
+    expect(Object.is((negative.ir as { value: number }).value, 0)).toBe(true);
+    expect(Object.is(negative.decodeBody(new Uint8Array()), 0)).toBe(true);
+    expect(zero.encodeBody(-0)).toEqual(new Uint8Array());
+    const bounded = compileIR({ kind: "int", min: -0 });
+    expect(Object.is((bounded.ir as { min: number }).min, 0)).toBe(true);
+  });
+
+  test("float64 -0 is canonicalized to +0 as before", () => {
+    const codec = compileIR({ kind: "float64" });
+    const body = codec.encodeBody(-0);
+    expect(body).toEqual(new Uint8Array(8));
+    expect(Object.is(codec.decodeBody(body), 0)).toBe(true);
+  });
+
+  test("unknown keys are rejected", () => {
+    expect(() => compileIR({ kind: "bool", extra: 1 } as never)).toThrow("unknown key extra");
+    expect(() => compileIR({ kind: "struct", fields: [{ name: "x", type: { kind: "bool" }, extra: 1 }] } as never)).toThrow(
+      "unknown key extra",
+    );
+  });
+
+  test("any JSON value is rejected with code ir, never a host exception", () => {
+    let deep: unknown = { kind: "bool" };
+    for (let i = 0; i < 200_000; i++) deep = { kind: "array", element: deep };
+    const inputs: unknown[] = [
+      null,
+      [],
+      1,
+      "bool",
+      { kind: null },
+      { kind: "struct", fields: [null] },
+      { kind: "struct", fields: [{ name: "x", type: null }] },
+      { kind: "nullable", inner: [] },
+      { kind: "enum", members: [{}] },
+      deep,
+    ];
+    const ir: IRNode = { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } };
+    const profiles: unknown[] = [0, "x", [], { version: 2, shared: null }, { version: 2, shared: { columns: [null] } }];
+    const attempts = [
+      ...inputs.map((input) => () => compileIR(input as IRNode)),
+      ...profiles.map((profile) => () => compileIR(ir, { plan: "columnar", profile: profile as never })),
+    ];
+    for (const attempt of attempts) {
+      try {
+        attempt();
+      } catch (e) {
+        expect(e).toBeInstanceOf(HyperflyError);
+        expect((e as HyperflyError).code).toBe("ir");
+        continue;
+      }
+      throw new Error("compiled invalid input");
+    }
+  });
+});
