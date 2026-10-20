@@ -120,3 +120,32 @@ fn profile_with_row_plan_is_invalid_ir() {
         Codec::compile(string_rows(), CompileOptions::new().with_profile(profile)).unwrap_err();
     assert_eq!(error.code(), ErrorCode::Ir);
 }
+
+#[test]
+fn fingerprint_mismatch_reports_both_fingerprints() {
+    let strings = Codec::compile(Node::Str, CompileOptions::new()).unwrap();
+    let bools = Codec::compile(Node::Bool, CompileOptions::new()).unwrap();
+    let bytes = strings.encode(&Value::Str("hi".into())).unwrap();
+    let actual: String = bytes[3..19].iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(actual, strings.fingerprint());
+
+    let error = bools.decode(&bytes).unwrap_err();
+    assert_eq!(error.code(), ErrorCode::Fingerprint);
+    assert_eq!(
+        error.message(),
+        format!(
+            "codec fingerprint {} does not match payload {}",
+            bools.fingerprint(),
+            actual
+        )
+    );
+    assert_eq!(
+        error.fingerprint_mismatch(),
+        Some((bools.fingerprint(), actual.as_str()))
+    );
+    assert_eq!(
+        error.clone().fingerprint_mismatch(),
+        error.fingerprint_mismatch()
+    );
+    assert_eq!(header_error().fingerprint_mismatch(), None);
+}

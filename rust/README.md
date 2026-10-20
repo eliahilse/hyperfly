@@ -120,7 +120,9 @@ fn main() -> Result<(), hyperfly_core::Error> {
 ## Errors
 
 Every failure carries an `ErrorCode` and a message. The codes are the same
-codec error codes the TypeScript and Python packages report.
+codec error codes the TypeScript and Python packages report. A fingerprint
+mismatch from `decode` also reports both fingerprints through
+`err.fingerprint_mismatch()`.
 
 ```rust
 use hyperfly_core::{Codec, CompileOptions, ErrorCode, Limits, Node};

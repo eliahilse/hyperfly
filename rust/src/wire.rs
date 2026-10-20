@@ -80,6 +80,7 @@ impl fmt::Display for ErrorCode {
 pub struct Error {
     pub(crate) code: ErrorCode,
     pub(crate) message: String,
+    pub(crate) mismatch: Option<Box<(String, String)>>,
 }
 
 impl Error {
@@ -87,6 +88,15 @@ impl Error {
         Error {
             code,
             message: message.into(),
+            mismatch: None,
+        }
+    }
+
+    pub(crate) fn fingerprint(expected: &str, actual: String) -> Error {
+        Error {
+            code: ErrorCode::Fingerprint,
+            message: format!("codec fingerprint {expected} does not match payload {actual}"),
+            mismatch: Some(Box::new((expected.to_owned(), actual))),
         }
     }
 
@@ -107,6 +117,28 @@ impl Error {
     /// Returns the explanation, including a value path when available.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Returns the codec's and the payload's fingerprints, as lowercase hex, for an
+    /// [`ErrorCode::Fingerprint`] error from [`crate::Codec::decode`]; `None` otherwise.
+    ///
+    /// ```
+    /// use hyperfly_core::{Codec, CompileOptions, Node, Value};
+    ///
+    /// let strings = Codec::compile(Node::Str, CompileOptions::new()).unwrap();
+    /// let bools = Codec::compile(Node::Bool, CompileOptions::new()).unwrap();
+    /// let bytes = strings.encode(&Value::Str("hi".into())).unwrap();
+    ///
+    /// let err = bools.decode(&bytes).unwrap_err();
+    /// assert_eq!(
+    ///     err.fingerprint_mismatch(),
+    ///     Some((bools.fingerprint(), strings.fingerprint()))
+    /// );
+    /// ```
+    pub fn fingerprint_mismatch(&self) -> Option<(&str, &str)> {
+        self.mismatch
+            .as_deref()
+            .map(|(expected, actual)| (expected.as_str(), actual.as_str()))
     }
 }
 

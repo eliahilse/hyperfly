@@ -664,10 +664,11 @@ impl Codec {
             );
         }
         if data[3..HEADER_SIZE] != self.fp {
-            return err(
-                ErrorCode::Fingerprint,
-                "codec fingerprint does not match payload",
-            );
+            let actual = data[3..HEADER_SIZE]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            return Err(Error::fingerprint(&self.fingerprint, actual));
         }
         self.decode_body(&data[HEADER_SIZE..])
     }
