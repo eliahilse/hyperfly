@@ -264,7 +264,7 @@ fn limits_codec(vector: &Json) -> Codec {
             }
         }
     }
-    Codec::compile(node_of(&vector["ir"]), plan, limits, true).unwrap()
+    Codec::compile(node_of(&vector["ir"]).unwrap(), plan, limits, true).unwrap()
 }
 
 #[test]
