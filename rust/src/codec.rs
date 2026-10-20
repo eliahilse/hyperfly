@@ -246,27 +246,26 @@ fn enum_width(member_count: usize) -> Result<u8> {
 }
 
 fn validate_columnar_layout(node: &Node) -> Result<()> {
-    match node {
-        Node::Array { element, .. } => {
-            if let Some(leaves) = columnar_leaves(element) {
-                for leaf in leaves {
-                    if let Node::Enum(members) = &leaf.field.ty {
-                        enum_width(members.len())?;
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Array { element, .. } => {
+                if let Some(leaves) = columnar_leaves(element) {
+                    for leaf in leaves {
+                        if let Node::Enum(members) = &leaf.field.ty {
+                            enum_width(members.len())?;
+                        }
                     }
+                } else {
+                    stack.push(element);
                 }
-                return Ok(());
             }
-            validate_columnar_layout(element)
+            Node::Nullable(inner) => stack.push(inner),
+            Node::Struct(fields) => stack.extend(fields.iter().rev().map(|f| &f.ty)),
+            _ => {}
         }
-        Node::Nullable(inner) => validate_columnar_layout(inner),
-        Node::Struct(fields) => {
-            for field in fields {
-                validate_columnar_layout(&field.ty)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 fn type_accepts_null(node: &Node) -> bool {

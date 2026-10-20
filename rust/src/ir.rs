@@ -79,7 +79,23 @@ fn portable_field_name(name: &str) -> bool {
     !is_index
 }
 
+enum Pending<'a> {
+    Node(&'a Node, String),
+    Fields(&'a [Field], std::collections::HashSet<&'a str>, String),
+}
+
 pub fn validate(node: &Node, path: &str) -> Result<()> {
+    let mut stack = vec![Pending::Node(node, path.to_owned())];
+    while let Some(pending) = stack.pop() {
+        match pending {
+            Pending::Node(node, path) => validate_node(node, path, &mut stack)?,
+            Pending::Fields(fields, seen, path) => validate_field(fields, seen, path, &mut stack)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_node<'a>(node: &'a Node, path: String, stack: &mut Vec<Pending<'a>>) -> Result<()> {
     match node {
         Node::Bool | Node::Float64 | Node::Str | Node::Bytes => Ok(()),
         Node::Int { min, max } => {
@@ -144,7 +160,8 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
                     format!("{path}: nullable(literal null) has two encodings for null"),
                 );
             }
-            validate(inner, &format!("{path}?"))
+            stack.push(Pending::Node(inner, format!("{path}?")));
+            Ok(())
         }
         Node::Array { element, length } => {
             if let Some(n) = length {
@@ -155,40 +172,57 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
                     );
                 }
             }
-            validate(element, &format!("{path}[]"))
+            stack.push(Pending::Node(element, format!("{path}[]")));
+            Ok(())
         }
         Node::Struct(fields) => {
-            let mut seen = std::collections::HashSet::new();
-            for f in fields {
-                if f.name.is_empty() || !seen.insert(&f.name) {
-                    return err(ErrorCode::Ir, format!("{path}: invalid field names"));
-                }
-                if !portable_field_name(&f.name) {
-                    return err(
-                        ErrorCode::Ir,
-                        format!("{path}.{}: field name is not portable", f.name),
-                    );
-                }
-                if f.nullable && matches!(f.ty, Node::Nullable(_)) {
-                    return err(
-                        ErrorCode::Ir,
-                        format!("{path}.{}: nullable flag on a nullable type", f.name),
-                    );
-                }
-                if f.nullable && matches!(f.ty, Node::Literal(Literal::Null)) {
-                    return err(
-                        ErrorCode::Ir,
-                        format!(
-                            "{path}.{}: nullable flag on a null literal has two encodings for null",
-                            f.name
-                        ),
-                    );
-                }
-                validate(&f.ty, &format!("{path}.{}", f.name))?;
-            }
+            stack.push(Pending::Fields(
+                fields,
+                std::collections::HashSet::new(),
+                path,
+            ));
             Ok(())
         }
     }
+}
+
+fn validate_field<'a>(
+    fields: &'a [Field],
+    mut seen: std::collections::HashSet<&'a str>,
+    path: String,
+    stack: &mut Vec<Pending<'a>>,
+) -> Result<()> {
+    let Some((f, rest)) = fields.split_first() else {
+        return Ok(());
+    };
+    if f.name.is_empty() || !seen.insert(&f.name) {
+        return err(ErrorCode::Ir, format!("{path}: invalid field names"));
+    }
+    if !portable_field_name(&f.name) {
+        return err(
+            ErrorCode::Ir,
+            format!("{path}.{}: field name is not portable", f.name),
+        );
+    }
+    if f.nullable && matches!(f.ty, Node::Nullable(_)) {
+        return err(
+            ErrorCode::Ir,
+            format!("{path}.{}: nullable flag on a nullable type", f.name),
+        );
+    }
+    if f.nullable && matches!(f.ty, Node::Literal(Literal::Null)) {
+        return err(
+            ErrorCode::Ir,
+            format!(
+                "{path}.{}: nullable flag on a null literal has two encodings for null",
+                f.name
+            ),
+        );
+    }
+    let child = format!("{path}.{}", f.name);
+    stack.push(Pending::Fields(rest, seen, path));
+    stack.push(Pending::Node(&f.ty, child));
+    Ok(())
 }
 
 const MAX_ARTIFACT_NESTING: usize = 512;

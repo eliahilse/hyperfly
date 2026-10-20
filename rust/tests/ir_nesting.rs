@@ -165,16 +165,113 @@ fn deep_value(levels: usize) -> Value {
 }
 
 #[test]
-fn deep_values_round_trip_with_raised_max_depth() {
-    let mut limits = Limits::default();
-    limits.max_depth = 1000;
-    for plan in [Plan::Row, Plan::Columnar] {
-        let options = CompileOptions::new()
-            .with_plan(plan)
-            .with_limits(limits.clone());
-        let codec = Codec::compile(arrays(128, Node::Bool), options).unwrap();
-        let value = deep_value(128);
-        let bytes = codec.encode(&value).unwrap();
-        assert_eq!(codec.decode(&bytes).unwrap(), value);
+fn raised_max_depth_round_trips_on_a_larger_stack() {
+    on_stack(16 << 20, || {
+        let mut limits = Limits::default();
+        limits.max_depth = 1000;
+        for plan in [Plan::Row, Plan::Columnar] {
+            let options = CompileOptions::new()
+                .with_plan(plan)
+                .with_limits(limits.clone());
+            let codec = Codec::compile(arrays(510, Node::Bool), options).unwrap();
+            let value = deep_value(510);
+            let bytes = codec.encode(&value).unwrap();
+            assert_eq!(codec.decode(&bytes).unwrap(), value);
+        }
+    });
+}
+
+fn on_stack<T: Send + 'static>(size: usize, run: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(size)
+        .spawn(run)
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+fn optional_structs(levels: usize) -> Node {
+    (0..levels).fold(Node::Bool, |ty, _| {
+        Node::Struct(vec![Field {
+            name: "f".into(),
+            ty,
+            optional: true,
+            nullable: false,
+        }])
+    })
+}
+
+fn nested_arrays(levels: usize) -> Value {
+    (0..levels).fold(Value::Array(vec![]), |value, _| Value::Array(vec![value]))
+}
+
+fn nested_objects(levels: usize) -> Value {
+    (0..levels).fold(Value::Object(vec![]), |value, _| {
+        Value::Object(vec![("f".into(), value)])
+    })
+}
+
+struct AtBound {
+    name: &'static str,
+    schema: fn() -> Node,
+    value_of: fn(usize) -> Value,
+    fits: usize,
+}
+
+const AT_BOUND: [AtBound; 3] = [
+    AtBound {
+        name: "arrays",
+        schema: || arrays(510, Node::Bool),
+        value_of: nested_arrays,
+        fits: 60,
+    },
+    AtBound {
+        name: "nullables",
+        schema: || nullables(510),
+        value_of: nested_arrays,
+        fits: 30,
+    },
+    AtBound {
+        name: "structs",
+        schema: || optional_structs(170),
+        value_of: nested_objects,
+        fits: 60,
+    },
+];
+
+#[test]
+fn at_bound_schemas_fit_a_2_mib_stack_at_default_limits() {
+    for AtBound {
+        name,
+        schema,
+        value_of,
+        fits,
+    } in AT_BOUND
+    {
+        for plan in [Plan::Row, Plan::Columnar] {
+            let mut limits = Limits::default();
+            limits.max_depth = 1000;
+            let past = on_stack(64 << 20, move || {
+                let options = CompileOptions::new().with_plan(plan).with_limits(limits);
+                Codec::compile(schema(), options)
+                    .unwrap()
+                    .encode(&value_of(100))
+                    .unwrap()
+            });
+            on_stack(2 << 20, move || {
+                let codec =
+                    Codec::compile(schema(), CompileOptions::new().with_plan(plan)).unwrap();
+                assert_eq!(artifact_nesting(codec.artifact()), 512, "{name}");
+                let copy = codec.clone();
+                drop(codec);
+                let value = value_of(fits);
+                let bytes = copy.encode(&value).unwrap();
+                assert_eq!(copy.decode(&bytes).unwrap(), value, "{name}");
+                let err = copy.encode(&value_of(100)).unwrap_err();
+                assert_eq!(err.code(), ErrorCode::Depth, "{name}");
+                let err = copy.decode(&past).unwrap_err();
+                assert_eq!(err.code(), ErrorCode::Depth, "{name}");
+            });
+        }
     }
 }
