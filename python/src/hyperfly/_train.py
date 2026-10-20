@@ -261,11 +261,14 @@ def train(
     min_occurrences = max(1, min_occurrences)
     entry_limit = int(min(max_entries, MAX_DICT_ENTRIES))
     validate_ir(ir)
-    refs = _enumerate_column_refs(ir)
     batches: dict[int, list[list[str]]] = {}
     arrays: list[tuple[int, dict[int, list[str | None]]]] = []
-    for sample in samples:
-        _collect(ir, sample, 0, refs, batches, arrays)
+    try:
+        refs = _enumerate_column_refs(ir)
+        for sample in samples:
+            _collect(ir, sample, 0, refs, batches, arrays)
+    except RecursionError:
+        raise HyperflyError("ir", "$: IR nesting exceeds Python's recursion limit") from None
 
     by_leaf: dict[int, dict[str, Any]] = {}
     for ordinal, (kind, _array) in enumerate(refs):

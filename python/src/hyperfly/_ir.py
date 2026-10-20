@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import math
+from collections.abc import Mapping
 from typing import Any, NoReturn, cast
 
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
 LEAF_KINDS = frozenset({"bool", "int", "float64", "string", "bytes", "enum", "literal"})
 _PLAN_VERSION = {"row": 1, "columnar": 5}
+MAX_NESTING = 512
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -22,15 +25,61 @@ def _is_safe_int(v: Any) -> bool:
 
 def normalize_integers(value: Any) -> None:
     """In place on validated IR: integral floats become the ints they denote, -0.0 becomes 0."""
-    if isinstance(value, dict):
-        for key, inner in value.items():
-            if type(inner) is float:
-                value[key] = int(inner)
-            else:
-                normalize_integers(inner)
-    elif isinstance(value, (list, tuple)):
-        for inner in value:
-            normalize_integers(inner)
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key, inner in item.items():
+                if type(inner) is float:
+                    item[key] = int(inner)
+                else:
+                    stack.append(inner)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+
+
+def json_copy(value: Any) -> Any:
+    """Copy JSON-shaped data without recursion; a container shared in the input stays shared."""
+    memo: dict[int, Any] = {}
+    holder = [value]
+    stack: list[tuple[Any, Any]] = [(holder, 0)]
+    while stack:
+        parent, key = stack.pop()
+        item = parent[key]
+        if not isinstance(item, (dict, list, tuple)):
+            continue
+        copy = memo.get(id(item))
+        if copy is None:
+            copy = memo[id(item)] = dict(item) if isinstance(item, dict) else list(item)
+            stack.extend((copy, inner) for inner in (copy.keys() if type(copy) is dict else range(len(copy))))
+        parent[key] = copy
+    return holder[0]
+
+
+def check_artifact_nesting(ir: Any, path: str = "$") -> None:
+    """Reject IR whose canonical artifact would nest JSON containers deeper than
+    MAX_NESTING (wire-v0 section 4), without recursion. The artifact object is depth 1
+    and the IR depth 2; only the containers canonical JSON keeps are counted."""
+    stack = [(ir, 2)]
+    while stack:
+        node, depth = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("kind")
+        reached = depth
+        if kind == "nullable":
+            stack.append((node.get("inner"), depth + 1))
+        elif kind == "array":
+            stack.append((node.get("element"), depth + 1))
+        elif kind == "enum":
+            reached = depth + 1
+        elif kind == "struct":
+            fields = node.get("fields")
+            if isinstance(fields, (list, tuple)):
+                reached = depth + 2 if fields else depth + 1
+                stack.extend((f.get("type"), depth + 3) for f in fields if isinstance(f, dict))
+        if reached > MAX_NESTING:
+            _fail(path, f"artifact nests deeper than {MAX_NESTING}")
 
 
 _SCALAR_KEYS = frozenset({"kind"})
@@ -73,6 +122,14 @@ def _check_field_name(name: str, path: str) -> None:
 
 def validate_ir(node: Any, path: str = "$") -> None:
     """Validate a v0 schema; raise code ``ir`` prefixed with the failing path."""
+    check_artifact_nesting(node, path)
+    try:
+        _check_node(node, path)
+    except RecursionError:
+        _fail(path, "IR nesting exceeds Python's recursion limit")
+
+
+def _check_node(node: Any, path: str) -> None:
     if not isinstance(node, dict):
         _fail(path, "IR node must be an object")
     kind = node.get("kind")
@@ -128,14 +185,14 @@ def validate_ir(node: Any, path: str = "$") -> None:
             _fail(path, "nullable(nullable) is invalid")
         if inner.get("kind") == "literal" and inner.get("value") is None:
             _fail(path, "nullable(literal null) has two encodings for null")
-        validate_ir(inner, path + "?")
+        _check_node(inner, path + "?")
         return
     if kind == "array":
         _check_keys(node, _ARRAY_KEYS, path)
         length: Any = node.get("length")
         if "length" in node and (not _is_safe_int(length) or length < 0):
             _fail(path, "fixed array length must be a non-negative safe integer")
-        validate_ir(node.get("element"), path + "[]")
+        _check_node(node.get("element"), path + "[]")
         return
     if kind == "struct":
         _check_keys(node, _STRUCT_KEYS, path)
@@ -166,7 +223,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
                 _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
             if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
                 _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
-            validate_ir(field_type, field_path)
+            _check_node(field_type, field_path)
         return
     _fail(path, f"unknown IR kind {kind}")
 
@@ -204,6 +261,11 @@ def _literal(v: Any) -> str:
 
 def serialize_node(node: dict[str, Any]) -> str:
     """Return canonical JSON for a validated IR node (wire-v0 section 2)."""
+    check_artifact_nesting(node)
+    return _node_json(node)
+
+
+def _node_json(node: dict[str, Any]) -> str:
     kind = node["kind"]
     if kind in ("bool", "float64", "string", "bytes"):
         return '{"kind":"' + cast(str, kind) + '"}'
@@ -219,15 +281,15 @@ def serialize_node(node: dict[str, Any]) -> str:
     if kind == "enum":
         return '{"kind":"enum","members":[' + ",".join(_esc(m) for m in node["members"]) + "]}"
     if kind == "nullable":
-        return f'{{"kind":"nullable","inner":{serialize_node(node["inner"])}}}'
+        return f'{{"kind":"nullable","inner":{_node_json(node["inner"])}}}'
     if kind == "array":
-        out = f'{{"kind":"array","element":{serialize_node(node["element"])}'
+        out = f'{{"kind":"array","element":{_node_json(node["element"])}'
         if node.get("length") is not None:
             out += f',"length":{_int(node["length"])}'
         return out + "}"
     fields = []
     for f in node["fields"]:
-        text = f'{{"name":{_esc(f["name"])},"type":{serialize_node(f["type"])}'
+        text = f'{{"name":{_esc(f["name"])},"type":{_node_json(f["type"])}'
         if f.get("optional"):
             text += ',"optional":true'
         if f.get("nullable"):
@@ -278,7 +340,8 @@ def serialize_shared(shared: dict[str, Any]) -> str:
 def serialize_artifact(ir: dict[str, Any], layout: str = "row", profile: dict[str, Any] | None = None) -> str:
     """Serialize validated IR, layout and optional profile as canonical artifact JSON."""
     version = _PLAN_VERSION[layout]
-    head = f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{serialize_node(ir)}'
+    check_artifact_nesting(ir)
+    head = f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{_node_json(ir)}'
     if profile is None:
         return head + "}"
     return head + ',"profile":' + serialize_shared(profile["shared"]) + "}"
@@ -348,15 +411,64 @@ def _walk_column_refs(
 
 
 def validate_profile(ir: dict[str, Any], profile: Any) -> None:
-    """Validate the IR then its columnar profile; raise code ``ir`` on invalid data.
+    """Validate the profile as JSON data, the IR, then the profile against the IR;
+    raise code ``ir`` on invalid data.
 
     Profile errors have the same ``profile:`` prefix as compilation errors.
     """
+    checked = snapshot_profile(profile)
+    validate_ir(ir)
     try:
-        validate_ir(ir)
-        _validate_profile(ir, profile)
+        _validate_profile(ir, checked)
     except RecursionError:
         _fail("$", "IR or profile nesting exceeds Python's recursion limit")
+
+
+_PROFILE_CONTAINERS = (list, tuple, set, frozenset, Mapping)
+
+
+def snapshot_profile(profile: Any) -> Any:
+    """A copy of the profile document, which must be JSON data: plain dicts with string
+    keys, lists, strings, booleans, None, ints and finite floats, acyclic and nested at
+    most MAX_NESTING deep."""
+
+    def fail(message: str) -> NoReturn:
+        _fail("profile", message)
+
+    holder: list[Any] = [None]
+    active: set[int] = set()
+    # (value, depth, parent, key); a None parent marks leaving the container `value`
+    stack: list[tuple[Any, int, Any, Any]] = [(profile, 1, holder, 0)]
+    while stack:
+        item, depth, parent, key = stack.pop()
+        if parent is None:
+            active.discard(item)
+            continue
+        if type(parent) is dict and type(key) is not str:
+            fail("JSON keys must be strings")
+        kind = type(item)
+        if item is None or kind is str or kind is bool or kind is int or (kind is float and math.isfinite(item)):
+            parent[key] = item
+            continue
+        if not (kind is dict or kind is list or isinstance(item, _PROFILE_CONTAINERS)):
+            fail("must contain only JSON data")
+        if depth > MAX_NESTING:
+            fail(f"nests deeper than {MAX_NESTING}")
+        if id(item) in active:
+            fail("must not contain cycles")
+        if kind is not dict and kind is not list:
+            fail("must contain only plain objects and arrays")
+        active.add(id(item))
+        stack.append((id(item), depth, None, None))
+        copy: Any
+        if kind is list:
+            copy = [None] * len(item)
+            stack.extend((item[i], depth + 1, copy, i) for i in range(len(item) - 1, -1, -1))
+        else:
+            copy = {}
+            stack.extend((inner, depth + 1, copy, k) for k, inner in reversed(item.items()))
+        parent[key] = copy
+    return holder[0]
 
 
 def _validate_profile(ir: dict[str, Any], profile: Any) -> None:

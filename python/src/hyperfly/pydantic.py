@@ -183,7 +183,10 @@ def to_ir(model: type[BaseModel]) -> dict[str, Any]:
         _unsupported("$", "expected a pydantic BaseModel subclass")
     if "root" in getattr(model, "model_fields", {}) and type(model).__name__ == "ModelMetaclass" and _is_root_model(model):
         _unsupported("$", "RootModel has no v0 struct encoding — wrap the value in a field")
-    return _struct_of(model, "$")
+    try:
+        return _struct_of(model, "$")
+    except RecursionError:
+        _unsupported("$", "recursive or too deeply nested models have no v0 encoding")
 
 
 def _is_root_model(model: type) -> bool:

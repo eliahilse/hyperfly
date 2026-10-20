@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import dataclasses
 import itertools
 import math
@@ -22,8 +21,10 @@ from ._ir import (
     column_count,
     fingerprint_of,
     has_payload,
+    json_copy,
     normalize_integers,
     serialize_artifact,
+    snapshot_profile,
     validate_ir,
     _validate_profile,
 )
@@ -106,6 +107,12 @@ def _is_int(v: Any) -> TypeGuard[int]:
     return type(v) is int and INT_MIN <= v <= INT_MAX
 
 
+def _integral_float(v: Any, path: str) -> int:
+    if type(v) is float and v.is_integer() and INT_MIN <= v <= INT_MAX:
+        return int(v)
+    _efail("type", path, "expected a safe integer")
+
+
 def _float_bits(v: float) -> int:
     unpacked: tuple[int] = struct.unpack("<Q", struct.pack("<d", v))
     return unpacked[0]
@@ -152,8 +159,8 @@ def _literal_matches(lit: Any, v: Any) -> bool:
     if type(lit) is bool:
         return v is lit
     if type(lit) is int:
-        # zero is the integer 0 whatever its sign, so a float -0.0 or 0.0 matches literal 0
-        return (type(v) is int and v == lit) or (lit == 0 and type(v) is float and v == 0)
+        # an integral float is the integer it denotes: 1.0 matches literal 1, -0.0 matches 0
+        return (type(v) is int or type(v) is float) and v == lit
     return type(v) is str and v == lit
 
 
@@ -289,14 +296,13 @@ def _int_form(node: dict[str, Any], value: int) -> int:
 
 
 def _check_int(node: dict[str, Any], v: Any, path: str) -> int:
-    if not _is_int(v):
-        _efail("type", path, "expected a safe integer")
+    value = v if _is_int(v) else _integral_float(v, path)
     lo, hi = node.get("min"), node.get("max")
-    if lo is not None and v < lo:
-        _efail("range", path, f"{v} below declared min {lo}")
-    if hi is not None and v > hi:
-        _efail("range", path, f"{v} above declared max {hi}")
-    return v
+    if lo is not None and value < lo:
+        _efail("range", path, f"{value} below declared min {lo}")
+    if hi is not None and value > hi:
+        _efail("range", path, f"{value} above declared max {hi}")
+    return value
 
 
 def _decode_int_value(node: dict[str, Any], raw: int, path: str) -> int:
@@ -2880,13 +2886,14 @@ class Codec(Generic[T]):
         if profile is not None:
             if plan != "columnar":
                 raise HyperflyError("ir", "profiles apply to the columnar plan only")
+            profile = snapshot_profile(profile)
             _validate_profile(ir, profile)
         # isolate from later caller mutation: the fingerprint is fixed at compile time
-        ir = copy.deepcopy(ir)
+        ir = json_copy(ir)
         normalize_integers(ir)
         self._ir = ir
         self._plan = plan
-        self._profile = copy.deepcopy(profile) if profile is not None else None
+        self._profile = profile
         if self._profile is not None:
             self._profile["version"] = int(self._profile["version"])
             normalize_integers(self._profile["shared"])
@@ -2919,12 +2926,12 @@ class Codec(Generic[T]):
     @property
     def profile(self) -> dict[str, Any] | None:
         """A copy: the compiled profile is fixed by the fingerprint and never mutated."""
-        return copy.deepcopy(self._profile) if self._profile is not None else None
+        return json_copy(self._profile) if self._profile is not None else None
 
     @property
     def ir(self) -> dict[str, Any]:
         """A copy: the compiled schema is fixed by the fingerprint and never mutated."""
-        return copy.deepcopy(self._ir)
+        return cast("dict[str, Any]", json_copy(self._ir))
 
     def encode_body(self, value: T) -> bytes:
         """Encode a value without an envelope.
@@ -2937,7 +2944,10 @@ class Codec(Generic[T]):
     def _encode_body_raw(self, value: Any) -> bytes:
         out = bytearray()
         budget = Budget(self._limits.max_total_items, self._limits.max_total_bytes)
-        _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
+        try:
+            _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
+        except RecursionError:
+            raise EncodeError("depth", "$: nesting exceeds Python's recursion limit") from None
         cap = self._limits.item_budget(len(out))
         if budget.total > cap:
             raise EncodeError("limit", f"$: {budget.total} items exceed the item budget of {cap}")
@@ -2957,7 +2967,10 @@ class Codec(Generic[T]):
 
     def _decode_body_raw(self, data: bytes | bytearray | memoryview) -> T:
         r = Reader(bytes(data), self._limits)
-        value = _decode_node(r, self._ir, "$", 0, self._ctx)
+        try:
+            value = _decode_node(r, self._ir, "$", 0, self._ctx)
+        except RecursionError:
+            raise DecodeError("depth", "$: nesting exceeds Python's recursion limit") from None
         r.expect_end()
         for items, build in r.deferred:
             items.extend(build())
