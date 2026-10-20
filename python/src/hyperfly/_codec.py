@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import dataclasses
 import itertools
 import math
@@ -22,8 +21,10 @@ from ._ir import (
     column_count,
     fingerprint_of,
     has_payload,
+    json_copy,
     normalize_integers,
     serialize_artifact,
+    snapshot_profile,
     validate_ir,
     _validate_profile,
 )
@@ -106,6 +107,12 @@ def _is_int(v: Any) -> TypeGuard[int]:
     return type(v) is int and INT_MIN <= v <= INT_MAX
 
 
+def _integral_float(v: Any, path: str) -> int:
+    if type(v) is float and v.is_integer() and INT_MIN <= v <= INT_MAX:
+        return int(v)
+    _efail("type", path, "expected a safe integer")
+
+
 def _float_bits(v: float) -> int:
     unpacked: tuple[int] = struct.unpack("<Q", struct.pack("<d", v))
     return unpacked[0]
@@ -152,8 +159,8 @@ def _literal_matches(lit: Any, v: Any) -> bool:
     if type(lit) is bool:
         return v is lit
     if type(lit) is int:
-        # zero is the integer 0 whatever its sign, so a float -0.0 or 0.0 matches literal 0
-        return (type(v) is int and v == lit) or (lit == 0 and type(v) is float and v == 0)
+        # an integral float is the integer it denotes: 1.0 matches literal 1, -0.0 matches 0
+        return (type(v) is int or type(v) is float) and v == lit
     return type(v) is str and v == lit
 
 
@@ -289,14 +296,13 @@ def _int_form(node: dict[str, Any], value: int) -> int:
 
 
 def _check_int(node: dict[str, Any], v: Any, path: str) -> int:
-    if not _is_int(v):
-        _efail("type", path, "expected a safe integer")
+    value = v if _is_int(v) else _integral_float(v, path)
     lo, hi = node.get("min"), node.get("max")
-    if lo is not None and v < lo:
-        _efail("range", path, f"{v} below declared min {lo}")
-    if hi is not None and v > hi:
-        _efail("range", path, f"{v} above declared max {hi}")
-    return v
+    if lo is not None and value < lo:
+        _efail("range", path, f"{value} below declared min {lo}")
+    if hi is not None and value > hi:
+        _efail("range", path, f"{value} above declared max {hi}")
+    return value
 
 
 def _decode_int_value(node: dict[str, Any], raw: int, path: str) -> int:
@@ -313,25 +319,29 @@ def _decode_int_value(node: dict[str, Any], raw: int, path: str) -> int:
 
 def _flatten_leaves(element: dict[str, Any]) -> list[tuple[tuple[str, ...], dict[str, Any]]] | None:
     out: list[tuple[tuple[str, ...], dict[str, Any]]] = []
-
-    def walk(node: dict[str, Any], segs: tuple[str, ...]) -> bool:
+    # a struct to open, or (None, segments, field) for a leaf to emit in its place
+    stack: list[tuple[dict[str, Any] | None, tuple[str, ...], Any]] = [(element, (), None)]
+    while stack:
+        node, segs, leaf = stack.pop()
+        if node is None:
+            out.append((segs, leaf))
+            continue
         fields = node.get("fields", [])
         if not fields:
-            return False
+            return None
+        pending: list[tuple[dict[str, Any] | None, tuple[str, ...], Any]] = []
         for f in fields:
             t = f["type"]
             if t["kind"] == "struct":
                 if f.get("optional") or f.get("nullable"):
-                    return False
-                if not walk(t, segs + (f["name"],)):
-                    return False
+                    return None
+                pending.append((t, segs + (f["name"],), None))
             elif t["kind"] in LEAF_KINDS:
-                out.append((segs + (f["name"],), f))
+                pending.append((None, segs + (f["name"],), f))
             else:
-                return False
-        return True
-
-    return out if walk(element, ()) else None
+                return None
+        stack.extend(reversed(pending))
+    return out
 
 
 def _columnar_eligible(node: dict[str, Any]) -> bool:
@@ -342,7 +352,6 @@ _Leaves = list[tuple[tuple[str, ...], dict[str, Any]]]
 
 _HEADED_KINDS = frozenset({"int", "float64", "string"})
 
-
 _Arrays = dict[int, tuple[_Leaves | None, bool, bool]]
 
 
@@ -351,48 +360,60 @@ def _wire_empty(node: dict[str, Any], arrays: _Arrays) -> bool:
     already indexed: an eligible array's int, float64 and string columns write their
     mode byte even when no rows participate. Only meaningful for zero-bit nodes; any
     other kind outside an array (int, nullable, ...) answers True."""
-    kind = node["kind"]
-    if kind == "struct":
-        return all(_wire_empty(f["type"], arrays) for f in node["fields"])
-    if kind == "array":
-        leaves = arrays[id(node)][0]
-        if leaves is not None:
-            return all(f["type"]["kind"] not in _HEADED_KINDS for _segs, f in leaves)
-        return node["length"] == 0 or _wire_empty(node["element"], arrays)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        kind = current["kind"]
+        if kind == "struct":
+            stack.extend(f["type"] for f in current["fields"])
+        elif kind == "array":
+            leaves = arrays[id(current)][0]
+            if leaves is not None:
+                if any(f["type"]["kind"] in _HEADED_KINDS for _segs, f in leaves):
+                    return False
+            elif current["length"] != 0:
+                stack.append(current["element"])
     return True
 
 
 def _index_arrays(node: dict[str, Any], columnar: bool, out: _Arrays) -> None:
     """Per array node: its columnar leaves (None when row-encoded), whether its element
-    is zero-bit, and whether that element also occupies no bytes."""
-    kind = node["kind"]
-    if kind == "array":
-        element = node["element"]
-        _index_arrays(element, columnar, out)
-        if id(node) not in out:
-            leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
-            zero_bit = not has_payload(element)
-            out[id(node)] = (leaves, zero_bit, zero_bit and _wire_empty(element, out))
-    elif kind == "nullable":
-        _index_arrays(node["inner"], columnar, out)
-    elif kind == "struct":
-        for f in node["fields"]:
-            _index_arrays(f["type"], columnar, out)
+    is zero-bit, and whether that element also occupies no bytes. Post-order, so an
+    array's nested arrays are indexed before its own entry."""
+    stack = [(node, False)]
+    while stack:
+        current, visited = stack.pop()
+        kind = current["kind"]
+        if kind == "array":
+            element = current["element"]
+            if not visited:
+                stack.append((current, True))
+                stack.append((element, False))
+            elif id(current) not in out:
+                leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
+                zero_bit = not has_payload(element)
+                out[id(current)] = (leaves, zero_bit, zero_bit and _wire_empty(element, out))
+        elif kind == "nullable":
+            stack.append((current["inner"], False))
+        elif kind == "struct":
+            stack.extend((f["type"], False) for f in reversed(current["fields"]))
 
 
 def _column_fields(node: dict[str, Any], out: list[dict[str, Any]]) -> None:
     """The field of every columnar leaf under `node`, in ordinal order."""
-    kind = node["kind"]
-    if kind == "array":
-        if _columnar_eligible(node):
-            out.extend(f for _segs, f in _flatten_leaves(node["element"]) or ())
-        else:
-            _column_fields(node["element"], out)
-    elif kind == "nullable":
-        _column_fields(node["inner"], out)
-    elif kind == "struct":
-        for f in node["fields"]:
-            _column_fields(f["type"], out)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        kind = current["kind"]
+        if kind == "array":
+            if _columnar_eligible(current):
+                out.extend(f for _segs, f in _flatten_leaves(current["element"]) or ())
+            else:
+                stack.append(current["element"])
+        elif kind == "nullable":
+            stack.append(current["inner"])
+        elif kind == "struct":
+            stack.extend(reversed([f["type"] for f in current["fields"]]))
 
 
 _ABSENT: Any = object()
@@ -2774,22 +2795,25 @@ _Shape = tuple[list[str], list[Any]]
 def _shape(leaves: _Leaves, level: int, lo: int, hi: int) -> _Shape:
     """Key names and, per key, a leaf index or the nested struct's own shape, for the
     leaves in [lo, hi), which share their first `level` segments."""
-    names: list[str] = []
-    entries: list[Any] = []
-    index = lo
-    while index < hi:
-        segs = leaves[index][0]
-        names.append(segs[level])
-        if len(segs) == level + 1:
-            entries.append(index)
-            index += 1
-            continue
-        end = index + 1
-        while end < hi and len(leaves[end][0]) > level + 1 and leaves[end][0][level] == segs[level]:
-            end += 1
-        entries.append(_shape(leaves, level + 1, index, end))
-        index = end
-    return names, entries
+    shape: _Shape = ([], [])
+    stack = [(shape, level, lo, hi)]
+    while stack:
+        (names, entries), level, index, hi = stack.pop()
+        while index < hi:
+            segs = leaves[index][0]
+            names.append(segs[level])
+            if len(segs) == level + 1:
+                entries.append(index)
+                index += 1
+                continue
+            end = index + 1
+            while end < hi and len(leaves[end][0]) > level + 1 and leaves[end][0][level] == segs[level]:
+                end += 1
+            nested: _Shape = ([], [])
+            entries.append(nested)
+            stack.append((nested, level + 1, index, end))
+            index = end
+    return shape
 
 
 def _assemble(count: int, shape: _Shape, columns: list[_Column]) -> list[dict[str, Any]]:
@@ -2903,13 +2927,14 @@ class Codec(Generic[T]):
         if profile is not None:
             if plan != "columnar":
                 raise HyperflyError("ir", "profiles apply to the columnar plan only")
+            profile = snapshot_profile(profile)
             _validate_profile(ir, profile)
         # isolate from later caller mutation: the fingerprint is fixed at compile time
-        ir = copy.deepcopy(ir)
+        ir = json_copy(ir)
         normalize_integers(ir)
         self._ir = ir
         self._plan = plan
-        self._profile = copy.deepcopy(profile) if profile is not None else None
+        self._profile = profile
         if self._profile is not None:
             self._profile["version"] = int(self._profile["version"])
             normalize_integers(self._profile["shared"])
@@ -2942,12 +2967,12 @@ class Codec(Generic[T]):
     @property
     def profile(self) -> dict[str, Any] | None:
         """A copy: the compiled profile is fixed by the fingerprint and never mutated."""
-        return copy.deepcopy(self._profile) if self._profile is not None else None
+        return json_copy(self._profile) if self._profile is not None else None
 
     @property
     def ir(self) -> dict[str, Any]:
         """A copy: the compiled schema is fixed by the fingerprint and never mutated."""
-        return copy.deepcopy(self._ir)
+        return cast("dict[str, Any]", json_copy(self._ir))
 
     def encode_body(self, value: T) -> bytes:
         """Encode a value without an envelope.
@@ -2957,7 +2982,10 @@ class Codec(Generic[T]):
         """
         out = bytearray()
         budget = Budget(self._limits.max_total_items, self._limits.max_total_bytes)
-        _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
+        try:
+            _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
+        except RecursionError:
+            raise EncodeError("depth", "$: nesting exceeds Python's recursion limit") from None
         cap = self._limits.item_budget(len(out))
         if budget.total > cap:
             raise EncodeError("limit", f"$: {budget.total} items exceed the item budget of {cap}")
@@ -2975,10 +3003,13 @@ class Codec(Generic[T]):
         or resource bounds.
         """
         r = Reader(bytes(data), self._limits)
-        value = _decode_node(r, self._ir, "$", 0, self._ctx)
-        r.expect_end()
-        for items, build in r.deferred:
-            items.extend(build())
+        try:
+            value = _decode_node(r, self._ir, "$", 0, self._ctx)
+            r.expect_end()
+            for items, build in r.deferred:
+                items.extend(build())
+        except RecursionError:
+            raise DecodeError("depth", "$: nesting exceeds Python's recursion limit") from None
         return cast(T, value)
 
     def encode(self, value: T) -> bytes:
