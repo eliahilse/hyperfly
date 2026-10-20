@@ -275,8 +275,22 @@ def test_json_response_rejects_non_finite_tokens(token, template, as_bytes):
     body = template.format(token)
     if as_bytes:
         body = body.encode("utf-8")
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(DecodeError) as raised:
         decode_response("application/json", body, CodecRegistry())
+    assert raised.value.code == "json"
+    assert isinstance(raised.value.__cause__, json.JSONDecodeError)
+
+
+@pytest.mark.parametrize("body", ["{", b"{", b'"\xff"', b"[" * 100_000, ""])
+def test_malformed_json_response_is_a_json_decode_error(body):
+    with pytest.raises(DecodeError) as raised:
+        decode_response(None, body, CodecRegistry())
+    assert raised.value.code == "json"
+    assert isinstance(raised.value.__cause__, (ValueError, RecursionError))
+
+
+def test_json_response_strips_a_byte_order_mark():
+    assert decode_response("application/json", "\ufeff[1]".encode(), CodecRegistry()) == ("json", [1])
 
 
 def test_json_response_accepts_non_finite_names_in_strings():
@@ -617,6 +631,8 @@ def test_hyperfly_content_type_essence(content_type):
 def test_malformed_json_is_400(body):
     error = _refusal(body)
     assert (error.status, error.reason, error.headers) == (400, "malformed-json", {})
+    assert isinstance(error.__cause__, DecodeError) and error.__cause__.code == "json"
+    assert isinstance(error.__cause__.__cause__, (ValueError, RecursionError))
 
 
 def test_json_body_ignores_the_codec_header():
@@ -804,3 +820,27 @@ def test_hostile_request_headers_are_bounded():
         error = _assert_bounded(lambda: _refusal(CODEC_A.encode(VALUE), **options), peak=4 << 20)
         assert error.status in (400, 415)
     assert _assert_bounded(lambda: _refusal(b"x", content_type="a/" + "+" * (1 << 20)), peak=4 << 20).status == 415
+
+
+def test_failed_model_validation_in_a_request_is_400():
+    from pydantic import field_validator
+
+    class Order(BaseModel):
+        id: str
+
+        @field_validator("id")
+        @classmethod
+        def _short(cls, value: str) -> str:
+            if len(value) > 3:
+                raise ValueError("too long")
+            return value
+
+    codec = compile_model(Order, validate=True)
+    registry = CodecRegistry([codec])
+    assert _request(codec.encode({"id": "abc"}), content_type=HYPERFLY_MEDIA_TYPE, registry=registry) == (
+        "hyperfly",
+        Order(id="abc"),
+    )
+    error = _refusal(compile_ir(codec.ir).encode({"id": "abcd"}), content_type=HYPERFLY_MEDIA_TYPE, registry=registry)
+    assert (error.status, error.reason) == (400, "undecodable")
+    assert error.__cause__.code == "validation"

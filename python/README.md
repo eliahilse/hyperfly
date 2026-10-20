@@ -129,6 +129,26 @@ Registering the outgoing codec alongside the incoming one is what makes retraini
 safe: a new profile is a new fingerprint, so a deployment holding only one codec
 turns every rollout into a cutover.
 
+## Errors
+
+Every failure the package raises on purpose is a `HyperflyError` with a stable
+`code`, under the same class names as the TypeScript package. A wrapped exception
+stays reachable through `__cause__`.
+
+| Class | Codes |
+| --- | --- |
+| `EncodeError` | `type`, `range`, `float`, `utf8`, `required`, `depth`, `limit`, `validation` |
+| `DecodeError` | `header`, `truncated`, `trailing`, `varint`, `bitmap`, `marker`, `float`, `utf8`, `range`, `depth`, `limit`, `packed`, `unsupported`, `json`, `validation` |
+| `FingerprintMismatchError` (a `DecodeError`) | `fingerprint` |
+| `UnsupportedSchemaError` | `unsupported` |
+| `HyperflyError` | `ir` |
+
+`json` is a malformed JSON body read by `decode_response` (the `json.JSONDecodeError`
+is its cause), and `validation` is a pydantic `ValidationError` from a codec compiled
+with `validate=True`, raised as `EncodeError` on the encode paths and `DecodeError`
+on the decode paths. `decode_request` turns a `DecodeError` into `RequestError` with
+status 400.
+
 ## Conformance
 
 The authorities are the specifications, not this implementation. This package runs

@@ -308,11 +308,15 @@ def _envelope_fingerprint(data: bytes) -> str:
     return data[3:HEADER_SIZE].hex()
 
 
-def _loads(text: str) -> Any:
+def _loads(body: bytes | str) -> Any:
     def reject_constant(value: str) -> Any:
         raise json.JSONDecodeError(f"invalid JSON constant {value}", text, 0)
 
-    return json.loads(text, parse_constant=reject_constant)
+    try:
+        text = body.decode("utf-8-sig") if isinstance(body, bytes) else body
+        return json.loads(text, parse_constant=reject_constant)
+    except (ValueError, RecursionError) as error:
+        raise DecodeError("json", f"malformed JSON body: {error}") from error
 
 
 def decode_response(content_type: str | None, body: bytes | str, registry: CodecRegistry) -> tuple[str, Any]:
@@ -322,7 +326,7 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     so it is reported rather than attempted.
     """
     if _essence(content_type) != HYPERFLY_MEDIA_TYPE:
-        return "json", _loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+        return "json", _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
     data = body.encode("utf-8") if isinstance(body, str) else bytes(body)
     fingerprint = _envelope_fingerprint(data)
     codec = registry.get(fingerprint)
@@ -446,8 +450,8 @@ def decode_request(
     data = read_body(body, max_bytes=max_bytes, content_length=content_length)
     if not hyperfly:
         try:
-            return DecodedRequest("json", _loads(data.decode("utf-8-sig")))
-        except (ValueError, RecursionError) as error:
+            return DecodedRequest("json", _loads(data))
+        except DecodeError as error:
             raise RequestError(400, "malformed-json") from error
     try:
         fingerprint = _envelope_fingerprint(data)
