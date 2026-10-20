@@ -112,7 +112,17 @@ def test_unreadable_options_are_options_errors_with_a_cause():
         def get(self, *args):
             raise HyperflyError("ir", "boom")
 
-    for options in ({"pack": Unreadable()}, {"limits": Opaque()}, {"pack": Misleading()}):
+    class Code(str):
+        def __eq__(self, other):
+            raise ValueError("no comparison")
+
+        __hash__ = str.__hash__
+
+    class Disguised(dict):
+        def get(self, *args):
+            raise HyperflyError(Code("options"), "boom")
+
+    for options in ({"pack": Unreadable()}, {"limits": Opaque()}, {"pack": Misleading()}, {"pack": Disguised()}):
         with pytest.raises(HyperflyError) as err:
             compile_ir(None, **options)
         assert (err.value.code, str(err.value)) == ("options", "options: could not read compile options")

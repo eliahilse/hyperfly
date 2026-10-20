@@ -1527,7 +1527,7 @@ def checked_options(plan: Any, limits: Any, pack: Any) -> tuple[str, Limits, Any
     except MemoryError:
         raise
     except Exception as error:
-        if type(error) is HyperflyError and error.code == "options":
+        if type(error) is HyperflyError and type(error.code) is str and error.code == "options":
             raise
         raise HyperflyError("options", "options: could not read compile options") from error
 
