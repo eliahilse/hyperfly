@@ -12,15 +12,7 @@ from ._ir import _check_field_name, _check_string
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError, Limits, UnsupportedSchemaError
 
 try:
-    import annotated_types
-
-    _at: Any = annotated_types
-except ImportError:  # pragma: no cover
-    _at = None
-
-try:
-    from pydantic import BaseModel, ValidationError
-    from pydantic.fields import FieldInfo
+    from pydantic import BaseModel, TypeAdapter, ValidationError
 except ImportError as _err:  # pragma: no cover
     raise ImportError("hyperfly.pydantic requires pydantic >= 2.5") from _err
 
@@ -29,46 +21,33 @@ def _unsupported(path: str, message: str) -> NoReturn:
     raise UnsupportedSchemaError(path, message)
 
 
-def _flatten_metadata(metadata: typing.Iterable[Any]) -> list[Any]:
-    flattened = []
-    for item in metadata:
-        if isinstance(item, FieldInfo):
-            flattened.extend(_flatten_metadata(item.metadata))
-        elif _at is not None and isinstance(item, _at.Interval):
-            for kind, bound_type in (("ge", _at.Ge), ("gt", _at.Gt), ("le", _at.Le), ("lt", _at.Lt)):
-                value = getattr(item, kind)
-                if value is not None:
-                    flattened.append(bound_type(value))
-        elif _at is not None and isinstance(item, _at.GroupedMetadata):
-            flattened.extend(_flatten_metadata(item))
-        elif item is not None:
-            flattened.append(item)
-    return flattened
-
-
 def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]:
-    if _at is None:
+    if not metadata:
         return None, None
-    bounds: dict[str, Any] = {}
-    for m in metadata:
-        if isinstance(m, _at.Ge):
-            bounds["ge"] = m.ge
-        elif isinstance(m, _at.Gt):
-            bounds["gt"] = m.gt
-        elif isinstance(m, _at.Le):
-            bounds["le"] = m.le
-        elif isinstance(m, _at.Lt):
-            bounds["lt"] = m.lt
-    lower = []
-    upper = []
-    if "ge" in bounds:
-        lower.append(_ceil_int(bounds["ge"], path))
-    if "gt" in bounds:
-        lower.append(_floor_int(bounds["gt"], path) + 1)
-    if "le" in bounds:
-        upper.append(_floor_int(bounds["le"], path))
-    if "lt" in bounds:
-        upper.append(_ceil_int(bounds["lt"], path) - 1)
+    schema = TypeAdapter[Any](typing.Annotated[(int, *metadata)]).core_schema
+    pending: list[Any] = [schema]
+    lower: list[int] = []
+    upper: list[int] = []
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            if current.get("type") == "int":
+                if "ge" in current:
+                    lower.append(_ceil_int(current["ge"], path))
+                if "gt" in current:
+                    lower.append(_floor_int(current["gt"], path) + 1)
+                if "le" in current:
+                    upper.append(_floor_int(current["le"], path))
+                if "lt" in current:
+                    upper.append(_ceil_int(current["lt"], path) - 1)
+            else:
+                # Only validation schemas contribute bounds, not metadata or serialization.
+                pending.extend(
+                    value for key, value in current.items()
+                    if key not in ("metadata", "serialization", "function", "json_schema_input_schema")
+                )
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
     return max(lower, default=None), min(upper, default=None)
 
 
@@ -100,7 +79,7 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
     if origin is typing.Annotated:
         base, *inner_metadata = typing.get_args(annotation)
         # Outer metadata applies after metadata on the wrapped type.
-        return _node_of(base, _flatten_metadata([*inner_metadata, *metadata]), path)
+        return _node_of(base, [*inner_metadata, *metadata], path)
 
     if origin in (typing.Union, types.UnionType):
         args = [a for a in typing.get_args(annotation) if a is not type(None)]
@@ -132,7 +111,7 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
     if annotation is bool:
         return {"kind": "bool"}
     if annotation is int:
-        lo, hi = _int_bounds(_flatten_metadata(metadata), path)
+        lo, hi = _int_bounds(metadata, path)
         node: dict[str, Any] = {"kind": "int"}
         if lo is not None and lo != INT_MIN:
             node["min"] = lo

@@ -3,7 +3,11 @@ from typing import Annotated, Literal, Optional
 
 import pytest
 from annotated_types import Ge, GroupedMetadata, Gt, Interval, Le, Lt
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, confloat, conint, constr, create_model, field_validator
+from pydantic import (
+    AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
+    WrapValidator, confloat, conint, constr, create_model, field_validator,
+)
+from pydantic_core import core_schema
 
 from conftest import load
 from hyperfly import Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
@@ -93,6 +97,35 @@ class _RepeatedBounds(GroupedMetadata):
         yield Ge(10)
         yield Interval(ge=0, gt=-1, le=0, lt=11)
         yield Le(10)
+
+
+class _GeSubclass(Ge):
+    pass
+
+
+class _NestedBounds(GroupedMetadata):
+    def __iter__(self):
+        yield _RepeatedBounds()
+
+
+class _CustomInterval(Interval):
+    def __iter__(self):
+        yield Ge(2)
+        yield Le(8)
+
+
+class _FieldBounds(GroupedMetadata):
+    def __iter__(self):
+        yield Field(ge=2, le=8)
+
+
+class _IntChain:
+    def __get_pydantic_core_schema__(self, source, handler):
+        return core_schema.chain_schema([handler(source), core_schema.int_schema(ge=2, le=8)])
+
+
+def _identity(value):
+    return value
 
 
 class _WireName(str):
@@ -246,6 +279,25 @@ def test_optional_inner_metadata_merges_with_field_metadata():
                  id="list-optional-scopes"),
     pytest.param(Annotated[int, _RepeatedBounds()], ..., 0, id="grouped-repeated"),
     pytest.param(list[Annotated[int, _RepeatedBounds()]], ..., 1, id="list-grouped-repeated"),
+    pytest.param(Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)], ..., 0,
+                 id="validator-between-bounds"),
+    pytest.param(Annotated[int, Ge(10), BeforeValidator(_identity), Ge(0)], ..., 0,
+                 id="before-validator-between-bounds"),
+    pytest.param(Annotated[int, Ge(10), WrapValidator(lambda value, handler: handler(value)), Ge(0)], ..., 0,
+                 id="wrap-validator-between-bounds"),
+    pytest.param(Annotated[int, _GeSubclass(10)], ..., 0, id="ge-subclass"),
+    pytest.param(Annotated[int, _NestedBounds()], ..., 0, id="nested-grouped"),
+    pytest.param(Annotated[int, _CustomInterval(ge=10, le=10)], ..., 0, id="custom-interval"),
+    pytest.param(Annotated[int, _FieldBounds()], ..., 0, id="grouped-field-info"),
+    pytest.param(list[Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)]], ..., 1,
+                 id="list-validator-between-bounds"),
+    pytest.param(Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Field(ge=0), 0,
+                 id="optional-field-validator-between-bounds"),
+    pytest.param(Annotated[Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Ge(0)], ..., 0,
+                 id="optional-outer-validator-between-bounds"),
+    pytest.param(list[Annotated[Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Ge(0)]], ..., 1,
+                 id="list-optional-validator-between-bounds"),
+    pytest.param(Annotated[int, Ge(0), Le(10), _IntChain()], ..., 0, id="multiple-int-schemas"),
 ])
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 def test_integer_bounds_accept_exactly_pydantic_values(annotation, default, depth, plan):
@@ -269,6 +321,70 @@ def test_integer_bounds_accept_exactly_pydantic_values(annotation, default, dept
         assert codec_accepts == model_accepts, payload
         if codec_accepts:
             assert codec.decode(encoded) == payload
+
+
+@pytest.mark.parametrize("annotation,default,int_schema,node", [
+    (Annotated[int, Ge(10)], Field(ge=0), {"type": "int", "ge": 10}, {"kind": "int", "min": 10}),
+    (Annotated[int, Field(ge=0)], Field(ge=10), {"type": "int", "ge": 0}, {"kind": "int", "min": 0}),
+    (Annotated[Optional[Annotated[int, Ge(10)]], Field(ge=5)], Field(ge=0),
+     {"type": "int", "ge": 5}, {"kind": "int", "min": 5}),
+    (list[Annotated[Optional[Annotated[int, Ge(10)]], Ge(0)]], ...,
+     {"type": "int", "ge": 0}, {"kind": "int", "min": 0}),
+    (Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)], ...,
+     {"type": "int", "ge": 10}, {"kind": "int", "min": 10}),
+    (Annotated[int, _GeSubclass(10)], ..., {"type": "int"}, {"kind": "int"}),
+    (Annotated[int, _NestedBounds()], ..., {"type": "int"}, {"kind": "int"}),
+    (Annotated[int, _CustomInterval(ge=10, le=10)], ...,
+     {"type": "int", "ge": 2, "le": 8}, {"kind": "int", "min": 2, "max": 8}),
+    (Annotated[int, _FieldBounds()], ...,
+     {"type": "int", "ge": 2, "le": 8, "metadata": {}}, {"kind": "int", "min": 2, "max": 8}),
+])
+def test_integer_leaf_matches_models_own_core_schema(annotation, default, int_schema, node):
+    model = create_model("Constrained", x=(annotation, default))
+    schema = model.__pydantic_core_schema__["schema"]["fields"]["x"]["schema"]
+    while schema["type"] != "int":
+        schema = schema["items_schema"] if schema["type"] == "list" else schema["schema"]
+    assert schema == int_schema
+    actual = to_ir(model)["fields"][0]["type"]
+    while actual["kind"] in ("array", "nullable"):
+        actual = actual["element"] if actual["kind"] == "array" else actual["inner"]
+    assert actual == node
+
+
+@pytest.mark.parametrize("validator", [
+    AfterValidator(_identity), BeforeValidator(_identity),
+    WrapValidator(lambda value, handler: handler(value)), PlainValidator(_identity),
+])
+def test_function_bounds_do_not_constrain_integer_leaf(validator):
+    model = create_model("Constrained", x=(Annotated[int, validator, Ge(10)], ...))
+    assert to_ir(model)["fields"][0]["type"] == {"kind": "int"}
+    codec = compile(model, validate=False)
+    with pytest.raises(ValidationError):
+        model.model_validate({"x": 0})
+    assert codec.decode(codec.encode({"x": 0})) == {"x": 0}
+
+
+def test_plain_validator_does_not_use_serialization_schema_bounds():
+    model = create_model("Constrained", x=(Annotated[int, Ge(10), PlainValidator(_identity)], ...))
+    assert model.__pydantic_core_schema__["schema"]["fields"]["x"]["schema"]["type"] == "function-plain"
+    assert to_ir(model)["fields"][0]["type"] == {"kind": "int"}
+    codec = compile(model, validate=False)
+    for value in (-1, 0, 10):
+        payload = {"x": value}
+        assert model.model_validate(payload).model_dump() == codec.decode(codec.encode(payload)) == payload
+
+
+def test_unconstrained_integer_leaves_do_not_build_type_adapters(monkeypatch):
+    model = create_model("Plain", x=(int, ...), y=(list[int | None], ...))
+
+    def unexpected_adapter(*args, **kwargs):
+        pytest.fail("unconstrained integers must not build TypeAdapters")
+
+    monkeypatch.setattr("hyperfly.pydantic.TypeAdapter", unexpected_adapter)
+    assert to_ir(model) == {"kind": "struct", "fields": [
+        {"name": "x", "type": {"kind": "int"}},
+        {"name": "y", "type": {"kind": "array", "element": {"kind": "nullable", "inner": {"kind": "int"}}}},
+    ]}
 
 
 @pytest.mark.parametrize("annotation,path", [

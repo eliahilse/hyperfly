@@ -2,4 +2,4 @@
 "@hyperfly/python": patch
 ---
 
-Nested and grouped integer constraints compile with their bounds, and repeated bounds follow Pydantic: the last of each kind wins, changing affected schemas' fingerprints. Field names the wire cannot carry raise `UnsupportedSchemaError`.
+Nested integer bounds follow each model's Pydantic schema, including validators, constraint subclasses, grouped metadata, custom intervals and schema chains; fingerprints change where earlier bounds disagreed with Pydantic. Unsupported wire field names raise `UnsupportedSchemaError`.
