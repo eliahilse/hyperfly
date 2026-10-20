@@ -180,6 +180,9 @@ const MAX_ULEB_BYTES: usize = 8;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
     /// Maximum nesting depth from root depth zero; default 64. Structs, arrays, and nullable nodes count.
+    /// Encoding and decoding recurse once per level, so a much higher value needs a thread stack
+    /// to match: roughly 8 KiB per level unoptimized, while optimized builds fit every depth a
+    /// compiled schema allows on a 2 MiB stack.
     pub max_depth: u32,
     /// Maximum number of elements per array; default `2^24`.
     pub max_items: u64,

@@ -273,7 +273,8 @@ fn esc(s: &str, out: &mut String) {
 }
 
 /// Appends canonical schema JSON to `out`, preserving declared field and member order.
-/// Does not validate `node`; use [`crate::Codec::compile`] to validate a schema.
+/// Does not validate `node` and recurses over it; use [`crate::Codec::compile`] first to
+/// validate a schema and bound its depth.
 pub fn serialize_node(node: &Node, out: &mut String) {
     match node {
         Node::Bool => out.push_str(r#"{"kind":"bool"}"#),
@@ -576,8 +577,8 @@ pub fn serialize_shared(profile: &Profile, out: &mut String) {
 }
 
 /// Returns canonical JSON for wire major 1, `plan`, `ir`, and optional shared profile content.
-/// Profile version is not serialized. Does not validate inputs; use
-/// [`crate::Codec::compile`] to validate them.
+/// Profile version is not serialized. Does not validate inputs and recurses over `ir`; use
+/// [`crate::Codec::compile`] first to validate them and bound the depth of `ir`.
 pub fn serialize_artifact(ir: &Node, plan: Plan, profile: Option<&Profile>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
