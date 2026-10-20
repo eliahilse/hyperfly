@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/vectors.json" with { type: "json" };
-import { compileIR, toHex, type IRNode } from "../src/index.js";
+import { compileIR, type IRNode } from "../src/index.js";
+import { toHex } from "../src/canonical.js";
 import { HyperflyError } from "../src/errors.js";
 
 function revive(value: unknown): unknown {
