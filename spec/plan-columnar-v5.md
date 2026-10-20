@@ -34,7 +34,7 @@ always agree.
       bitmap-null), in row order.
 
 The row count is bounded by `maxItems`, the `maxAmplification` policy and the
-item budget of wire-v0 §6 — deliberately not by the remaining input: a
+item budget of wire-v0 §6 — deliberately not by the one-bit floor: a
 width-zero column (§3.1) encodes any number of rows in a handful of bytes,
 and that is the point of the plan, not an attack. The array is charged
 against the budget once, with `n`; its leaves and their participating-row

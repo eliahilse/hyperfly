@@ -192,18 +192,21 @@ Implementations MUST enforce configurable limits with these v0 defaults:
   nodes enclosing it, and decoding a node deeper than `maxDepth` is rejected
   with `depth`,
 - `maxItems` 2^24 per array, applied to a declared length as to a count,
-- `maxByteLength` 2^28 per string/bytes value,
+- `maxByteLength` 2^28 per string/bytes value, checked against the length
+  prefix before any payload byte is read,
 - `maxAmplification` 32: an array count above
   `maxAmplification × (remaining bytes + 1)` is rejected, where remaining
   bytes are the body bytes after the count or, for a fixed-length array,
   after the point the array is entered. Compressed layouts can legitimately
   describe many rows with almost no bytes, so input length alone cannot bound
-  a count; this caps the work one hostile byte can demand instead. In the row
-  plan, an array whose element encoding consumes at least one bit per element
-  is held to the stricter **one-bit floor** in its place: a count beyond the
-  remaining bits is unpayable and MUST be rejected. An element that encodes
-  to zero bits (a `literal`, a struct whose fields are all required,
-  non-nullable literals) falls under the amplification bound.
+  a count; this caps the work one hostile byte can demand instead. A
+  row-encoded array (in either plan, including an array the columnar plan
+  leaves to the row encoding) whose element is not zero-bit is held to the
+  stricter **one-bit floor** in its place: a count beyond the remaining bits
+  is unpayable and MUST be rejected. An element type is zero-bit when it is a
+  `literal`; a struct whose fields are all required, non-nullable and
+  zero-bit; or a fixed-length array whose length is 0 or whose element is
+  zero-bit. Arrays of zero-bit elements fall under the amplification bound.
 - `maxTotalItems` 2^24 per message, and the **item budget**: the sum of the
   element counts of every array in one body (fixed and variable, row and
   columnar, at every depth) MUST NOT exceed
