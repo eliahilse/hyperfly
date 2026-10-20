@@ -1,3 +1,12 @@
+"""HTTP negotiation, JSON fallback and bounded request decoding.
+
+HYPERFLY_MEDIA_TYPE names the binary representation. ACCEPT_HEADER, CODEC_HEADER
+and OFFER_HEADER are the negotiation header names; WELL_KNOWN_PREFIX locates
+artifacts. DEFAULT_MAX_BODY_BYTES is the default one-MiB request bound.
+FallbackReason identifies disabled transport, refused or missing acceptance,
+unmatched codecs, or encoder limits that trigger JSON fallback.
+"""
+
 from __future__ import annotations
 
 import json
@@ -5,7 +14,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Literal, NamedTuple
+from typing import Any, Callable, Iterable, Literal, NamedTuple, cast
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
 from ._wire import INT_MAX, DecodeError, EncodeError, HyperflyError
@@ -63,21 +72,23 @@ def parse_accept(header: str | None) -> list[str]:
 
 @dataclass(frozen=True)
 class Negotiation:
+    """A response representation, headers, selected codec, and optional fallback reason."""
+
     kind: str
     headers: dict[str, str]
-    codec: Codec | None = None
+    codec: Codec[Any] | None = None
     reason: FallbackReason | None = None
 
 
 def _trim(text: str, lo: int, hi: int) -> tuple[int, int]:
     lo = _skip_ows(text, lo, hi)
     if lo < hi and text[hi - 1] in _OWS:
-        hi = _TRAILING_OWS.search(text, lo, hi).start()  # type: ignore[union-attr]
+        hi = cast(re.Match[str], _TRAILING_OWS.search(text, lo, hi)).start()
     return lo, hi
 
 
 def _skip_ows(text: str, lo: int, hi: int) -> int:
-    return _LEADING_OWS.match(text, lo, hi).end()  # type: ignore[union-attr]
+    return cast(re.Match[str], _LEADING_OWS.match(text, lo, hi)).end()
 
 
 def _media_rank(text: str, lo: int, hi: int) -> int:
@@ -259,6 +270,8 @@ def encode_for(
 
 @dataclass(frozen=True)
 class ArtifactResponse:
+    """Artifact discovery HTTP status, canonical JSON body, and cache headers."""
+
     status: int
     body: str
     headers: dict[str, str] = field(default_factory=dict)
@@ -286,6 +299,7 @@ def serve_artifact(pathname: str, registry: CodecRegistry) -> ArtifactResponse |
 
 
 def accept_header(fingerprints: list[str]) -> str:
+    """Join valid lowercase fingerprints into a Hyperfly-Accept header value."""
     return ", ".join(fingerprint for fingerprint in fingerprints if _FINGERPRINT.fullmatch(fingerprint))
 
 
@@ -338,7 +352,8 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     """Returns (kind, value) where kind is 'json', 'hyperfly', or 'unknown-codec'.
 
     A codec the client does not hold is not something it can recover from by guessing,
-    so it is reported rather than attempted.
+    so it is reported rather than attempted. Malformed JSON raises code ``json``;
+    malformed binary raises the codec's decode errors.
     """
     if _essence(content_type) != HYPERFLY_MEDIA_TYPE:
         return "json", _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
@@ -358,6 +373,7 @@ class RequestError(Exception):
     """
 
     def __init__(self, status: int, reason: str, headers: dict[str, str] | None = None) -> None:
+        """Store the HTTP status, stable reason, and optional response headers."""
         super().__init__(f"{status} {reason}")
         self.status = status
         self.reason = reason
@@ -365,6 +381,8 @@ class RequestError(Exception):
 
 
 class DecodedRequest(NamedTuple):
+    """A decoded request's representation kind and plain or codec-specific value."""
+
     kind: str
     value: Any
 
@@ -399,7 +417,7 @@ def read_body(
 
     Bytes are counted as chunks arrive, so no chunk past the one that crosses the
     bound is pulled; Content-Length only rejects early. A chunk source that fails is
-    a 400.
+    a 400. Invalid max_bytes raises code ``options``.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     if content_length is not None and _exceeds(content_length, max_bytes):
@@ -478,7 +496,8 @@ def decode_request(
     Raises RequestError with the status of the first rule that applies: 415 for a
     content type that is neither, 413 past max_bytes, 400 for a malformed envelope or
     a Hyperfly-Codec header that contradicts it, 415 with Hyperfly-Offer for an
-    unknown fingerprint, 400 for a body that fails to decode.
+    unknown fingerprint, 400 for a body that fails to decode. Invalid max_bytes
+    raises HyperflyError with code ``options``.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     essence = _essence(content_type)
@@ -505,3 +524,12 @@ def decode_request(
         return DecodedRequest("hyperfly", codec.decode(data))
     except HyperflyError as error:
         raise RequestError(400, "undecodable") from error
+
+
+__all__ = [
+    "HYPERFLY_MEDIA_TYPE", "ACCEPT_HEADER", "CODEC_HEADER", "OFFER_HEADER",
+    "WELL_KNOWN_PREFIX", "DEFAULT_MAX_BODY_BYTES", "FallbackReason",
+    "Negotiation", "ArtifactResponse", "DecodedRequest", "RequestError",
+    "parse_accept", "negotiate", "encode_for", "serve_artifact", "accept_header",
+    "decode_response", "read_body", "decode_request",
+]

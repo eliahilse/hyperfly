@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, NoReturn, cast
 
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
@@ -9,7 +9,7 @@ LEAF_KINDS = frozenset({"bool", "int", "float64", "string", "bytes", "enum", "li
 _PLAN_VERSION = {"row": 1, "columnar": 5}
 
 
-def _fail(path: str, message: str) -> None:
+def _fail(path: str, message: str) -> NoReturn:
     raise HyperflyError("ir", f"{path}: {message}")
 
 
@@ -72,6 +72,7 @@ def _check_field_name(name: str, path: str) -> None:
 
 
 def validate_ir(node: Any, path: str = "$") -> None:
+    """Validate a v0 schema; raise code ``ir`` prefixed with the failing path."""
     if not isinstance(node, dict):
         _fail(path, "IR node must be an object")
     kind = node.get("kind")
@@ -131,7 +132,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
         return
     if kind == "array":
         _check_keys(node, _ARRAY_KEYS, path)
-        length = node.get("length")
+        length: Any = node.get("length")
         if "length" in node and (not _is_safe_int(length) or length < 0):
             _fail(path, "fixed array length must be a non-negative safe integer")
         validate_ir(node.get("element"), path + "[]")
@@ -202,9 +203,10 @@ def _literal(v: Any) -> str:
 
 
 def serialize_node(node: dict[str, Any]) -> str:
+    """Return canonical JSON for a validated IR node (wire-v0 section 2)."""
     kind = node["kind"]
     if kind in ("bool", "float64", "string", "bytes"):
-        return '{"kind":"' + kind + '"}'
+        return '{"kind":"' + cast(str, kind) + '"}'
     if kind == "int":
         out = '{"kind":"int"'
         if node.get("min") is not None:
@@ -274,6 +276,7 @@ def serialize_shared(shared: dict[str, Any]) -> str:
 
 
 def serialize_artifact(ir: dict[str, Any], layout: str = "row", profile: dict[str, Any] | None = None) -> str:
+    """Serialize validated IR, layout and optional profile as canonical artifact JSON."""
     version = _PLAN_VERSION[layout]
     head = f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{serialize_node(ir)}'
     if profile is None:
@@ -345,13 +348,25 @@ def _walk_column_refs(
 
 
 def validate_profile(ir: dict[str, Any], profile: Any) -> None:
-    def fail(message: str) -> None:
+    """Validate the IR then its columnar profile; raise code ``ir`` on invalid data.
+
+    Profile errors have the same ``profile:`` prefix as compilation errors.
+    """
+    try:
+        validate_ir(ir)
+        _validate_profile(ir, profile)
+    except RecursionError:
+        _fail("$", "IR or profile nesting exceeds Python's recursion limit")
+
+
+def _validate_profile(ir: dict[str, Any], profile: Any) -> None:
+    def fail(message: str) -> NoReturn:
         _fail("profile", message)
 
     def record(value: Any, path: str) -> dict[str, Any]:
         if type(value) is not dict:
             fail(f"{path} must be an object")
-        return value
+        return cast(dict[str, Any], value)
 
     def check_keys(
         value: dict[str, Any], path: str, allowed: set[str], required: set[str]
@@ -437,7 +452,7 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
                 fail(f"leaf {leaf}: grammar must be an array")
             if not 1 <= len(raw_grammar) <= 8:
                 fail(f"leaf {leaf}: grammar must hold 1 to 8 tokens")
-            grammar = []
+            grammar: list[dict[str, Any]] = []
             numeric = 0
             previous_literal = False
             for token_index, raw_token in enumerate(raw_grammar):
@@ -504,9 +519,10 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
 
     by_leaf = {column["leaf"]: column for column in parsed}
     for column in parsed:
-        derived = column.get("derived")
-        if derived is None:
+        checked_derived = column.get("derived")
+        if checked_derived is None:
             continue
+        derived = checked_derived
         leaf = column["leaf"]
         source = derived["source"]
         if source < 0 or source >= len(refs) or refs[source][0] != "string":
@@ -525,6 +541,7 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
 
 
 def fingerprint_of(artifact: str) -> bytes:
+    """Return the first 16 SHA-256 bytes of canonical UTF-8 artifact JSON."""
     return hashlib.sha256(artifact.encode("utf-8")).digest()[:16]
 
 

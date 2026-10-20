@@ -4,8 +4,8 @@ import pytest
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from conftest import load
-from hyperfly import DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
-from hyperfly.pydantic import compile, to_ir
+from hyperfly import Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
+from hyperfly.pydantic import ModelCodec, compile, to_ir
 
 
 class Candle(BaseModel):
@@ -139,3 +139,74 @@ def test_failed_validation_on_decode_is_a_decode_error(method):
     assert raised.value.code == "validation"
     assert isinstance(raised.value.__cause__, ValidationError)
     assert compile(_Positive).decode(loose.encode({"n": -1})) == {"n": -1}
+
+
+@pytest.mark.parametrize("attribute", ["model", "validate"])
+def test_model_codec_settings_are_read_only(attribute):
+    codec = compile(_Positive, validate=True)
+    assert codec.model is _Positive
+    assert codec.validate is True
+    with pytest.raises(AttributeError):
+        setattr(codec, attribute, None)
+
+
+@pytest.mark.parametrize("method", ["encode", "encode_body", "decode", "decode_body"])
+def test_model_codec_validates_once_per_operation(monkeypatch, method):
+    codec = compile(_Positive, validate=True)
+    assert isinstance(codec, ModelCodec)
+    assert isinstance(codec, Codec)
+    registry = CodecRegistry([codec])
+    assert registry.get(codec.fingerprint) is codec
+    validate = _Positive.model_validate
+    calls = []
+
+    def counted(value):
+        calls.append(value)
+        return validate(value)
+
+    plain = compile_ir(codec.ir)
+    value = {"n": 1}
+    data = plain.encode(value) if method == "decode" else plain.encode_body(value)
+    monkeypatch.setattr(_Positive, "model_validate", counted)
+    result = getattr(codec, method)(data if method.startswith("decode") else value)
+    assert len(calls) == 1
+    if method.startswith("decode"):
+        assert result == _Positive(n=1)
+    else:
+        assert result == (plain.encode(value) if method == "encode" else plain.encode_body(value))
+
+
+@pytest.mark.parametrize("validate", [False, True])
+def test_model_codec_http_roundtrip_and_json_fallback(validate):
+    from hyperfly.http import decode_request, decode_response, encode_for, negotiate
+
+    codec = compile(_Positive, validate=validate)
+    registry = CodecRegistry([codec])
+    model = _Positive(n=1)
+    expected = model if validate else {"n": 1}
+    decision = negotiate(codec.fingerprint, registry)
+    assert decision.codec is codec
+    body, headers = encode_for(decision, model)
+    content_type = headers["Content-Type"]
+    assert decode_response(content_type, body, registry) == ("hyperfly", expected)
+    assert decode_request(content_type, codec.fingerprint, body, registry) == ("hyperfly", expected)
+    body, headers = encode_for(negotiate(None, registry), model)
+    assert body == b'{"n":1}'
+    assert decode_response(headers["Content-Type"], body, registry) == ("json", {"n": 1})
+    assert decode_request(headers["Content-Type"], None, body, registry) == ("json", {"n": 1})
+
+
+@pytest.mark.parametrize("validate", [False, True])
+def test_model_codec_http_encoder_limit_fallback(validate):
+    from hyperfly import Limits
+    from hyperfly.http import encode_for, negotiate
+
+    codec = compile(_Positive, validate=validate, limits=Limits(max_depth=0))
+    failures = []
+    body, headers = encode_for(
+        negotiate(codec.fingerprint, CodecRegistry([codec])), _Positive(n=1),
+        on_fallback=lambda reason, error: failures.append((reason, error.code)),
+    )
+    assert failures == [("encoder-limit", "depth")]
+    assert body == b'{"n":1}'
+    assert headers["Content-Type"] == "application/json"

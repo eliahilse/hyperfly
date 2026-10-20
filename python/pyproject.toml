@@ -27,7 +27,7 @@ classifiers = [
 
 [project.optional-dependencies]
 pydantic = ["pydantic>=2.5"]
-test = ["pytest>=8", "pydantic>=2.5", "hypothesis>=6"]
+test = ["pytest>=8", "pydantic>=2.5", "hypothesis>=6", "mypy>=1.10"]
 
 [project.urls]
 Homepage = "https://hyperfly.dev"
@@ -38,4 +38,10 @@ Issues = "https://github.com/eliahilse/hyperfly/issues"
 packages = ["src/hyperfly"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["tests", "package.json"]
+exclude = ["tests", "package.json", ".gitignore"]
+
+[tool.mypy]
+strict = true
+files = ["src/hyperfly"]
+
+[tool.hatch.build.targets.sdist.hooks.custom]

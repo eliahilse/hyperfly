@@ -6,7 +6,7 @@ import zlib
 
 import pytest
 
-from hyperfly import compile_ir, train
+from hyperfly import HyperflyError, compile_ir, train
 from hyperfly._ir import MAX_DICT_ENTRIES
 
 ROWS = {
@@ -204,3 +204,30 @@ def test_derivation_chooses_lowest_source_ordinal():
 def test_source_escape_blocks_derivation():
     profile = train(PAIR, [[{"a": "u1", "b": "known"}, {"a": "u1", "b": "known"}, {"a": "u2", "b": "other"}]])
     assert all("derived" not in column for column in columns(profile))
+
+
+@pytest.mark.parametrize("value", [None, {}, "samples", b"samples", {1}, iter([]), 1, True])
+def test_samples_container_is_checked_before_ir(value):
+    with pytest.raises(HyperflyError) as err:
+        train(None, value)
+    assert (err.value.code, str(err.value)) == ("options", "samples: must be a list or tuple")
+
+
+@pytest.mark.parametrize("name", ["min_occurrences", "max_entries"])
+@pytest.mark.parametrize("value", [None, "2", [], {}, True, False, complex(2, 0)])
+def test_numeric_training_options_are_checked(name, value):
+    with pytest.raises(HyperflyError) as err:
+        train(ROWS, [], **{name: value})
+    assert (err.value.code, str(err.value)) == ("options", f"{name}: must be a number")
+
+
+def test_tuple_samples_match_list_samples():
+    values = samples([["online"] * 20, ["offline"] * 20])
+    assert train(ROWS, tuple(values)) == train(ROWS, values)
+
+
+@pytest.mark.parametrize("name", ["min_occurrences", "max_entries"])
+def test_ir_is_checked_before_numeric_training_options(name):
+    with pytest.raises(HyperflyError) as err:
+        train(None, [], **{name: "invalid"})
+    assert err.value.code == "ir"

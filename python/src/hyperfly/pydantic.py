@@ -1,15 +1,19 @@
+"""Pydantic schema conversion and optional validation for Hyperfly codecs."""
+
 from __future__ import annotations
 
 import enum as _enum
 import types
 import typing
-from typing import Any, Callable, Literal
+from typing import Any, Literal, NoReturn, cast
 
-from ._codec import Codec, checked_options, compile_ir
+from ._codec import Codec, PackHooks, checked_options, compile_ir
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError, Limits, UnsupportedSchemaError
 
 try:
-    import annotated_types as _at
+    import annotated_types
+
+    _at: Any = annotated_types
 except ImportError:  # pragma: no cover
     _at = None
 
@@ -19,7 +23,7 @@ except ImportError as _err:  # pragma: no cover
     raise ImportError("hyperfly.pydantic requires pydantic >= 2.5") from _err
 
 
-def _unsupported(path: str, message: str) -> None:
+def _unsupported(path: str, message: str) -> NoReturn:
     raise UnsupportedSchemaError(path, message)
 
 
@@ -72,7 +76,7 @@ def _ceil_int(v: Any, path: str) -> int:
     bound = math.ceil(v)
     if bound < INT_MIN or bound > INT_MAX:
         _unsupported(path, f"bound {v} outside the v0 integer domain")
-    return bound
+    return cast(int, bound)
 
 
 def _floor_int(v: Any, path: str) -> int:
@@ -81,7 +85,7 @@ def _floor_int(v: Any, path: str) -> int:
     bound = math.floor(v)
     if bound < INT_MIN or bound > INT_MAX:
         _unsupported(path, f"bound {v} outside the v0 integer domain")
-    return bound
+    return cast(int, bound)
 
 
 def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
@@ -174,6 +178,7 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
 
 
 def to_ir(model: type[BaseModel]) -> dict[str, Any]:
+    """Return the model's v0 struct schema; raise code ``unsupported`` with a field path."""
     if not (isinstance(model, type) and issubclass(model, BaseModel)):
         _unsupported("$", "expected a pydantic BaseModel subclass")
     if "root" in getattr(model, "model_fields", {}) and type(model).__name__ == "ModelMetaclass" and _is_root_model(model):
@@ -190,31 +195,28 @@ def _is_root_model(model: type) -> bool:
         return False
 
 
-class _ModelCodec:
-    def __init__(self, codec: Codec, model: type[BaseModel], validate: bool) -> None:
-        self._codec = codec
+class ModelCodec(Codec[Any]):
+    """A model codec returning BaseModel instances only when validate is True.
+
+    With validation disabled, decoding returns plain dictionaries, so the value
+    type is Any. Validation failures raise code ``validation``.
+    """
+
+    def __init__(self, codec: Codec[Any], model: type[BaseModel], validate: bool) -> None:
+        """Reuse a compiled codec with a model and validation policy."""
+        self.__dict__.update(codec.__dict__)
         self._model = model
         self._validate = validate
 
     @property
-    def plan(self) -> str:
-        return self._codec.plan
+    def model(self) -> type[BaseModel]:
+        """The Pydantic model class used for conversion and validation."""
+        return self._model
 
     @property
-    def artifact(self) -> str:
-        return self._codec.artifact
-
-    @property
-    def fingerprint(self) -> str:
-        return self._codec.fingerprint
-
-    @property
-    def profile(self) -> dict[str, Any] | None:
-        return self._codec.profile
-
-    @property
-    def ir(self) -> dict[str, Any]:
-        return self._codec.ir
+    def validate(self) -> bool:
+        """Whether encoding and decoding validate values with the model."""
+        return self._validate
 
     def _to_value(self, value: Any) -> Any:
         if not self._validate:
@@ -234,16 +236,23 @@ class _ModelCodec:
             raise DecodeError("validation", f"$: {error}") from error
 
     def encode(self, value: Any) -> bytes:
-        return self._codec.encode(self._to_value(value))
+        """Encode a model or mapping once; raise ``validation`` or base encoding errors."""
+        return super().encode(self._to_value(value))
 
-    def decode(self, data: bytes) -> Any:
-        return self._from_value(self._codec.decode(data))
+    def decode(self, data: bytes | bytearray | memoryview) -> Any:
+        """Decode to a model when validating, or a plain value otherwise.
+
+        Raise ``validation`` or the base codec's envelope and body errors.
+        """
+        return self._from_value(super().decode(data))
 
     def encode_body(self, value: Any) -> bytes:
-        return self._codec.encode_body(self._to_value(value))
+        """Encode a model or mapping without an envelope; errors follow encode."""
+        return self._encode_body_raw(self._to_value(value))
 
-    def decode_body(self, data: bytes) -> Any:
-        return self._from_value(self._codec.decode_body(data))
+    def decode_body(self, data: bytes | bytearray | memoryview) -> Any:
+        """Decode a body to a model when validating; errors follow decode."""
+        return self._from_value(self._decode_body_raw(data))
 
 
 def compile(  # noqa: A001 - mirrors the documented API
@@ -252,11 +261,18 @@ def compile(  # noqa: A001 - mirrors the documented API
     plan: str = "row",
     validate: bool = False,
     limits: Limits | None = None,
-    pack: dict[str, Callable[..., bytes]] | Literal[False] | None = None,
+    pack: PackHooks | Literal[False] | None = None,
     profile: dict[str, Any] | None = None,
-) -> _ModelCodec:
+) -> ModelCodec:
+    """Compile a model schema; validate=True also validates each encoded or decoded value.
+
+    Raise codes ``options``, ``unsupported``, or ``ir`` for invalid inputs.
+    """
     plan, limits, pack = checked_options(plan, limits, pack)
     if validate is not True and validate is not False:
         raise HyperflyError("options", "validate: must be a boolean")
     codec = compile_ir(to_ir(model), plan=plan, limits=limits, pack=pack, profile=profile)
-    return _ModelCodec(codec, model, validate)
+    return ModelCodec(codec, model, validate)
+
+
+__all__ = ["ModelCodec", "compile", "to_ir"]

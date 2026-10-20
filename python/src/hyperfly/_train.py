@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
 from typing import Any
 
 from ._codec import (
@@ -15,7 +14,7 @@ from ._codec import (
     _packed_bytes,
 )
 from ._ir import MAX_DICT_ENTRIES, _enumerate_column_refs, _has_lone_surrogate, column_count, validate_ir
-from ._wire import uleb_len
+from ._wire import HyperflyError, uleb_len
 
 
 def _leaf_value(row: Any, segs: tuple[str, ...]) -> Any:
@@ -237,7 +236,7 @@ def _detect_derivation(
 
 def train(
     ir: dict[str, Any],
-    samples: Sequence[Any],
+    samples: list[Any] | tuple[Any, ...],
     *,
     min_occurrences: int | float = 2,
     max_entries: int | float = MAX_DICT_ENTRIES,
@@ -246,8 +245,15 @@ def train(
 
     Values must recur at least ``min_occurrences`` times to enter a dictionary,
     which holds at most ``max_entries`` entries. Return None when no profile helps.
+    Raise code ``options`` for invalid sample containers or numeric options, and
+    code ``ir`` for an invalid schema.
     """
+    if not isinstance(samples, (list, tuple)):
+        raise HyperflyError("options", "samples: must be a list or tuple")
     validate_ir(ir)
+    for name, number in (("min_occurrences", min_occurrences), ("max_entries", max_entries)):
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            raise HyperflyError("options", f"{name}: must be a number")
     if math.isfinite(min_occurrences):
         min_occurrences = max(1, math.floor(min_occurrences))
     elif min_occurrences == -math.inf:
