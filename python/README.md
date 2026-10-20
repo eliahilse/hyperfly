@@ -17,12 +17,35 @@ pip install hyperfly[pydantic]
 ## Two lines at the boundary
 
 ```python
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
 from hyperfly.pydantic import compile
 
-codec = compile(EventResponse)
 
+class Status(str, Enum):
+    ok = "ok"
+    degraded = "degraded"
+
+
+class Event(BaseModel):
+    id: int = Field(ge=0)
+    at_ms: int = Field(ge=0)
+    status: Status
+    message: str | None = None
+
+
+class EventResponse(BaseModel):
+    events: list[Event]
+    cursor: str | None = None
+
+
+codec = compile(EventResponse, validate=True)
+
+response = EventResponse(events=[Event(id=1, at_ms=1_792_454_400_000, status=Status.ok)])
 data = codec.encode(response)
-value = codec.decode(data)
+value = codec.decode(data)  # an EventResponse; without validate=True, plain dicts
 ```
 
 Anything the model already settles — field names, types, enum members, bounds,
@@ -30,23 +53,23 @@ optionality — never reaches the wire. Models it cannot encode fail loudly at c
 time, with the path:
 
 ```python
-compile(Model)  # UnsupportedSchemaError: $.meta: dict[str, int] has no v0 encoding
+class Model(BaseModel):
+    meta: dict[str, int]
+
+
+compile(Model)  # UnsupportedSchemaError: $.meta: type dict[str, int] has no v0 encoding
 ```
 
-## Columns and profiles
+## Columns
 
 ```python
-from hyperfly import train
-from hyperfly.pydantic import compile, to_ir
-
-profile = train(to_ir(EventResponse), last_weeks_responses)
-codec = compile(EventResponse, plan="columnar", profile=profile)
+codec = compile(EventResponse, plan="columnar", validate=True)
 ```
 
-Column layout turns timestamps into deltas, exact-decimal numbers into integer
-mantissas, enums into indices and booleans into bitmaps, and deflates text columns
-together. A profile adds what only traffic can teach: the values that recur across
-*different* responses, which a compressor never sees because it only ever holds one.
+The columnar plan lays an array of records out field by field. It turns timestamps
+into deltas, exact-decimal numbers into integer mantissas, enums into indices and
+booleans into bitmaps, and deflates text columns together. Row and columnar codecs
+of the same model have different fingerprints, so a server can register both.
 
 ## Serving it
 
@@ -63,6 +86,11 @@ body, headers = encode_for(decision, payload)
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it
 could fetch from `serve_artifact`; once it has it, the same route answers in binary.
 There is no failure mode where the response is unreadable.
+
+The JSON fallback writes pydantic models with `model_dump(mode="json", by_alias=True)`,
+so field aliases and serializers such as `ser_json_bytes` apply. Raw dicts and lists
+must already be JSON-ready apart from enums (written as their values) and non-finite
+floats (written as `null`, as `JSON.stringify` does); `bytes` has no JSON form and raises.
 
 Registering the outgoing codec alongside the incoming one is what makes retraining
 safe: a new profile is a new fingerprint, so a deployment holding only one codec
@@ -84,4 +112,4 @@ pip install ./python[test] && pytest python/tests -q
 
 ## License
 
-[Apache License 2.0](../LICENSE)
+[Apache License 2.0](https://github.com/eliahilse/hyperfly/blob/main/LICENSE)

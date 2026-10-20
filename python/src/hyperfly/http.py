@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from ._codec import Codec
@@ -27,12 +29,22 @@ def parse_accept(header: str | None) -> list[str]:
     if not header:
         return []
     out: list[str] = []
-    for part in header.split(","):
-        if len(out) >= _MAX_ACCEPTED:
+    start = 0
+    for _ in range(_MAX_ACCEPTED):
+        end = header.find(",", start)
+        stop = len(header) if end == -1 else end
+        lo, hi = start, stop
+        while lo < hi and header[lo] in " \t":
+            lo += 1
+        while hi > lo and header[hi - 1] in " \t":
+            hi -= 1
+        if hi - lo == 32:
+            value = header[lo:hi]
+            if _FINGERPRINT.fullmatch(value) and value not in out:
+                out.append(value)
+        if end == -1:
             break
-        value = part.strip().lower()
-        if _FINGERPRINT.match(value) and value not in out:
-            out.append(value)
+        start = end + 1
     return out
 
 
@@ -75,10 +87,39 @@ def negotiate(
     return Negotiation("json", headers)
 
 
+def _json_key(key: Any) -> Any:
+    if isinstance(key, Enum):
+        key = key.value
+    if isinstance(key, float) and not math.isfinite(key):
+        return "NaN" if key != key else ("Infinity" if key > 0 else "-Infinity")
+    return key
+
+
+def _json_value(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        value = model_dump(mode="json", by_alias=True)
+    if isinstance(value, Enum):
+        value = value.value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {_json_key(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
 def encode_for(decision: Negotiation, value: Any) -> tuple[bytes, dict[str, str]]:
     if decision.kind == "hyperfly" and decision.codec is not None:
         return decision.codec.encode(value), decision.headers
-    return json.dumps(value, separators=(",", ":")).encode("utf-8"), decision.headers
+    try:
+        plain = _json_value(value)
+    except RecursionError:
+        raise ValueError("JSON fallback value is circular or nested too deeply") from None
+    text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
+    return text.encode("utf-8", "backslashreplace"), decision.headers
 
 
 @dataclass(frozen=True)
@@ -110,7 +151,7 @@ def serve_artifact(pathname: str, registry: CodecRegistry) -> ArtifactResponse |
 
 
 def accept_header(fingerprints: list[str]) -> str:
-    return ", ".join(fingerprints)
+    return ", ".join(fingerprint for fingerprint in fingerprints if _FINGERPRINT.fullmatch(fingerprint))
 
 
 def decode_response(content_type: str | None, body: bytes | str, registry: CodecRegistry) -> tuple[str, Any]:
@@ -121,7 +162,11 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     """
     if not (content_type or "").lower().startswith(HYPERFLY_MEDIA_TYPE):
         text = body.decode("utf-8") if isinstance(body, bytes) else body
-        return "json", json.loads(text)
+
+        def reject_constant(value: str) -> Any:
+            raise json.JSONDecodeError(f"invalid JSON constant {value}", text, 0)
+
+        return "json", json.loads(text, parse_constant=reject_constant)
     data = body.encode("utf-8") if isinstance(body, str) else body
     fingerprint = data[3:19].hex()
     codec = registry.get(fingerprint)

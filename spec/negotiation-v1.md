@@ -30,7 +30,7 @@ answer in binary:
 200 OK
 Content-Type: application/vnd.hyperfly
 Hyperfly-Codec: a65108e20d19c19ff525ddf4789d5ba1
-Vary: Hyperfly-Accept
+Vary: Hyperfly-Accept, Accept
 ```
 
 The body is the envelope from wire-v0 §2. The fingerprint is already inside it;
@@ -42,29 +42,55 @@ so preference belongs to the client. This matters during rotation: a client
 that lists a new profile before an old one moves itself over without the server
 tracking who has what.
 
+A client opts out of binary through `Accept`. A server examines at most the
+first 32 media ranges, separated by commas outside quoted strings; inside a
+quoted string a backslash escapes the next character (RFC 9110 quoted-pair),
+so `\"` does not end the string. A range is a type/subtype with parameters.
+SP and HTAB around a range, its type/subtype, each `;`, and each parameter
+name and value are ignored; type and subtype compare case-insensitively. The
+`q` parameter name is case-insensitive and its value follows the RFC 9110
+qvalue syntax: `0`, `0.`, `0.0`, `0.00` and `0.000` are zero, any other value
+that parses is non-zero, and a range whose `q` does not parse is ignored. A
+range carrying any parameter other than `q`, or more than one `q`, is
+ignored. Binary is refused when the most specific range present among
+`application/vnd.hyperfly`, `application/*` and `*/*` (among equally specific
+ranges the first listed counts) has `q` zero;
+the server then MUST NOT answer in binary, whatever `Hyperfly-Accept` says,
+and answers with the fallback (§2). If no range matches, or `Accept` is
+absent, binary is not refused: `Hyperfly-Accept` is the opt-in, so a client
+listing only `application/json` still receives binary when it advertises a
+fingerprint.
+
 ## 2. Fallback
 
 The server answers JSON when any of these hold, and none of them is an error:
 
 - the request carries no `Hyperfly-Accept`,
 - no advertised fingerprint matches a codec the server holds,
+- `Accept` refuses binary (§1),
+- the encoder refuses the value under its limits (wire-v0 §6),
 - the server chooses not to (load, a disabled route, an operator switch).
 
 ```
 200 OK
 Content-Type: application/json
 Hyperfly-Offer: a65108e20d19c19ff525ddf4789d5ba1
-Vary: Hyperfly-Accept
+Vary: Hyperfly-Accept, Accept
 ```
+
+An encoder refusal MUST be answered in JSON like any other fallback, never
+with an error status. The server SHOULD record it: it marks a route whose
+limits need raising on both peers.
 
 `Hyperfly-Offer` is optional and advisory: it names an artifact the server
 would have used, so a client can fetch it (§3) and upgrade itself. A client
 MUST NOT treat its presence as a requirement, and a server MUST behave
 identically whether or not the client acts on it.
 
-Because the same URL can yield either representation, a response that varies
-on the header MUST carry `Vary: Hyperfly-Accept`, or a shared cache will serve
-one peer's binary to another peer that cannot read it.
+Because the same URL can yield either representation, selected by both
+`Hyperfly-Accept` and `Accept`, every response that varies MUST carry
+`Vary: Hyperfly-Accept, Accept`, or a shared cache will serve one peer's
+binary to another peer that cannot read it.
 
 ## 3. Artifact discovery
 
@@ -107,6 +133,28 @@ Media Type` with `Hyperfly-Offer` naming what it does hold, rather than
 guessing. Unlike responses, there is no safe fallback for a body already sent
 in a format the peer cannot read.
 
+A server answers a request body by these rules, in order; the first rule
+that applies wins:
+
+1. The `Content-Type` essence (type and subtype, case-insensitive, parameters
+   ignored) is neither `application/vnd.hyperfly` nor JSON (`application/json`
+   or a `+json` suffix; an absent `Content-Type` counts as JSON):
+   `415 Unsupported Media Type`. `application/vnd.hyperfly-x` is not hyperfly.
+2. The body exceeds the server's request-body bound: `413 Content Too Large`.
+   The bound is server configuration (implementations SHOULD default to
+   1 MiB), enforced by counting bytes as they arrive; `Content-Length` serves
+   only to reject early.
+3. A hyperfly body is shorter than the envelope header, or its magic or major
+   is wrong (wire-v0 §2): `400 Bad Request`.
+4. A hyperfly body arrives with a `Hyperfly-Codec` header whose value, with
+   leading and trailing SP and HTAB removed, is not exactly the envelope
+   fingerprint in lowercase hex: `400`. On a JSON body the header is ignored.
+5. The server does not hold the envelope fingerprint: `415` with
+   `Hyperfly-Offer`, as above.
+6. The hyperfly body fails to decode under the held codec, for any wire-v0
+   error (limits included): `400`.
+7. A JSON body is not well-formed UTF-8 JSON: `400`.
+
 ## 5. Rotation
 
 Retraining a profile produces a new fingerprint (plan §6.4). A deployment
@@ -124,9 +172,15 @@ what makes the fallback a transition rather than an outage.
 
 ## 6. Security
 
-- `Hyperfly-Accept` is client-controlled input. A server MUST bound the number
-  of entries it parses (32 is ample) and MUST NOT allocate per unrecognized
-  entry.
+- `Hyperfly-Accept` is client-controlled input. A server MUST examine at most
+  the first 32 comma-separated segments and ignore the rest; every segment
+  counts toward that bound, including empty, malformed and duplicate ones. It
+  MUST NOT allocate per malformed segment, so the work one request can demand
+  is bounded by the 32 segments. Only SP and HTAB are trimmed, and an entry
+  that is not exactly 32 lowercase hex characters after trimming is
+  malformed, not normalized. Duplicates are compared after trimming and only
+  the first is kept. `spec/vectors/accept.json` pins this behaviour; every
+  implementation runs it.
 - A fingerprint is not a secret, but it does identify a schema and a trained
   dictionary. A server MUST NOT serve an artifact belonging to one tenant to
   another, and `.well-known` discovery MUST apply the same authorization as

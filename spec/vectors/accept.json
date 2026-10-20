@@ -1,0 +1,212 @@
+[
+  {
+    "name": "single valid fingerprint",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "two valid fingerprints preserve order",
+    "header": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "uppercase ignored",
+    "header": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "mixed case ignored",
+    "header": "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": []
+  },
+  {
+    "name": "31 hex characters ignored",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": []
+  },
+  {
+    "name": "33 hex characters ignored",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": []
+  },
+  {
+    "name": "non-hex characters ignored",
+    "header": "gggggggggggggggggggggggggggggggg",
+    "expected": []
+  },
+  {
+    "name": "SP and HTAB padding trimmed",
+    "header": " \taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t ",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "nonbreaking spaces not trimmed",
+    "header": "\u00a0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u00a0",
+    "expected": []
+  },
+  {
+    "name": "newlines not trimmed",
+    "header": "\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "expected": []
+  },
+  {
+    "name": "newline within 32 characters ignored",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "expected": []
+  },
+  {
+    "name": "empty segments ignored",
+    "header": ",,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "duplicates kept once",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    ]
+  },
+  {
+    "name": "valid 32nd segment kept",
+    "header": "junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "valid 33rd segment and later ignored",
+    "header": "junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,junk,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expected": []
+  },
+  {
+    "name": "31 empty segments then valid kept",
+    "header": ",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "32 empty segments then valid ignored",
+    "header": ",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": []
+  },
+  {
+    "name": "duplicates count toward limit",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "malformed entries count toward limit",
+    "header": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": []
+  },
+  {
+    "name": "trailing newline after a complete fingerprint not trimmed",
+    "header": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "expected": []
+  },
+  {
+    "name": "full hex alphabet accepted",
+    "header": "0123456789abcdef0123456789abcdef",
+    "expected": [
+      "0123456789abcdef0123456789abcdef"
+    ]
+  },
+  {
+    "name": "duplicates compared after trimming",
+    "header": " aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  {
+    "name": "32 distinct fingerprints all kept in order",
+    "header": "0123456789abcdef0123456789abcdef,123456789abcdef0123456789abcdef0,23456789abcdef0123456789abcdef01,3456789abcdef0123456789abcdef012,456789abcdef0123456789abcdef0123,56789abcdef0123456789abcdef01234,6789abcdef0123456789abcdef012345,789abcdef0123456789abcdef0123456,89abcdef0123456789abcdef01234567,9abcdef0123456789abcdef012345678,abcdef0123456789abcdef0123456789,bcdef0123456789abcdef0123456789a,cdef0123456789abcdef0123456789ab,def0123456789abcdef0123456789abc,ef0123456789abcdef0123456789abcd,f0123456789abcdef0123456789abcde,c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0,c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1,c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2,c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3,c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4,c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5,c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6,c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7,c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8,c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9,cacacacacacacacacacacacacacacaca,cbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcb,cccccccccccccccccccccccccccccccc,cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd,cececececececececececececececece,cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf",
+    "expected": [
+      "0123456789abcdef0123456789abcdef",
+      "123456789abcdef0123456789abcdef0",
+      "23456789abcdef0123456789abcdef01",
+      "3456789abcdef0123456789abcdef012",
+      "456789abcdef0123456789abcdef0123",
+      "56789abcdef0123456789abcdef01234",
+      "6789abcdef0123456789abcdef012345",
+      "789abcdef0123456789abcdef0123456",
+      "89abcdef0123456789abcdef01234567",
+      "9abcdef0123456789abcdef012345678",
+      "abcdef0123456789abcdef0123456789",
+      "bcdef0123456789abcdef0123456789a",
+      "cdef0123456789abcdef0123456789ab",
+      "def0123456789abcdef0123456789abc",
+      "ef0123456789abcdef0123456789abcd",
+      "f0123456789abcdef0123456789abcde",
+      "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+      "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+      "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+      "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+      "c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+      "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+      "cacacacacacacacacacacacacacacaca",
+      "cbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcb",
+      "cccccccccccccccccccccccccccccccc",
+      "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "cececececececececececececececece",
+      "cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf"
+    ]
+  },
+  {
+    "name": "33rd distinct fingerprint ignored",
+    "header": "0123456789abcdef0123456789abcdef,123456789abcdef0123456789abcdef0,23456789abcdef0123456789abcdef01,3456789abcdef0123456789abcdef012,456789abcdef0123456789abcdef0123,56789abcdef0123456789abcdef01234,6789abcdef0123456789abcdef012345,789abcdef0123456789abcdef0123456,89abcdef0123456789abcdef01234567,9abcdef0123456789abcdef012345678,abcdef0123456789abcdef0123456789,bcdef0123456789abcdef0123456789a,cdef0123456789abcdef0123456789ab,def0123456789abcdef0123456789abc,ef0123456789abcdef0123456789abcd,f0123456789abcdef0123456789abcde,c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0,c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1,c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2,c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3,c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4,c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5,c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6,c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7,c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8,c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9,cacacacacacacacacacacacacacacaca,cbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcb,cccccccccccccccccccccccccccccccc,cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd,cececececececececececececececece,cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf,d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    "expected": [
+      "0123456789abcdef0123456789abcdef",
+      "123456789abcdef0123456789abcdef0",
+      "23456789abcdef0123456789abcdef01",
+      "3456789abcdef0123456789abcdef012",
+      "456789abcdef0123456789abcdef0123",
+      "56789abcdef0123456789abcdef01234",
+      "6789abcdef0123456789abcdef012345",
+      "789abcdef0123456789abcdef0123456",
+      "89abcdef0123456789abcdef01234567",
+      "9abcdef0123456789abcdef012345678",
+      "abcdef0123456789abcdef0123456789",
+      "bcdef0123456789abcdef0123456789a",
+      "cdef0123456789abcdef0123456789ab",
+      "def0123456789abcdef0123456789abc",
+      "ef0123456789abcdef0123456789abcd",
+      "f0123456789abcdef0123456789abcde",
+      "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+      "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+      "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+      "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
+      "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
+      "c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7c7",
+      "c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8c8",
+      "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+      "cacacacacacacacacacacacacacacaca",
+      "cbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcb",
+      "cccccccccccccccccccccccccccccccc",
+      "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "cececececececececececececececece",
+      "cfcfcfcfcfcfcfcfcfcfcfcfcfcfcfcf"
+    ]
+  }
+]
