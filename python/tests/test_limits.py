@@ -1,4 +1,5 @@
 import dataclasses
+import time
 import tracemalloc
 
 import pytest
@@ -85,6 +86,200 @@ TWO_INTS = {
         ],
     },
 }
+
+
+def _array(*fields):
+    return {"kind": "array", "element": {"kind": "struct", "fields": list(fields)}}
+
+
+def _field(name, kind, **options):
+    flags = {key: options.pop(key) for key in ("optional", "nullable") if key in options}
+    return {"name": name, "type": {"kind": kind, **options}, **flags}
+
+
+def _profile(*columns):
+    return {"version": 2, "shared": {"columns": list(columns)}}
+
+
+B = _field("b", "int")
+DICT_X = _profile({"leaf": 0, "dict": ["x"]})
+ROWS_400K = "80b518"
+
+# Bodies under 64 KB from the #47 reviews: each declares up to 1.5M rows that cost
+# next to nothing until a later column is malformed
+HOSTILE = [
+    (
+        "escaped grammar",
+        _array(_field("a", "string"), B),
+        _profile(
+            {
+                "leaf": 0,
+                "grammar": [{"lit": "x" * 1000}, {"num": {"base": 10, "len": 8, "case": "lower"}}],
+            }
+        ),
+        "a08d06030101" + "00" * 12499 + "0200000178ff",
+        "marker",
+    ),
+    (
+        "width-zero delta out of bounds at the end",
+        _array(_field("a", "int", max=1499998), B),
+        None,
+        "e0c65b03000200ff" + "00" * 60000,
+        "range",
+    ),
+    (
+        "width-zero delta out of the domain",
+        _array(_field("a", "int")),
+        None,
+        "c0843d0382f785ffffffff1f0200" + "00" * 32000,
+        "range",
+    ),
+    ("optional literal", _array(_field("a", "literal", value="x", optional=True), B), None, "80a61d" + "ff" * 60001, "marker"),
+    ("int frame", _array(_field("a", "int"), B), None, ROWS_400K + "020001" + "00" * 50000 + "ff", "marker"),
+    ("int frame at an offset", _array(_field("a", "int"), B), None, "80a61d02d00f01" + "00" * 60000 + "ff", "marker"),
+    ("patched frame", _array(_field("a", "int"), B), None, ROWS_400K + "04000001" + "00" * 50000 + "ff", "marker"),
+    (
+        "optional width-zero frame",
+        _array(_field("a", "int", optional=True), B),
+        None,
+        ROWS_400K + "ff" * 50000 + "020000ff",
+        "marker",
+    ),
+    ("bool bitmap", _array(_field("a", "bool"), B), None, ROWS_400K + "00" * 50000 + "ff", "marker"),
+    ("enum", _array(_field("a", "enum", members=["p", "q"]), B), None, ROWS_400K + "00" * 50000 + "ff", "marker"),
+    ("dictionary codes", _array(_field("a", "string"), B), DICT_X, ROWS_400K + "0101" + "ff" * 50001, "marker"),
+    (
+        "grammar lane",
+        _array(_field("a", "string"), B),
+        _profile({"leaf": 0, "grammar": [{"lit": "id-"}, {"num": {"base": 10, "len": 6, "case": "lower"}}]}),
+        ROWS_400K + "0300020001" + "00" * 50000 + "ff",
+        "marker",
+    ),
+    (
+        "derived from a dictionary",
+        _array(_field("a", "string"), _field("c", "string"), B),
+        _profile({"leaf": 0, "dict": ["x"]}, {"leaf": 1, "derived": {"source": 0, "values": ["y"]}}),
+        ROWS_400K + "0101" + "ff" * 50000 + "0400ff",
+        "marker",
+    ),
+    ("plain strings", _array(_field("a", "string"), B), None, "e0d40300" + "00" * 60000 + "ff", "marker"),
+    ("bytes", _array(_field("a", "bytes"), B), None, "e0d403" + "00" * 60000 + "ff", "marker"),
+    (
+        "zero-bit row elements",
+        {
+            "kind": "struct",
+            "fields": [
+                {
+                    "name": "a",
+                    "type": {
+                        "kind": "array",
+                        "element": {
+                            "kind": "struct",
+                            "fields": [
+                                {"name": "x", "type": {"kind": "literal", "value": "x"}},
+                                {"name": "empty", "type": {"kind": "array", "element": {"kind": "int"}, "length": 0}},
+                            ],
+                        },
+                    },
+                },
+                {"name": "b", "type": {"kind": "bool"}},
+            ],
+        },
+        None,
+        "a08d06ff" + "00" * 4000,
+        "marker",
+    ),
+]
+
+
+@pytest.mark.parametrize("ir, profile, body, code", [case[1:] for case in HOSTILE], ids=[case[0] for case in HOSTILE])
+def test_hostile_bodies_fail_fast_and_small(ir, profile, body, code):
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    body = bytes.fromhex(body)
+    assert len(body) < 64 * 1024
+    start = time.perf_counter()
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(body)
+    elapsed = time.perf_counter() - start
+    tracemalloc.start()
+    try:
+        with pytest.raises(HyperflyError):
+            codec.decode_body(body)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert err.value.code == code
+    assert elapsed < 0.5
+    assert peak < 8 << 20
+
+
+GRAMMAR_AB = _profile({"leaf": 0, "grammar": [{"lit": "ab"}, {"num": {"base": 10, "len": 2, "case": "lower"}}]})
+DERIVED_Y = _profile({"leaf": 0, "dict": ["x"]}, {"leaf": 1, "derived": {"source": 0, "values": ["y"]}})
+STRING = _array(_field("a", "string"))
+INT_TO_10 = _array(_field("a", "int", max=10))
+
+# several defects in one body: the first one the per-value TypeScript decoder meets decides the code
+FIRST_DEFECT = [
+    ("dictionary code before a truncated escape", STRING, _profile({"leaf": 0, "dict": ["x", "y"]}), "0401020d", "range"),
+    ("truncated escape before a dictionary code", STRING, _profile({"leaf": 0, "dict": ["x", "y"]}), "0401020c0561", "truncated"),
+    ("invalid escape before a dictionary code", STRING, _profile({"leaf": 0, "dict": ["x", "y"]}), "0401020c01ff", "utf8"),
+    ("invalid UTF-8 before truncation", STRING, None, "030001ff056162", "utf8"),
+    ("invalid UTF-8 after a long value", STRING, None, "02008001" + "61" * 127 + "e201ff", "utf8"),
+    ("long values before truncation", STRING, None, "03008001" + "e282ac" * 42 + "6101ff05", "truncated"),
+    ("bound before a truncated delta", INT_TO_10, None, "0301140c", "range"),
+    ("zero high part", INT_TO_10, None, "0304000101050501", "bitmap"),
+    ("bound before a zero high part", _array(_field("a", "int", max=2)), None, "0304000101050501", "range"),
+    ("missing derived source before an escape", _array(_field("a", "string"), _field("b", "string")), DERIVED_Y, "03010105017a04010405", "range"),
+    ("escape before a missing derived source", _array(_field("a", "string"), _field("b", "string")), DERIVED_Y, "03010105017a04010105", "truncated"),
+    ("grammar lane padding", STRING, GRAMMAR_AB, "030301010300020105", "bitmap"),
+    ("negative zero before truncation", _array(_field("a", "float64")), None, "0200000000000000008000", "float"),
+    ("mantissa before a bad varint", _array(_field("a", "float64")), None, "020300feffffffffffff7f8000", "range"),
+    ("enum index late in the column", _array(_field("a", "enum", members=["a", "b", "c"])), None, "05e403", "range"),
+    ("width-zero delta below min", _array(_field("a", "int", min=-3, max=3)), None, "0a03060100", "range"),
+]
+
+
+@pytest.mark.parametrize("ir, profile, body, code", [case[1:] for case in FIRST_DEFECT], ids=[case[0] for case in FIRST_DEFECT])
+def test_first_defect_decides_the_code(ir, profile, body, code):
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex(body))
+    assert err.value.code == code
+
+
+PARTIAL = _array(
+    _field("kind", "string", optional=True),
+    _field("email", "string", nullable=True),
+    _field("n", "int", optional=True, nullable=True),
+    _field("flag", "bool", optional=True),
+    _field("e", "enum", members=[str(i) for i in range(9)], nullable=True),
+)
+PARTIAL_PROFILE = _profile(
+    {"leaf": 0, "dict": ["alpha", "beta"]},
+    {"leaf": 1, "derived": {"source": 0, "values": ["a@x", "b@x"]}},
+)
+
+
+@pytest.mark.parametrize("count", [1, 7, 8, 9, 300])
+def test_columns_with_differing_participation_round_trip(count):
+    codec = compile_ir(PARTIAL, plan="columnar", profile=PARTIAL_PROFILE)
+    rows = []
+    for i in range(count):
+        row = {}
+        if i % 3:
+            row["kind"] = ["alpha", "beta", "gamma"][i % 4 % 3]
+        row["email"] = None if i % 5 == 0 else ("a@x" if row.get("kind") == "alpha" and i % 7 else "z@y")
+        if i % 2:
+            row["n"] = None if i % 4 == 1 else 1000 + 3 * i
+        if i % 4:
+            row["flag"] = i % 3 == 0
+        row["e"] = None if i % 6 == 0 else str(i % 9)
+        rows.append(row)
+    body = codec.encode_body(rows)
+    decoded = codec.decode_body(body)
+    assert deep_eq(decoded, rows)
+    assert [list(row) for row in decoded] == [[k for k in ("kind", "email", "n", "flag", "e") if k in row] for row in rows]
+    assert codec.encode_body(decoded) == body
 
 
 def test_width_zero_column_stays_packed_until_every_column_decodes():

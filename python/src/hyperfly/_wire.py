@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
+from typing import Callable, Iterable
 
 INT_MIN = -(2**53 - 1)
 INT_MAX = 2**53 - 1
@@ -67,13 +69,15 @@ class ItemBudget:
 
 
 class Reader:
-    __slots__ = ("buf", "pos", "limits", "items")
+    __slots__ = ("buf", "pos", "limits", "items", "deferred")
 
     def __init__(self, buf: bytes, limits: Limits) -> None:
         self.buf = buf
         self.pos = 0
         self.limits = limits
         self.items = ItemBudget(limits.item_budget(len(buf)))
+        # arrays whose items are built only once the whole body has decoded
+        self.deferred: list[tuple[list, Callable[[], Iterable]]] = []
 
     def u8(self) -> int:
         if self.pos >= len(self.buf):
@@ -124,6 +128,50 @@ def read_uleb(r: Reader) -> int:
     raise DecodeError("varint", f"uvarint longer than {_MAX_ULEB_BYTES} bytes")
 
 
+def uleb_at(buf: bytes, pos: int) -> tuple[int, int]:
+    """read_uleb over a buffer position: the value and the position after it."""
+    result = 0
+    shift = 0
+    for i in range(_MAX_ULEB_BYTES):
+        if pos >= len(buf):
+            raise DecodeError("truncated", "unexpected end of input")
+        byte = buf[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            if i > 0 and byte == 0:
+                raise DecodeError("varint", "overlong uvarint encoding")
+            return result, pos
+        shift += 7
+    raise DecodeError("varint", f"uvarint longer than {_MAX_ULEB_BYTES} bytes")
+
+
+def read_ulebs(r: Reader, count: int) -> tuple[array, DecodeError | None]:
+    """Up to `count` uvarints, stopping at the first malformed one. Its error is
+    returned rather than raised, so a caller can report an earlier value first."""
+    buf = r.buf
+    pos = r.pos
+    window = buf[pos : pos + count]
+    if len(window) == count and window.isascii():
+        r.pos = pos + count
+        return array("B", window), None
+    out = array("Q")
+    append = out.append
+    end = len(buf)
+    for _ in range(count):
+        if pos < end and buf[pos] < 0x80:
+            append(buf[pos])
+            pos += 1
+            continue
+        try:
+            value, pos = uleb_at(buf, pos)
+        except DecodeError as err:
+            return out, err
+        append(value)
+    r.pos = pos
+    return out, None
+
+
 def uleb_len(value: int) -> int:
     length = 1
     while value > 0x7F:
@@ -147,6 +195,14 @@ def write_bitmap(out: bytearray, bits: list[bool]) -> None:
             if bit:
                 byte |= 1 << offset
         out.append(byte)
+
+
+def read_bits(r: Reader, count: int, path: str) -> int:
+    """A count-bit bitmap as one integer, bit i for row i."""
+    bits = int.from_bytes(r.take((count + 7) >> 3), "little")
+    if bits >> count:
+        raise DecodeError("bitmap", f"{path}: nonzero bitmap padding")
+    return bits
 
 
 def read_bitmap(r: Reader, count: int, path: str) -> list[bool]:
