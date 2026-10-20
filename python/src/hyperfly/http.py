@@ -9,15 +9,18 @@ unmatched codecs, or encoder limits that trigger JSON fallback.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import math
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Literal, NamedTuple, cast
+from typing import Any, Callable, Literal, NamedTuple, cast
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
-from ._wire import INT_MAX, DecodeError, EncodeError, HyperflyError
+from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError
 from .registry import CodecRegistry
 
 HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly"
@@ -40,6 +43,7 @@ _CLOSING_QUOTE = re.compile(r'(?<!\\)\\*"')
 _RANKS = {HYPERFLY_MEDIA_TYPE: 3, "application/*": 2, "*/*": 1}
 _QVALUE = re.compile(r"0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?")
 _JSON_SUFFIX = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+/[!#$%&'*+.^_`|~0-9a-z-]+\+json")
+_MODEL_JSON_ATTRIBUTE = "__hyperfly_http_json__"
 
 
 def parse_accept(header: str | None) -> list[str]:
@@ -188,6 +192,7 @@ def negotiate(
 
     Vary is always set: the same URL yields either representation, and a shared cache
     would otherwise hand one peer's binary to a peer that cannot read it.
+    offer=None advertises the first registered codec; offer="" suppresses the offer.
     """
     vary = {"Vary": _VARY}
 
@@ -204,44 +209,273 @@ def negotiate(
         )
 
     reason: FallbackReason = "accept-refused" if refused else "no-match" if accept else "no-hyperfly-accept"
-    chosen = offer or (registry.fingerprints[0] if registry.fingerprints else None)
+    chosen = offer if offer is not None else (registry.fingerprints[0] if registry.fingerprints else None)
     headers = {**vary, "Content-Type": "application/json"}
     if chosen:
         headers["Hyperfly-Offer"] = chosen
     return Negotiation("json", headers, reason=reason)
 
 
-def _json_key(key: Any) -> Any:
-    if isinstance(key, Enum):
-        key = key.value
-    if isinstance(key, float) and not math.isfinite(key):
-        return "NaN" if key != key else ("Infinity" if key > 0 else "-Infinity")
-    return key
+class _JSONModelMeta(type):
+    def __instancecheck__(cls, instance: Any) -> bool:
+        return hasattr(type(instance), "__pydantic_core_schema__")
+
+
+class _JSONModel(metaclass=_JSONModelMeta):
+    """Schema model marker without a prebuilt pydantic serializer."""
+
+
+class _ModelJSON(NamedTuple):
+    serializer: Any
+
+
+class _JSONSerializerError(Exception):
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+
+def _base64(value: bytes | bytearray) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _serialize_model_bytes(value: Any, handler: Callable[[Any], Any]) -> Any:
+    # Unvalidated values retain pydantic's JSON conversion, warnings and errors.
+    return _base64(value) if isinstance(value, (bytes, bytearray)) else handler(value)
+
+
+def _build_model_json(cls: type[Any]) -> _ModelJSON:
+    from pydantic_core import SchemaSerializer
+
+    schema = cls.__pydantic_core_schema__
+    definitions = {node["ref"]: node for node in schema.get("definitions", [])}
+    root_schema = schema
+    while root_schema["type"] in ("definitions", "definition-ref"):
+        root_schema = (
+            root_schema["schema"] if root_schema["type"] == "definitions"
+            else definitions[root_schema["schema_ref"]]
+        )
+    config = root_schema.get("config")
+    copies: dict[int, dict[str, Any]] = {}
+    originals: dict[int, dict[str, Any]] = {}
+    children: dict[int, list[int]] = {}
+    references: dict[str, dict[str, Any]] = {}
+    active: set[int] = set()
+
+    def visit(node: dict[str, Any]) -> dict[str, Any]:
+        identity = id(node)
+        if identity in copies:
+            return copies[identity]
+        copied = dict(node)
+        copies[identity] = copied
+        originals[identity] = node
+        children[identity] = []
+        kind = node["type"]
+        if node.get("serialization", {}).get("type") in ("function-plain", "function-wrap"):
+            # Custom serializers own their whole output. Keep their original
+            # subtree and config, including bytes passed through a wrap handler.
+            return copied
+
+        def child(item: dict[str, Any]) -> dict[str, Any]:
+            result = visit(item)
+            children[identity].append(id(item))
+            return result
+
+        if "ref" in node:
+            copied["ref"] = node["ref"] + ":hyperfly-http"
+            references[copied["ref"]] = copied
+        if kind == "bytes":
+            # Only declared bytes get a safe JSON serializer; Any and other
+            # containers retain their original serializer and configuration.
+            if "serialization" not in node:
+                copied["serialization"] = {
+                    "type": "function-wrap", "function": _serialize_model_bytes, "when_used": "json",
+                }
+                active.add(identity)
+        elif kind == "definition-ref":
+            copied["schema_ref"] = child(definitions[node["schema_ref"]])["ref"]
+        elif kind in ("definitions", "model", "nullable", "default", "function-before"):
+            copied["schema"] = child(node["schema"])
+            if kind == "model":
+                copied["cls"] = _JSONModel
+        elif kind == "model-fields":
+            copied["fields"] = {
+                name: item if item.get("serialization_exclude") else {**item, "schema": child(item["schema"])}
+                for name, item in node["fields"].items()
+            }
+        elif kind == "list":
+            copied["items_schema"] = child(node["items_schema"])
+        elif kind in ("tuple", "tuple-positional", "tuple-variable"):
+            items = node.get("items_schema", [])
+            copied["items_schema"] = child(items) if isinstance(items, dict) else [child(item) for item in items]
+            if node.get("extras_schema") is not None:
+                copied["extras_schema"] = child(node["extras_schema"])
+        return copied
+
+    copied = visit(schema)
+    # Only ancestors of a bytes serializer need runtime shape guards. Resolve
+    # recursive references to a fixed point and keep bytes-free models unchanged.
+    while True:
+        previous = len(active)
+        for identity, descendants in children.items():
+            if any(item in active for item in descendants):
+                active.add(identity)
+        if len(active) == previous:
+            break
+    if id(schema) not in active:
+        return _ModelJSON(None)
+
+    def guard(original: dict[str, Any], copied: dict[str, Any]) -> None:
+        kind = original["type"]
+        expected = original["cls"] if kind == "model" else list if kind == "list" else tuple
+        serializer: Any = None
+
+        def convert(value: Any, handler: Callable[[Any], Any], info: Any) -> Any:
+            nonlocal serializer
+            if isinstance(value, expected):
+                return handler(value)
+            # A mismatched subtree belongs to pydantic's original serializer,
+            # including its bytes config, exclusions and serialization errors.
+            if serializer is None:
+                serializer = SchemaSerializer({
+                    "type": "definitions", "schema": original, "definitions": list(definitions.values()),
+                }, config)
+            options = {"context": info.context} if hasattr(info, "context") else {}
+            return serializer.to_python(
+                value, mode=info.mode, by_alias=info.by_alias, include=info.include, exclude=info.exclude,
+                exclude_unset=info.exclude_unset, exclude_defaults=info.exclude_defaults,
+                exclude_none=info.exclude_none, round_trip=info.round_trip, **options,
+            )
+
+        def serialize(value: Any, handler: Callable[[Any], Any], info: Any) -> Any:
+            try:
+                return convert(value, handler, info)
+            except Exception as error:
+                # Preserve errors that pydantic would otherwise wrap merely
+                # because they cross our private serializer function boundary.
+                raise _JSONSerializerError(error) from error
+
+        copied["serialization"] = {
+            "type": "function-wrap", "function": serialize, "info_arg": True, "when_used": "json",
+        }
+
+    for identity in active:
+        if (
+            originals[identity]["type"] in ("model", "list", "tuple", "tuple-positional", "tuple-variable")
+            and "serialization" not in originals[identity]
+        ):
+            guard(originals[identity], copies[identity])
+    # Keep the original definitions for paths outside the declared bytes subtrees.
+    safe_schema = {
+        "type": "definitions", "schema": copied,
+        "definitions": list(definitions.values()) + list(references.values()),
+    }
+    if copied["type"] == "definitions":
+        safe_schema["schema"] = copied["schema"]
+    return _ModelJSON(SchemaSerializer(safe_schema, config))
+
+
+def _model_json(cls: type[Any]) -> _ModelJSON:
+    cached = cls.__dict__.get(_MODEL_JSON_ATTRIBUTE)
+    if cached is None:
+        cached = _build_model_json(cls)
+        # The class owns its complete entry: serializer references to the class
+        # form a collectible cycle, without a global cache keeping it alive.
+        setattr(cls, _MODEL_JSON_ATTRIBUTE, cached)
+    return cast(_ModelJSON, cached)
 
 
 def _json_value(value: Any) -> Any:
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
-        value = model_dump(mode="json", by_alias=True)
-    if isinstance(value, Enum):
-        value = value.value
+        if hasattr(type(value), "__pydantic_core_schema__"):
+            from copy import copy
+
+            cached = _model_json(type(value))
+            if cached.serializer is not None:
+                # An instance copy preserves model_dump overrides and exclusions
+                # while using a private serializer, without mutating the model.
+                shadow = copy(value)
+                object.__setattr__(shadow, "__pydantic_serializer__", cached.serializer)
+                try:
+                    return shadow.model_dump(mode="json", by_alias=True)
+                except Exception as error:
+                    while isinstance(error.__cause__, _JSONSerializerError):
+                        error = error.__cause__.error
+                    raise error
+        return model_dump(mode="json", by_alias=True)
+    if isinstance(value, (bytes, bytearray)):
+        return _base64(value)
+    if isinstance(value, (dict, list, tuple)):
+        return _json_container(value)
+    from pydantic_core import to_jsonable_python
+
+    return to_jsonable_python(value)
+
+
+def _json_container(value: Any) -> Any:
+    root: list[Any] = []
+    active: set[int] = set()
+    stack: list[tuple[Iterator[tuple[Any, Any]], Any, int | None]] = [(iter(((0, value),)), root, None)]
+    while stack:
+        children, parent, identity = stack[-1]
+        try:
+            key, item = next(children)
+        except StopIteration:
+            stack.pop()
+            if identity is not None:
+                active.remove(identity)
+            continue
+        if isinstance(item, (dict, list, tuple)) and not callable(getattr(item, "model_dump", None)):
+            if id(item) in active:
+                raise ValueError("Circular reference detected")
+            active.add(id(item))
+            converted: Any = {} if isinstance(item, dict) else []
+            entries = iter(item.items()) if isinstance(item, dict) else iter(enumerate(item))
+            stack.append((entries, converted, id(item)))
+        else:
+            converted = _json_value(item)
+        if isinstance(parent, dict):
+            # Native keys keep json.dumps spelling; other supported keys use
+            # pydantic's conversion without changing bytes values.
+            if isinstance(key, Enum):
+                key = key.value
+            if isinstance(key, float) and not math.isfinite(key):
+                key = "NaN" if key != key else ("Infinity" if key > 0 else "-Infinity")
+            if isinstance(key, (bytes, bytearray)):
+                from pydantic_core import to_jsonable_python
+
+                key = to_jsonable_python(key)
+            parent[key] = converted
+        else:
+            parent.append(converted)
+    return root[0]
+
+
+def _finite_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _finite_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite_json(item) for item in value]
     if isinstance(value, float) and not math.isfinite(value):
         return None
-    if isinstance(value, dict):
-        return {_json_key(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
     return value
 
 
 def _json_body(value: Any) -> bytes:
     try:
-        plain = _json_value(value)
-    except RecursionError:
-        raise ValueError("JSON fallback value is circular or nested too deeply") from None
-    text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
-    return text.encode("utf-8", "backslashreplace")
+        plain = _finite_json(_json_value(value))
+        text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
+        return text.encode("utf-8", "backslashreplace")
+    except EncodeError:
+        raise
+    except Exception as error:
+        if (
+            isinstance(error, RecursionError)
+            or (isinstance(error, ValueError) and str(error).startswith("Circular reference detected"))
+        ):
+            raise EncodeError("json", "JSON fallback value is circular or nested too deeply") from error
+        raise EncodeError("json", f"JSON fallback serialization failed: {error}") from error
 
 
 def encode_for(
@@ -254,6 +488,11 @@ def encode_for(
 
     A value the codec refuses under its limits is answered in JSON, never an error
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
+    In JSON fallback, plain dicts, lists and tuples write bytes as standard padded
+    base64. Pydantic models write base64 at declared bytes positions
+    outside custom serializers, and follow JSON mode elsewhere, including Any
+    and extras. Dict keys keep their JSON spelling.
+    Serialization failures raise EncodeError with code ``json``.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:
         try:
@@ -348,15 +587,143 @@ def _loads(body: bytes | str) -> Any:
         raise DecodeError("json", f"malformed JSON body: {error}") from error
 
 
+@dataclass(slots=True)
+class _JsonPath:
+    parent: _JsonPath | None
+    key: str | int | None
+
+
+def _json_path(parent: _JsonPath | None, key: str | int | None) -> str:
+    parts = []
+    while True:
+        if key is not None:
+            parts.append(f"[{key}]" if isinstance(key, int) else f".{key}")
+        if parent is None:
+            break
+        key, parent = parent.key, parent.parent
+    return "$" + "".join(reversed(parts))
+
+
+def _array_children(node: dict[str, Any], items: list[Any]) -> Iterator[tuple[dict[str, Any], Any, str | int | None]]:
+    for index in range(len(items)):
+        yield node, items, index
+
+
+def _struct_children(node: dict[str, Any], items: dict[str, Any]) -> Iterator[tuple[dict[str, Any], Any, str | int | None]]:
+    for field in node["fields"]:
+        name = field["name"]
+        if name in items and not (field.get("nullable") and items[name] is None):
+            yield field["type"], items, name
+
+
+def _convert_json(value: Any, registry: CodecRegistry) -> Any:
+    fingerprints = registry.fingerprints
+    codec = registry.get(fingerprints[0]) if fingerprints else None
+    if codec is None:
+        return value
+    root = {None: value}
+    stack: list[tuple[Iterator[tuple[dict[str, Any], Any, str | int | None]], _JsonPath | None]] = [
+        (iter(((codec._ir, root, None),)), None),
+    ]
+    enums: dict[int, frozenset[str]] = {}
+    while stack:
+        children, path = stack[-1]
+        try:
+            node, parent, key = next(children)
+        except StopIteration:
+            stack.pop()
+            continue
+        item = parent[key]
+        kind = node["kind"]
+        while kind == "nullable" and item is not None:
+            node = node["inner"]
+            kind = node["kind"]
+        if kind == "bool":
+            if type(item) is not bool:
+                raise DecodeError("json", f"{_json_path(path, key)}: expected boolean")
+        elif kind == "int" or (kind == "literal" and type(node["value"]) in (int, float)):
+            if (type(item) not in (int, float) or not INT_MIN <= item <= INT_MAX
+                    or (type(item) is float and not item.is_integer())):
+                raise DecodeError("json", f"{_json_path(path, key)}: expected integral number in the safe integer domain")
+            integer = int(item)
+            if kind == "literal":
+                if integer != node["value"]:
+                    raise DecodeError("json", f"{_json_path(path, key)}: literal mismatch")
+            else:
+                lo, hi = node.get("min"), node.get("max")
+                if (lo is not None and integer < lo) or (hi is not None and integer > hi):
+                    raise DecodeError("json", f"{_json_path(path, key)}: integer outside declared bounds")
+            parent[key] = integer
+        elif kind == "float64":
+            if type(item) not in (int, float):
+                raise DecodeError("json", f"{_json_path(path, key)}: expected number")
+            try:
+                number = float(item)
+            except OverflowError as error:
+                raise DecodeError("json", f"{_json_path(path, key)}: expected finite float64") from error
+            if not math.isfinite(number):
+                raise DecodeError("json", f"{_json_path(path, key)}: expected finite float64")
+            parent[key] = number
+        elif kind in ("string", "enum"):
+            if type(item) is not str:
+                raise DecodeError("json", f"{_json_path(path, key)}: expected string")
+            if kind == "enum":
+                members = enums.get(id(node))
+                if members is None:
+                    members = enums[id(node)] = frozenset(node["members"])
+                if item not in members:
+                    raise DecodeError("json", f"{_json_path(path, key)}: unknown enum member")
+        elif kind == "literal":
+            literal = node["value"]
+            if type(item) is not type(literal) or item != literal:
+                raise DecodeError("json", f"{_json_path(path, key)}: literal mismatch")
+        elif kind == "bytes":
+            if not isinstance(item, str):
+                raise DecodeError("json", f"{_json_path(path, key)}: expected a base64 string")
+            try:
+                decoded = base64.b64decode(item, validate=True)
+                if base64.b64encode(decoded).decode("ascii") != item:
+                    raise ValueError("expected canonical padded base64")
+            except (ValueError, binascii.Error) as error:
+                raise DecodeError("json", f"{_json_path(path, key)}: expected canonical padded base64") from error
+            parent[key] = decoded
+        elif kind == "array":
+            if not isinstance(item, list):
+                raise DecodeError("json", f"{_json_path(path, key)}: expected array")
+            if "length" in node and len(item) != node["length"]:
+                raise DecodeError("json", f"{_json_path(path, key)}: array length does not match declared length")
+            stack.append((_array_children(node["element"], item), _JsonPath(path, key)))
+        elif kind == "struct":
+            if not isinstance(item, dict):
+                raise DecodeError("json", f"{_json_path(path, key)}: expected object")
+            converted: dict[str, Any] = {}
+            parent[key] = converted
+            for field in reversed(node["fields"]):
+                name = field["name"]
+                if name not in item:
+                    if not field.get("optional"):
+                        raise DecodeError("json", f"{_json_path(path, key)}.{name}: missing required field")
+                    continue
+                converted[name] = item[name]
+            stack.append((_struct_children(node, converted), _JsonPath(path, key)))
+    return root[None]
+
+
 def decode_response(content_type: str | None, body: bytes | str, registry: CodecRegistry) -> tuple[str, Any]:
     """Returns (kind, value) where kind is 'json', 'hyperfly', or 'unknown-codec'.
 
     A codec the client does not hold is not something it can recover from by guessing,
-    so it is reported rather than attempted. Malformed JSON raises code ``json``;
-    malformed binary raises the codec's decode errors.
+    so it is reported rather than attempted. Invalid UTF-8 or malformed JSON raises
+    code ``json``; malformed binary raises the codec's decode errors.
+    JSON is converted and checked against the first registered codec's schema:
+    canonical padded base64 becomes bytes, integral numbers become ints, and
+    unknown struct keys are dropped. Conversion failures raise ``json`` with the
+    failing path. Results stay plain even for a validating model codec; an empty
+    registry leaves parsed JSON unchanged. Conversion walks the schema iteratively.
     """
     if _essence(content_type) != HYPERFLY_MEDIA_TYPE:
-        return "json", _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
+        value = _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
+        return "json", _convert_json(value, registry)
     data = _utf8(body) if isinstance(body, str) else bytes(body)
     fingerprint = _envelope_fingerprint(data)
     codec = registry.get(fingerprint)
@@ -416,8 +783,10 @@ def read_body(
     """Read a request body, refusing it with 413 as soon as it passes max_bytes.
 
     Bytes are counted as chunks arrive, so no chunk past the one that crosses the
-    bound is pulled; Content-Length only rejects early. A chunk source that fails is
-    a 400. Invalid max_bytes raises code ``options``.
+    bound is pulled. Content-Length rejects before reading only when its ASCII
+    digits, trimmed of SP/HTAB, exceed the bound; leading zeros are harmless and
+    every other spelling is ignored. A chunk source that fails is a 400. Invalid
+    max_bytes raises code ``options``.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     if content_length is not None and _exceeds(content_length, max_bytes):
@@ -498,6 +867,13 @@ def decode_request(
     a Hyperfly-Codec header that contradicts it, 415 with Hyperfly-Offer for an
     unknown fingerprint, 400 for a body that fails to decode. Invalid max_bytes
     raises HyperflyError with code ``options``.
+    JSON is converted and checked iteratively against the first registered codec's
+    schema: canonical padded base64 becomes bytes, integral numbers become ints,
+    and unknown struct keys are dropped. Conversion failures raise 400 with reason
+    malformed-json and a path-bearing DecodeError cause. Results stay plain even
+    for a validating model codec; an empty registry leaves parsed JSON unchanged.
+    A valid Content-Length above max_bytes rejects before reading; other values
+    are ignored after trimming SP/HTAB and checking for ASCII digits.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     essence = _essence(content_type)
@@ -507,7 +883,7 @@ def decode_request(
     data = read_body(body, max_bytes=max_bytes, content_length=content_length)
     if not hyperfly:
         try:
-            return DecodedRequest("json", _loads(data))
+            return DecodedRequest("json", _convert_json(_loads(data), registry))
         except DecodeError as error:
             raise RequestError(400, "malformed-json") from error
     try:

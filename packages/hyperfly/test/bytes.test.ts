@@ -3,6 +3,7 @@ import vectors from "../../../spec/vectors/bytes.json" with { type: "json" };
 import { compileIR, DEFAULT_LIMITS, type Limits, type IRNode, type Profile } from "../src/index.js";
 import { toHex } from "../src/canonical.js";
 import { HyperflyError } from "../src/errors.js";
+import { fromHex, revive } from "./vector-values.js";
 
 interface ByteVector {
   name: string;
@@ -14,21 +15,6 @@ interface ByteVector {
   value?: unknown;
   hex?: string;
   error?: string;
-}
-
-function fromHex(hex: string): Uint8Array {
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
-}
-
-function revive(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(revive);
-  if (value && typeof value === "object") {
-    if ("$bytes" in value) return fromHex((value as { $bytes: string }).$bytes);
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, revive(v)]));
-  }
-  return value;
 }
 
 function codecFor(v: ByteVector) {
