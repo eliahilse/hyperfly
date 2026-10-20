@@ -46,7 +46,8 @@ def test_compile_json(ir, profile, plan):
     for candidate_profile in (None, profile):
         try:
             codec = compile_ir(ir, plan=plan, profile=candidate_profile)
-        except HyperflyError:
+        except HyperflyError as e:
+            assert e.code == "ir"
             continue
         assert isinstance(codec, Codec)
 
@@ -74,7 +75,8 @@ PROFILE_LIKE = st.fixed_dictionaries(
 def test_profile_json(profile):
     try:
         codec = compile_ir(PROFILE_IR, plan="columnar", profile=profile)
-    except HyperflyError:
+    except HyperflyError as e:
+        assert e.code == "ir"
         return
     assert isinstance(codec, Codec)
 

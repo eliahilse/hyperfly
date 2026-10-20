@@ -40,7 +40,7 @@ def _check_field_name(name: str, path: str) -> None:
 
 
 def validate_ir(node: Any, path: str = "$") -> None:
-    if type(node) is not dict:
+    if not isinstance(node, dict):
         _fail(path, "IR node must be an object")
     kind = node.get("kind")
     if type(kind) is not str:
@@ -67,7 +67,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
         return
     if kind == "enum":
         members = node.get("members")
-        if type(members) is not list:
+        if not isinstance(members, (list, tuple)):
             _fail(path, "enum members must be an array")
         if not members:
             _fail(path, "enum needs at least one member")
@@ -84,7 +84,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
         return
     if kind == "nullable":
         inner = node.get("inner")
-        if type(inner) is not dict:
+        if not isinstance(inner, dict):
             _fail(path, "nullable inner must be an IR object")
         if inner.get("kind") == "nullable":
             _fail(path, "nullable(nullable) is invalid")
@@ -100,11 +100,11 @@ def validate_ir(node: Any, path: str = "$") -> None:
         return
     if kind == "struct":
         fields = node.get("fields")
-        if type(fields) is not list:
+        if not isinstance(fields, (list, tuple)):
             _fail(path, "struct fields must be an array")
         seen = set()
         for f in fields:
-            if type(f) is not dict:
+            if not isinstance(f, dict):
                 _fail(path, "struct fields must be objects")
             name = f.get("name")
             if type(name) is not str or not name:
@@ -119,7 +119,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
                 if flag in f and type(f[flag]) is not bool:
                     _fail(field_path, f"{flag} flag must be a boolean")
             field_type = f.get("type")
-            if type(field_type) is not dict:
+            if not isinstance(field_type, dict):
                 _fail(field_path, "field type must be an IR object")
             if f.get("nullable") and field_type.get("kind") == "nullable":
                 _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
