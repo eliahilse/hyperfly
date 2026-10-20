@@ -2,7 +2,7 @@ import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./cano
 import { defaultPackHooks } from "./pack.js";
 import { indexProfile, validateProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
-import { checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
+import { checkByteBudget, checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
 import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
@@ -88,7 +88,10 @@ export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = 
       maxByteLength: limits.maxByteLength,
       maxAmplification: limits.maxAmplification,
       maxTotalItems: limits.maxTotalItems,
+      maxTotalBytes: limits.maxTotalBytes,
+      maxByteAmplification: limits.maxByteAmplification,
       items: 0,
+      bytes: 0,
       columnar,
       deflate: pack.deflate,
       canInflate: pack.inflate !== undefined,
@@ -97,6 +100,7 @@ export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = 
     encodeNode(w, ir, value, "$", 0, ctx);
     const body = w.finish();
     checkItemBudget(ctx, body.length);
+    checkByteBudget(ctx, body.length);
     return body;
   };
 
