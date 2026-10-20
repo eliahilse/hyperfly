@@ -140,8 +140,10 @@ identically everywhere. Field names, enum members, and string literals MUST
 also be well-formed Unicode: a lone surrogate has no portable representation
 and MUST be rejected at IR validation.
 
-**Closed objects.** IR and profile objects MUST NOT carry keys this
-specification does not define for their kind; such IR is invalid.
+**Closed objects.** IR nodes and fields MUST NOT carry keys this
+specification does not define for their kind, and profile objects MUST NOT
+carry keys the columnar plan's profile document (plan-columnar-v5 §6.2) does
+not define; such IR or profile is invalid.
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one

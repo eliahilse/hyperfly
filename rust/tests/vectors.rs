@@ -183,15 +183,15 @@ fn compile(ir: &Json, plan: Plan) -> Codec {
 /// Loader failures are invalid IR; anything the loader accepts must also pass the crate.
 fn compile_ir_vector(v: &Json) -> Result<Codec, ErrorCode> {
     let node = node_of(&v["ir"]).map_err(|_| ErrorCode::Ir)?;
-    let compiled = match v.get("profile").filter(|profile| !profile.is_null()) {
+    let compiled = match v.get("profile") {
         None => Codec::compile(node, Plan::Row, Limits::default(), false),
-        Some(profile) => Codec::compile_with_profile(
-            node,
-            Plan::Columnar,
-            Limits::default(),
-            false,
-            Some(profile_of(profile).map_err(|_| ErrorCode::Ir)?),
-        ),
+        Some(profile) => {
+            let profile = match profile {
+                Json::Null => None,
+                profile => Some(profile_of(profile).map_err(|_| ErrorCode::Ir)?),
+            };
+            Codec::compile_with_profile(node, Plan::Columnar, Limits::default(), false, profile)
+        }
     };
     compiled.map_err(|error| error.code)
 }
