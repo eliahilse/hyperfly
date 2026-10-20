@@ -186,14 +186,6 @@
       "error": "ir"
     },
     {
-      "name": "literal-negative-zero",
-      "ir": {
-        "kind": "literal",
-        "value": -0.0
-      },
-      "error": "ir"
-    },
-    {
       "name": "enum-empty",
       "ir": {
         "kind": "enum",
@@ -602,6 +594,112 @@
         ]
       },
       "error": "ir"
+    },
+    {
+      "name": "int-max-above-domain-float",
+      "ir": {
+        "kind": "int",
+        "max": 9007199254740992.0
+      },
+      "error": "ir"
+    },
+    {
+      "name": "node-unknown-key",
+      "ir": {
+        "kind": "bool",
+        "extra": 1
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-unknown-key",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            },
+            "extra": 1
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "nested-unknown-key",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool",
+          "extra": 1
+        }
+      },
+      "error": "ir"
+    },
+    {
+      "name": "profile-column-unknown-key",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "x"
+              ],
+              "extra": 1
+            }
+          ]
+        }
+      },
+      "error": "ir"
+    },
+    {
+      "name": "profile-leaf-fractional",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "id",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0.5,
+              "dict": [
+                "x"
+              ]
+            }
+          ]
+        }
+      },
+      "error": "ir"
     }
   ],
   "valid": [
@@ -695,6 +793,117 @@
             "nullable": false
           }
         ]
+      }
+    },
+    {
+      "name": "array-length-integral-float",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        },
+        "length": 1.0
+      }
+    },
+    {
+      "name": "int-min-negative-zero",
+      "ir": {
+        "kind": "int",
+        "min": -0.0
+      }
+    },
+    {
+      "name": "literal-negative-zero",
+      "ir": {
+        "kind": "literal",
+        "value": -0.0
+      }
+    },
+    {
+      "name": "literal-negative-zero-integer",
+      "ir": {
+        "kind": "literal",
+        "value": -0
+      }
+    },
+    {
+      "name": "every-optional-key",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "array",
+              "element": {
+                "kind": "int",
+                "min": 0,
+                "max": 9
+              },
+              "length": 2
+            },
+            "optional": true,
+            "nullable": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "profile-integral-floats",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "profile": {
+        "version": 2.0,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0.0,
+              "dict": [
+                "u"
+              ],
+              "grammar": [
+                {
+                  "lit": "id_"
+                },
+                {
+                  "num": {
+                    "base": 10.0,
+                    "len": 2.0,
+                    "case": "lower"
+                  }
+                }
+              ]
+            },
+            {
+              "leaf": 1.0,
+              "derived": {
+                "source": -0.0,
+                "values": [
+                  "v"
+                ]
+              }
+            }
+          ]
+        },
+        "hints": {}
       }
     }
   ]

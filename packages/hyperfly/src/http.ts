@@ -1,6 +1,7 @@
-import { compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
+import { checkedOptions, compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
 import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
 import type { IRNode } from "./ir.js";
+import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
 import type { DecodeLimits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
@@ -169,8 +170,6 @@ function checkedFingerprint(fingerprint: string): string {
   return fingerprint.toLowerCase();
 }
 
-const MAX_ARTIFACT_NESTING = 512;
-
 function checkNesting(value: unknown): void {
   const stack: [unknown, number][] = [[value, 1]];
   while (stack.length > 0) {
@@ -206,7 +205,7 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    if (error instanceof SyntaxError) throw new HyperflyError("ir", `artifact is not JSON: ${error.message}`);
+    if (error instanceof SyntaxError) throw new HyperflyError("json", `artifact is not JSON: ${error.message}`, { cause: error });
     throw error;
   }
   checkNesting(parsed);
@@ -224,9 +223,10 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
       && shared.columns.some((column) => column && (column.grammar || column.derived)) ? 2 : 1;
     profile = { version, shared: shared as SharedProfile };
   }
+  const { limits, pack } = checkedOptions(options);
   let codec: Codec<T>;
   try {
-    codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits: options.limits, pack: options.pack });
+    codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits, pack });
   } catch (error) {
     if (error instanceof HyperflyError) throw error;
     throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);
@@ -357,7 +357,12 @@ export function decodeResponse<T>(
 ): { kind: "json"; value: T } | { kind: "hyperfly"; value: T } | { kind: "unknown-codec"; fingerprint: string } {
   if (mediaType(contentType) !== HYPERFLY_MEDIA_TYPE) {
     const text = typeof body === "string" ? body : new TextDecoder().decode(body);
-    return { kind: "json", value: JSON.parse(text) as T };
+    try {
+      return { kind: "json", value: JSON.parse(text) as T };
+    } catch (cause) {
+      if (cause instanceof SyntaxError) throw new DecodeError("json", `$: ${cause.message}`, { cause });
+      throw cause;
+    }
   }
   const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
   const fingerprint = peekFingerprint(bytes);
