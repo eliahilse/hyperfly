@@ -166,11 +166,10 @@ def _refuses_binary(accept: str | None) -> bool:
 
 
 def negotiate(
-    hyperfly_accept: str | None,
-    /,
+    accept: str | None,
     registry: CodecRegistry,
     *,
-    accept: str | None = None,
+    http_accept: str | None = None,
     offer: str | None = None,
     enabled: bool = True,
 ) -> Negotiation:
@@ -184,8 +183,8 @@ def negotiate(
     if not enabled:
         return Negotiation("json", {**vary, "Content-Type": "application/json"}, reason="disabled")
 
-    refused = _refuses_binary(accept)
-    codec = None if refused else registry.select(parse_accept(hyperfly_accept))
+    refused = _refuses_binary(http_accept)
+    codec = None if refused else registry.select(parse_accept(accept))
     if codec is not None:
         return Negotiation(
             "hyperfly",
@@ -193,7 +192,7 @@ def negotiate(
             codec,
         )
 
-    reason: FallbackReason = "accept-refused" if refused else "no-match" if hyperfly_accept else "no-hyperfly-accept"
+    reason: FallbackReason = "accept-refused" if refused else "no-match" if accept else "no-hyperfly-accept"
     chosen = offer or (registry.fingerprints[0] if registry.fingerprints else None)
     headers = {**vary, "Content-Type": "application/json"}
     if chosen:

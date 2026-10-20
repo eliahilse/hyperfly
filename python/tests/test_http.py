@@ -399,7 +399,7 @@ NOT_OPT_OUTS = [
 @pytest.mark.parametrize("accept", OPT_OUTS)
 def test_accept_opts_out_of_binary(accept):
     registry = CodecRegistry([CODEC_A])
-    assert negotiate(CODEC_A.fingerprint, registry, accept=accept) == negotiate(None, registry).__class__(
+    assert negotiate(CODEC_A.fingerprint, registry, http_accept=accept) == negotiate(None, registry).__class__(
         "json",
         {"Vary": "Hyperfly-Accept, Accept", "Content-Type": "application/json", "Hyperfly-Offer": CODEC_A.fingerprint},
         reason="accept-refused",
@@ -409,28 +409,28 @@ def test_accept_opts_out_of_binary(accept):
 @pytest.mark.parametrize("accept", NOT_OPT_OUTS)
 def test_accept_does_not_opt_out(accept):
     registry = CodecRegistry([CODEC_A])
-    decision = negotiate(CODEC_A.fingerprint, registry, accept=accept)
+    decision = negotiate(CODEC_A.fingerprint, registry, http_accept=accept)
     assert decision.kind == "hyperfly"
     assert decision.reason is None
 
 
 def test_accept_opt_out_preserves_the_configured_offer():
     registry = CodecRegistry([CODEC_A])
-    decision = negotiate(CODEC_A.fingerprint, registry, accept="application/vnd.hyperfly;q=0", offer=CODEC_B.fingerprint)
+    decision = negotiate(CODEC_A.fingerprint, registry, http_accept="application/vnd.hyperfly;q=0", offer=CODEC_B.fingerprint)
     assert decision.headers["Hyperfly-Offer"] == CODEC_B.fingerprint
 
 
 def test_accept_without_hyperfly_accept_stays_json():
     registry = CodecRegistry([CODEC_A])
-    assert negotiate(None, registry, accept="application/vnd.hyperfly").kind == "json"
-    assert negotiate(None, registry, accept="application/json").reason == "no-hyperfly-accept"
+    assert negotiate(None, registry, http_accept="application/vnd.hyperfly").kind == "json"
+    assert negotiate(None, registry, http_accept="application/json").reason == "no-hyperfly-accept"
 
 
 def test_fallback_reasons():
     registry = CodecRegistry([CODEC_A])
     hit = accept_header([CODEC_A.fingerprint])
     assert negotiate(hit, registry, enabled=False).reason == "disabled"
-    assert negotiate(hit, registry, accept="*/*;q=0").reason == "accept-refused"
+    assert negotiate(hit, registry, http_accept="*/*;q=0").reason == "accept-refused"
     assert negotiate(None, registry).reason == "no-hyperfly-accept"
     assert negotiate("", registry).reason == "no-hyperfly-accept"
     assert negotiate("f" * 32, registry).reason == "no-match"
@@ -446,7 +446,7 @@ def test_every_decision_varies_on_both_headers():
         negotiate(None, registry),
         negotiate("f" * 32, registry),
         negotiate(hit, registry, enabled=False),
-        negotiate(hit, registry, accept="application/vnd.hyperfly;q=0"),
+        negotiate(hit, registry, http_accept="application/vnd.hyperfly;q=0"),
     ):
         assert decision.headers["Vary"] == "Hyperfly-Accept, Accept"
 
@@ -492,7 +492,7 @@ HOSTILE_ACCEPTS = [
 @pytest.mark.parametrize("accept", HOSTILE_ACCEPTS, ids=range(len(HOSTILE_ACCEPTS)))
 def test_hostile_accept_headers_are_bounded(accept):
     registry = CodecRegistry([CODEC_A])
-    decision = _assert_bounded(lambda: negotiate(CODEC_A.fingerprint, registry, accept=accept))
+    decision = _assert_bounded(lambda: negotiate(CODEC_A.fingerprint, registry, http_accept=accept))
     assert decision.kind in ("json", "hyperfly")
 
 

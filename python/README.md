@@ -82,7 +82,7 @@ registry = CodecRegistry([codec, previous_codec])
 decision = negotiate(
     request.headers.get("hyperfly-accept"),
     registry,
-    accept=request.headers.get("accept"),
+    http_accept=request.headers.get("accept"),
 )
 body, headers = encode_for(decision, payload, on_fallback=lambda reason, error: log.warning("%s: %s", reason, error))
 ```
