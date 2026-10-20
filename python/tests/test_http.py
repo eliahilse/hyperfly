@@ -177,6 +177,13 @@ def test_json_fallback_writes_enum_values_and_keys():
     assert body == b'{"color":"red","levels":[3,0.5],"red":1,"3":2,"Infinity":3}'
 
 
+def test_json_fallback_rejects_circular_values():
+    circular: list = []
+    circular.append(circular)
+    with pytest.raises(ValueError):
+        encode_for(negotiate(None, CodecRegistry()), circular)
+
+
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
 def test_json_fallback_replaces_root_non_finite_values(value):
     body, _ = encode_for(negotiate(None, CodecRegistry()), value)

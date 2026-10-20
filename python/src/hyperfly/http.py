@@ -103,7 +103,11 @@ def _json_value(value: Any) -> Any:
 def encode_for(decision: Negotiation, value: Any) -> tuple[bytes, dict[str, str]]:
     if decision.kind == "hyperfly" and decision.codec is not None:
         return decision.codec.encode(value), decision.headers
-    text = json.dumps(_json_value(value), separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    try:
+        plain = _json_value(value)
+    except RecursionError:
+        raise ValueError("JSON fallback value is circular or nested too deeply") from None
+    text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
     return text.encode("utf-8", "backslashreplace"), decision.headers
 
