@@ -170,7 +170,8 @@ or has a field that is not an integer from 0 to 2^53 - 1; a `plan` other than `"
 or `"columnar"`; a `pack` other than `None`, `False` or a mapping whose `deflate` and
 `inflate` are each a callable, `None` or absent; a `validate` other than `True` or
 `False`; or an option that raises when read (the error is its `__cause__`). Each
-option is read once.
+option is read once. `read_body` and `decode_request` raise it for a `max_bytes` that
+is not an integer from 0 to 2^53 - 1, before reading the body.
 
 `RequestError` is separate: it is not a `HyperflyError` and has no `code`. It is how
 `read_body` and `decode_request` refuse a request, carrying `status` (400, 413 or
