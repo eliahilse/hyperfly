@@ -2,9 +2,16 @@
 name = "hyperfly-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 license = "Apache-2.0"
-description = "Rust core for the hyperfly wire format"
+description = "Rust codec for the hyperfly wire format: schema-compiled binary encoding for typed APIs"
+homepage = "https://hyperfly.dev"
 repository = "https://github.com/eliahilse/hyperfly"
+documentation = "https://docs.rs/hyperfly-core"
+readme = "README.md"
+keywords = ["serialization", "binary", "codec", "columnar", "compression"]
+categories = ["encoding", "compression"]
+include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE", "NOTICE"]
 
 [dependencies]
 sha2 = "0.10"

@@ -35,6 +35,9 @@ compile(z.object({ meta: z.record(z.string(), z.unknown()) }));
 // UnsupportedSchemaError: $.meta: record has no v0 encoding
 ```
 
+Zod refinements and string/array length constraints are not part of the codec;
+they are checked only when compiled with `validate: true`.
+
 ## Columns and profiles
 
 Arrays of records encode far better column-wise, which is a different plan for the
@@ -55,6 +58,7 @@ compressor can see, because it only ever holds one response.
 
 ```ts
 import { train } from "hyperfly";
+import { compile, toIR } from "hyperfly/zod";
 
 const profile = train(toIR(EventResponse), lastWeeksResponses);
 const codec = compile(EventResponse, { plan: "columnar", profile });
@@ -101,26 +105,26 @@ and return a decision.
 
 Bytes per message, averaged over 500-message corpora, from `apps/bench` in the repo:
 
-| route | JSON | JSON+Brotli | Protobuf | Hyperfly | + Brotli | Profiled |
-|---|---|---|---|---|---|---|
-| audit events | 12,687 | 2,512 | 7,190 | 2,013 | 1,974 | **574** |
-| device telemetry | 7,994 | 1,422 | 2,007 | 755 | 725 | **542** |
-| social feed | 6,863 | 2,294 | 4,396 | 1,871 | 1,868 | **1,466** |
-| single order | 782 | 408 | 388 | 271 | 273 | **180** |
-| OHLCV candles | 3,225 | 842 | 2,034 | 384 | **362** | 384 |
+| route | JSON | JSON+Brotli | Protobuf | Hyperfly | Profiled |
+|---|---|---|---|---|---|
+| audit events | 12,687 | 2,512 | 7,190 | 2,013 | **574** |
+| device telemetry | 7,994 | 1,422 | 2,007 | 755 | **542** |
+| social feed | 6,863 | 2,294 | 4,396 | 1,871 | **1,466** |
+| single order | 782 | 408 | 388 | 271 | **180** |
+| OHLCV candles | 3,225 | 842 | 2,034 | **384** | **384** |
 
 Read the spread, not the best row. Profiles are worth 71% on audit logs, where the
 same actors recur on every request and the ids share one machine-made shape, and
-nothing at all on candles, whose only string sits outside the array. On the
-profiled stream, Brotli now loses bytes on four of five routes. The corpora are synthetic — shaped like real routes,
-but not captured from one — and no production traffic has been measured yet.
+nothing at all on candles, whose only string sits outside the array. The corpora
+are synthetic, shaped like real routes but not captured from one, and no
+production traffic has been measured yet.
 
 ## Guarantees
 
 - **Exact-schema compatibility.** Any change to the schema or plan is a new
   fingerprint. A mismatch fails before the body is parsed; it never misreads.
-- **Canonical output.** Decode then re-encode returns identical bytes, so a
-  response is reproducible.
+- **Canonical output.** Encoding is canonical for a given implementation and version;
+  re-encoding a decoded value reproduces the bytes that implementation emits.
 - **Bounded decoding.** Nesting, item counts and byte lengths are limited, and an
   amplification policy caps how many rows a hostile byte can demand — a bound
   input length alone cannot provide once a constant column packs to zero bits.

@@ -12,23 +12,21 @@ and nothing is stable.
 
 ## What it costs on the wire
 
-Bytes per message, averaged over 500-message corpora (`bun run bench`):
+Bytes per message, averaged over 500-message corpora (`cd apps/bench && bun run bench`):
 
-| route | JSON | JSON+Brotli | Protobuf | Hyperfly | + Brotli | Profiled |
-|---|---|---|---|---|---|---|
-| audit events | 12,687 | 2,512 | 7,190 | 2,013 | 1,974 | **574** |
-| device telemetry | 7,994 | 1,422 | 2,007 | 755 | 725 | **542** |
-| social feed | 6,863 | 2,294 | 4,396 | 1,871 | 1,868 | **1,466** |
-| single order | 782 | 408 | 388 | 271 | 273 | **180** |
-| OHLCV candles | 3,225 | 842 | 2,034 | 384 | **362** | 384 |
+| route | JSON | JSON+Brotli | Protobuf | Hyperfly | Profiled |
+|---|---|---|---|---|---|
+| audit events | 12,687 | 2,512 | 7,190 | 2,013 | **574** |
+| device telemetry | 7,994 | 1,422 | 2,007 | 755 | **542** |
+| social feed | 6,863 | 2,294 | 4,396 | 1,871 | **1,466** |
+| single order | 782 | 408 | 388 | 271 | **180** |
+| OHLCV candles | 3,225 | 842 | 2,034 | **384** | **384** |
 
 Read the spread rather than the best row. Training is worth 71% on audit logs —
 recurring values become dictionary codes, machine-made ids travel as grammar
 lanes, one column derives from another — and nothing at all on candles, whose
-only string sits outside the array. Note the Brotli column: on the profiled
-stream it now loses bytes on four of five routes. The corpora are synthetic —
-shaped like real routes, not captured from one — and no production traffic has
-been measured yet.
+only string sits outside the array. The corpora are synthetic, shaped like real
+routes but not captured from one, and no production traffic has been measured yet.
 
 ## Repository
 

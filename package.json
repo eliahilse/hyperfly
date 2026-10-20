@@ -8,19 +8,25 @@
     "lint": "turbo run lint",
     "check-types": "turbo run check-types",
     "deploy": "turbo run deploy",
-    "test": "turbo run test"
+    "test": "turbo run test",
+    "changeset": "changeset",
+    "version-packages": "changeset version && bun .github/scripts/sync-versions.ts && bun install --lockfile-only"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
+    "@changesets/parse": "^1.0.0",
     "turbo": "^2.8.16",
     "typescript": "5.9.2"
   },
   "engines": {
     "node": ">=18"
   },
-  "packageManager": "bun@1.2.19",
+  "packageManager": "bun@1.4.2",
   "workspaces": [
     "apps/*",
     "packages/*",
-    "packages/tooling/*"
+    "packages/tooling/*",
+    "python",
+    "rust"
   ]
 }
