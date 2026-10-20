@@ -19,6 +19,8 @@ expect breaking changes before 1.0.
 Zod and Pydantic are needed only for the schema adapters; the codec and HTTP layers
 run without them.
 
+The npm package requires Node.js 22 or later and is ESM only.
+
 ## What it costs on the wire
 
 Bytes per message, averaged over 500-message corpora (`bun run build --filter=hyperfly`, then
