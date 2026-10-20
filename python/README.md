@@ -79,9 +79,42 @@ from hyperfly.http import negotiate, encode_for, serve_artifact
 
 registry = CodecRegistry([codec, previous_codec])
 
-decision = negotiate(request.headers.get("hyperfly-accept"), registry)
-body, headers = encode_for(decision, payload)
+decision = negotiate(
+    request.headers.get("hyperfly-accept"),
+    registry,
+    accept=request.headers.get("accept"),
+)
+body, headers = encode_for(decision, payload, on_fallback=lambda reason, error: log.warning("%s: %s", reason, error))
 ```
+
+`Accept: application/vnd.hyperfly;q=0` opts a client out of binary whatever it
+advertises. A value the codec refuses under its limits is answered in JSON with the
+same headers a fallback gets, and `on_fallback` hears about it. Every decision
+carries `Vary: Hyperfly-Accept, Accept`.
+
+Request bodies go through `decode_request`, which takes a `bytes` body or an
+iterable of chunks and stops reading once the body passes `max_bytes` (1 MiB by
+default):
+
+```python
+from hyperfly.http import RequestError, decode_request
+
+try:
+    kind, value = decode_request(
+        request.headers.get("content-type"),
+        request.headers.get("hyperfly-codec"),
+        request.stream(),
+        registry,
+        content_length=request.headers.get("content-length"),
+    )
+except RequestError as error:
+    return Response(status=error.status, headers=error.headers)
+```
+
+`error.status` is 415 for a content type that is neither hyperfly nor JSON, 413 past
+`max_bytes`, 400 for a malformed envelope, a contradicting `Hyperfly-Codec` header or
+a body that fails to decode, and 415 with `Hyperfly-Offer` for a fingerprint the
+registry does not hold. `error.reason` names the rule for logs.
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it
 could fetch from `serve_artifact`; once it has it, the same route answers in binary.
