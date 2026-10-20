@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
+from typing import Callable, Iterable
 
 INT_MIN = -(2**53 - 1)
 INT_MAX = 2**53 - 1
@@ -42,19 +44,77 @@ class Limits:
     max_depth: int = 64
     max_items: int = 2**24
     max_byte_length: int = 2**28
-    max_amplification: int = 4096
+    max_amplification: int = 32
+    max_total_items: int = 2**24
+    max_total_bytes: int = 2**26
+    max_byte_amplification: int = 64
+
+    def item_budget(self, body_length: int) -> int:
+        """Items one body may declare across all its arrays: wire-v0 section 6."""
+        return min(self.max_total_items, self.max_amplification * (body_length + 1))
+
+    def byte_budget(self, body_length: int) -> int:
+        """Decoded bytes of every string and bytes value in one body: wire-v0 section 6."""
+        return min(self.max_total_bytes, self.max_byte_amplification * (body_length + 1))
 
 
 DEFAULT_LIMITS = Limits()
 
 
+class Budget:
+    """The item and byte budgets of one body. A column whose decoded bytes are
+    bounded within the byte budget defers its exact total, which is settled only
+    once a later charge needs it."""
+
+    __slots__ = ("cap", "total", "byte_cap", "bytes", "owed", "deferred")
+
+    def __init__(self, cap: int, byte_cap: int) -> None:
+        self.cap = cap
+        self.total = 0
+        self.byte_cap = byte_cap
+        self.bytes = 0
+        self.owed = 0
+        self.deferred: list[tuple[int, Callable[[], int]]] = []
+
+    def charge(self, count: int, path: str, error: type[HyperflyError]) -> None:
+        if count > self.cap - self.total:
+            raise error("limit", f"{path}: {self.total + count} items exceed the item budget of {self.cap}")
+        self.total += count
+
+    def charge_bytes(self, length: int, path: str, error: type[HyperflyError]) -> None:
+        if length > self.byte_cap - self.bytes - self.owed:
+            self.settle()
+            if length > self.byte_cap - self.bytes:
+                raise error("limit", f"{path}: {self.bytes + length} bytes exceed the byte budget of {self.byte_cap}")
+        self.bytes += length
+
+    def defer_bytes(self, bound: int, exact: Callable[[], int]) -> bool:
+        """Charge a total of at most `bound` bytes, computed by `exact` only when
+        needed, if the bound fits what remains."""
+        if bound > self.byte_cap - self.bytes - self.owed:
+            return False
+        self.deferred.append((bound, exact))
+        self.owed += bound
+        return True
+
+    def settle(self) -> None:
+        """Charge the exact totals deferred so far."""
+        for _bound, exact in self.deferred:
+            self.bytes += exact()
+        self.deferred.clear()
+        self.owed = 0
+
+
 class Reader:
-    __slots__ = ("buf", "pos", "limits")
+    __slots__ = ("buf", "pos", "limits", "budget", "deferred")
 
     def __init__(self, buf: bytes, limits: Limits) -> None:
         self.buf = buf
         self.pos = 0
         self.limits = limits
+        self.budget = Budget(limits.item_budget(len(buf)), limits.byte_budget(len(buf)))
+        # arrays whose items are built only once the whole body has decoded
+        self.deferred: list[tuple[list, Callable[[], Iterable]]] = []
 
     def u8(self) -> int:
         if self.pos >= len(self.buf):
@@ -105,6 +165,50 @@ def read_uleb(r: Reader) -> int:
     raise DecodeError("varint", f"uvarint longer than {_MAX_ULEB_BYTES} bytes")
 
 
+def uleb_at(buf: bytes, pos: int) -> tuple[int, int]:
+    """read_uleb over a buffer position: the value and the position after it."""
+    result = 0
+    shift = 0
+    for i in range(_MAX_ULEB_BYTES):
+        if pos >= len(buf):
+            raise DecodeError("truncated", "unexpected end of input")
+        byte = buf[pos]
+        pos += 1
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            if i > 0 and byte == 0:
+                raise DecodeError("varint", "overlong uvarint encoding")
+            return result, pos
+        shift += 7
+    raise DecodeError("varint", f"uvarint longer than {_MAX_ULEB_BYTES} bytes")
+
+
+def read_ulebs(r: Reader, count: int) -> tuple[array, DecodeError | None]:
+    """Up to `count` uvarints, stopping at the first malformed one. Its error is
+    returned rather than raised, so a caller can report an earlier value first."""
+    buf = r.buf
+    pos = r.pos
+    window = buf[pos : pos + count]
+    if len(window) == count and window.isascii():
+        r.pos = pos + count
+        return array("B", window), None
+    out = array("Q")
+    append = out.append
+    end = len(buf)
+    for _ in range(count):
+        if pos < end and buf[pos] < 0x80:
+            append(buf[pos])
+            pos += 1
+            continue
+        try:
+            value, pos = uleb_at(buf, pos)
+        except DecodeError as err:
+            return out, err
+        append(value)
+    r.pos = pos
+    return out, None
+
+
 def uleb_len(value: int) -> int:
     length = 1
     while value > 0x7F:
@@ -128,6 +232,14 @@ def write_bitmap(out: bytearray, bits: list[bool]) -> None:
             if bit:
                 byte |= 1 << offset
         out.append(byte)
+
+
+def read_bits(r: Reader, count: int, path: str) -> int:
+    """A count-bit bitmap as one integer, bit i for row i."""
+    bits = int.from_bytes(r.take((count + 7) >> 3), "little")
+    if bits >> count:
+        raise DecodeError("bitmap", f"{path}: nonzero bitmap padding")
+    return bits
 
 
 def read_bitmap(r: Reader, count: int, path: str) -> list[bool]:
