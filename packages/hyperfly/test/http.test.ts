@@ -211,6 +211,17 @@ describe("round trip over the protocol", () => {
     }
   });
 
+  test("malformed UTF-8 in a JSON response is a coded error with the decoder's cause", () => {
+    try {
+      decodeResponse("application/json", new Uint8Array([34, 255, 34]), registry);
+      throw new Error("expected invalid UTF-8");
+    } catch (error) {
+      expect(error).toBeInstanceOf(DecodeError);
+      expect((error as DecodeError).code).toBe("json");
+      expect((error as DecodeError).cause).toBeInstanceOf(TypeError);
+    }
+  });
+
   test("malformed JSON artifacts preserve the SyntaxError cause", () => {
     try {
       loadArtifact("{", codecA.fingerprint);
@@ -456,6 +467,53 @@ describe("fetch adapter", () => {
     expect(errors).toEqual([]);
   });
 
+  test.each([
+    ["a BigInt", { n: 1n }],
+    ["a cycle", (() => { const cycle: Record<string, unknown> = {}; cycle.self = cycle; return cycle; })()],
+  ])("JSON encoding of %s is EncodeError json with the cause", (_, unencodable) => {
+    const decision = negotiate(undefined, registry);
+    try {
+      encodeFor(decision, unencodable);
+      throw new Error("expected a JSON encode failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EncodeError);
+      expect((error as EncodeError).code).toBe("json");
+      expect((error as EncodeError).cause).toBeInstanceOf(TypeError);
+    }
+  });
+
+  test.each([undefined, () => {}, Symbol("x")])("JSON encoding of %p, which has no JSON text, is EncodeError json", (unencodable) => {
+    const decision = negotiate(undefined, registry);
+    expect(() => encodeFor(decision, unencodable)).toThrow(EncodeError);
+    expect(() => encodeFor(decision, unencodable)).toThrow(expect.objectContaining({ code: "json" }));
+  });
+
+  test("a revoked proxy thrown by toJSON is EncodeError json with the proxy as cause", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const decision = negotiate(undefined, registry);
+    let caught: unknown;
+    try {
+      encodeFor(decision, { toJSON: () => { throw proxy; } });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EncodeError);
+    expect((caught as EncodeError).code).toBe("json");
+    expect((caught as EncodeError).cause).toBe(proxy);
+  });
+
+  test("a JSON fallback that cannot be encoded is EncodeError json with the cause", () => {
+    const limited = compileIR({ kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] }, {
+      limits: { maxByteLength: 1 },
+    });
+    const cause = new Error("toJSON failed");
+    const decision = negotiate(limited.fingerprint, new CodecRegistry([limited as never]));
+    const run = () => encodeFor(decision, { s: "long", toJSON: () => { throw cause; } });
+    expect(run).toThrow(EncodeError);
+    expect(run).toThrow(expect.objectContaining({ code: "json", cause }));
+  });
+
   test("rethrows encoder type errors without reporting a fallback", () => {
     const errors: EncodeError[] = [];
     const request = new Request(url, { headers: { "Hyperfly-Accept": codecA.fingerprint } });
@@ -470,6 +528,73 @@ describe("fetch adapter", () => {
     expect(hit!.status).toBe(200);
     expect(await hit!.text()).toBe(codecA.artifact);
     expect(discovery(new Request(url), registry)).toBeUndefined();
+  });
+
+  test("discovery answers HEAD without a body and leaves other methods to the caller", async () => {
+    const path = `https://example.test/.well-known/hyperfly/${codecA.fingerprint}`;
+    const get = discovery(new Request(path), registry)!;
+    const head = discovery(new Request(path, { method: "HEAD" }), registry)!;
+    expect(head.status).toBe(200);
+    expect(head.body).toBeNull();
+    expect([...head.headers]).toEqual([...get.headers]);
+    const miss = discovery(new Request(`https://example.test/.well-known/hyperfly/${"f".repeat(32)}`, { method: "HEAD" }), registry)!;
+    expect(miss.status).toBe(404);
+    expect(miss.body).toBeNull();
+    for (const method of ["POST", "PUT", "DELETE", "OPTIONS"]) {
+      expect(discovery(new Request(path, { method }), registry)).toBeUndefined();
+    }
+  });
+
+  test("HEAD gets exactly the headers of the GET response and no body", () => {
+    const limited = compileIR({ kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] }, {
+      limits: { maxByteLength: 1 },
+    });
+    const cases = [
+      { registry, accept: codecA.fingerprint, value, type: HYPERFLY_MEDIA_TYPE },
+      { registry, accept: null, value, type: "application/json" },
+      { registry: new CodecRegistry([limited as never]), accept: limited.fingerprint, value: { s: "long" }, type: "application/json" },
+    ];
+    for (const { registry, accept, value, type } of cases) {
+      const headers: Record<string, string> = accept ? { "Hyperfly-Accept": accept } : {};
+      const get = respond(new Request(url, { headers }), value, registry);
+      const head = respond(new Request(url, { method: "HEAD", headers }), value, registry);
+      expect(get.headers.get("content-type")).toBe(type);
+      expect(head.status).toBe(200);
+      expect(head.body).toBeNull();
+      expect([...head.headers]).toEqual([...get.headers]);
+    }
+  });
+
+  test.each([204, 304])("status %d never encodes the value", (status) => {
+    let encodes = 0;
+    const spied = new CodecRegistry([{
+      ...codecA,
+      encode(input: never) { encodes++; return codecA.encode(input); },
+    } as never]);
+    const unencodable = { n: 1n, toJSON() { throw new Error("toJSON must not run"); } };
+    for (const accept of [codecA.fingerprint, null]) {
+      const headers: Record<string, string> = accept ? { "Hyperfly-Accept": accept } : {};
+      const response = respond(new Request(url, { headers }), unencodable, spied, { status });
+      expect(response.status).toBe(status);
+      expect(response.body).toBeNull();
+      expect(response.headers.get("content-type")).toBe(accept ? HYPERFLY_MEDIA_TYPE : "application/json");
+    }
+    expect(encodes).toBe(0);
+  });
+
+  test.each([204, 205, 304])("status %d has no body and keeps the negotiated headers", (status) => {
+    const request = new Request(url, { headers: { "Hyperfly-Accept": codecA.fingerprint } });
+    const response = respond(request, value, registry, { status, headers: { ETag: '"v1"' } });
+    expect(response.status).toBe(status);
+    expect(response.body).toBeNull();
+    expect(response.headers.get("content-type")).toBe(HYPERFLY_MEDIA_TYPE);
+    expect(response.headers.get("hyperfly-codec")).toBe(codecA.fingerprint);
+    expect(response.headers.get("vary")).toBe("Hyperfly-Accept, Accept");
+    expect(response.headers.get("etag")).toBe('"v1"');
+    const empty = respond(new Request(url), undefined, registry, { status });
+    expect(empty.status).toBe(status);
+    expect(empty.body).toBeNull();
+    expect(empty.headers.get("content-type")).toBe("application/json");
   });
 
   test("reads a binary request body, and refuses one it cannot read", async () => {
@@ -593,20 +718,41 @@ describe("request body limits", () => {
   const url = "https://example.test/v1/thing";
 
   test.each([NaN, Infinity, -Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, "1024", true])(
-    "rejects invalid maxBytes %p synchronously without reading",
-    (maxBytes) => {
+    "rejects invalid maxBytes %p through the returned promise without reading",
+    async (maxBytes) => {
       let pulled = false;
       const body = new ReadableStream<Uint8Array>({
         pull() { pulled = true; },
       }, { highWaterMark: 0 });
       const request = new Request(url, { method: "POST", body });
-      const run = () => readBody(request, registry, { maxBytes: maxBytes as never });
-      expect(run).toThrow(HyperflyError);
-      expect(run).toThrow(expect.objectContaining({ code: "options" }));
+      let run: Promise<unknown> | undefined;
+      expect(() => { run = readBody(request, registry, { maxBytes: maxBytes as never }); }).not.toThrow();
+      await expect(run).rejects.toBeInstanceOf(HyperflyError);
+      await expect(run).rejects.toThrow(expect.objectContaining({ code: "options" }));
       expect(pulled).toBe(false);
       expect(request.bodyUsed).toBe(false);
     },
   );
+
+  test("refuses a locked body as unreadable", async () => {
+    const request = new Request(url, { method: "POST", body: "0" });
+    const reader = request.body!.getReader();
+    try {
+      const result = await readBody(request, registry);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.response.status).toBe(400);
+    } finally {
+      reader.releaseLock();
+    }
+  });
+
+  test("refuses an already consumed body as unreadable", async () => {
+    const request = new Request(url, { method: "POST", body: "0" });
+    await request.text();
+    const result = await readBody(request, registry);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
+  });
 
   test.each(["throws", "rejects", "never resolves"])("returns 413 promptly when cancel %s", async (mode) => {
     const body = new ReadableStream<Uint8Array>({
@@ -784,14 +930,6 @@ describe("request body limits", () => {
     if (!result.ok) expect(result.response.status).toBe(400);
   });
 
-  test("refuses a locked body with 400", async () => {
-    const request = new Request(url, { method: "POST", body: new TextEncoder().encode("1") });
-    request.body!.getReader();
-    const result = await readBody(request, registry);
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
-  });
-
   test("cancels the stream when it refuses a chunk that is not bytes", async () => {
     let cancelled = false;
     const body = new ReadableStream({
@@ -833,6 +971,40 @@ describe("request body limits", () => {
     });
     expect(await readBody(new Request(url, { method: "POST", body }), registry)).toEqual({ ok: true, value: 12 });
   });
+
+  const withContentLength = (contentLength: string) => {
+    const request = new Request(url, { method: "POST", body: new TextEncoder().encode("0") });
+    const get = request.headers.get.bind(request.headers);
+    request.headers.get = (name) => (name.toLowerCase() === "content-length" ? contentLength : get(name));
+    return request;
+  };
+
+  test.each([" 2 ", "\t2", "2\t ", "0002", "9".repeat(400)])("honours Content-Length %j", async (contentLength) => {
+    const request = withContentLength(contentLength);
+    const result = await readBody(request, registry, { maxBytes: 1 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(413);
+    expect(request.bodyUsed).toBe(false);
+  });
+
+  test("compares Content-Length digits to maxBytes exactly at the safe integer bound", async () => {
+    const maxBytes = Number.MAX_SAFE_INTEGER;
+    const over = withContentLength("9007199254740992");
+    const result = await readBody(over, registry, { maxBytes });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(413);
+    expect(over.bodyUsed).toBe(false);
+    for (const contentLength of ["9007199254740991", "0009007199254740991"]) {
+      expect(await readBody(withContentLength(contentLength), registry, { maxBytes })).toEqual({ ok: true, value: 0 });
+    }
+  });
+
+  test.each(["\u00a02", "2\n", "\v2", "2\r", "\u0662", "２", `${"0".repeat(400)}1`])(
+    "counts bytes instead of trusting Content-Length %j",
+    async (contentLength) => {
+      expect(await readBody(withContentLength(contentLength), registry, { maxBytes: 1 })).toEqual({ ok: true, value: 0 });
+    },
+  );
 
   test.each(["-1", "1.5", "1x"])("ignores invalid Content-Length %s", async (contentLength) => {
     const result = await readBody(new Request(url, {
@@ -969,6 +1141,23 @@ describe("binary request validation", () => {
       headers: { "Content-Type": HYPERFLY_MEDIA_TYPE },
     });
     await expect(readBody(request, broken)).rejects.toBe(error);
+  });
+
+  test("rethrows a revoked proxy thrown by a codec unchanged", async () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const broken = new CodecRegistry([{
+      ...codecA,
+      decode() { throw proxy; },
+    } as never]);
+    const request = new Request(url, {
+      method: "POST",
+      body: codecA.encode(value as never) as BodyInit,
+      headers: { "Content-Type": HYPERFLY_MEDIA_TYPE },
+    });
+    let caught: unknown;
+    await readBody(request, broken).catch((error: unknown) => { caught = error; });
+    expect(caught).toBe(proxy);
   });
 });
 

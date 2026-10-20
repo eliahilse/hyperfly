@@ -45,7 +45,9 @@ compile(z.object({ meta: z.record(z.string(), z.unknown()) }));
 ```
 
 Zod refinements and string/array length constraints are checked only with
-`compile(EventResponse, { validate: true })`, on encode and decode. Validation is off by default.
+`compile(EventResponse, { validate: true })`, on encode and decode. Validation is off by default. Encode sends the
+parsed value; decode checks the decoded value and returns it as decoded, so a value-changing check such as `overwrite`
+applies once per round trip.
 
 ## Columns and profiles
 
@@ -99,6 +101,8 @@ export default {
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
+`respond` answers HEAD with the headers GET would get and no body, and status 204, 205 or 304 with the negotiated
+headers, no body and without encoding the value; `discovery` answers GET and HEAD and returns `undefined` otherwise.
 A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it advertises a matching fingerprint.
 
 ### JSON fallback
@@ -132,7 +136,7 @@ The first applicable rule in negotiation v1 §4 wins:
 | 413 | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
 | 400 | Invalid binary envelope or `Hyperfly-Codec` disagrees with its fingerprint. |
 | 415 + Hyperfly-Offer | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
-| 400 | Binary decode fails (including limits), JSON is malformed UTF-8/JSON, or the stream fails. |
+| 400 | Binary decode fails (including limits), JSON is malformed UTF-8/JSON, or the body stream cannot be read. |
 
 ## Node and Express
 
@@ -333,7 +337,7 @@ default to artifact downloads and throws code `limit` past it.
 Compiling, encoding, decoding and loading artifacts throw `HyperflyError` with a `code`; match on `code`, not on the
 message. `EncodeError` and `DecodeError` say which direction failed, `FingerprintMismatchError` is a `DecodeError`
 with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `path`. When an underlying error caused
-it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate hook, that error is the standard
+it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate or deflate hook, that error is the standard
 `cause`; an error that describes the input itself has none. A `maxBytes` that is not a non-negative safe integer is
 code `options`. In `fetchArtifact`, a rejected `fetch` and an abort propagate unchanged; a failure while reading the
 artifact body is code `ir`.
@@ -367,9 +371,9 @@ try {
 | `header` | Envelope is too short, has bad magic or an unsupported wire major. |
 | `fingerprint` | Fingerprint mismatch, invalid artifact fingerprint or failed artifact HTTP status other than 404. |
 | `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
-| `packed` | Invalid compressed stream or decompressed length mismatch. |
+| `packed` | Invalid compressed stream, decompressed length mismatch, or a failing or invalid deflate hook. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
-| `json` | Malformed JSON in `decodeResponse` or in artifact text; the `SyntaxError` is `cause`. |
+| `json` | Malformed JSON or UTF-8 in `decodeResponse`, malformed artifact text, or a value the JSON fallback cannot encode; the underlying error, when there is one, is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
 | `options` | Invalid compile, artifact, `train` or HTTP options, such as an unknown limit or an invalid `maxBytes`. |
 

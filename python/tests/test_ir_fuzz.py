@@ -89,6 +89,10 @@ def test_deep_compilation(location, plan):
         nested = {"kind": "array", "element": nested}
     ir = nested if location == "schema" else {**PROFILE_IR, "annotation": nested} if location == "annotation" else PROFILE_IR
     profile = {"version": 1, "shared": {"columns": [{"leaf": 0, "dict": ["a"]}]}, "hints": nested} if location == "hints" else None
+    if location == "hints" and plan == "columnar":
+        # advisory hints are not part of the artifact, so they may nest to any depth
+        compile_ir(ir, plan=plan, profile=profile)
+        return
     with pytest.raises(HyperflyError) as exc:
         compile_ir(ir, plan=plan, profile=profile)
     assert exc.value.code == "ir"

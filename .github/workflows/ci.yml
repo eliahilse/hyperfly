@@ -97,6 +97,23 @@ jobs:
 
       - run: pytest python/tests -q
 
+  # the oldest supported Python with the oldest pydantic the package declares
+  python-floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - run: pip install "./python[test]" "pydantic==2.5.*"
+
+      - run: python -c "import pydantic; assert pydantic.VERSION.startswith('2.5.'), pydantic.VERSION"
+
+      - run: pytest python/tests -q
+
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -172,7 +189,7 @@ jobs:
             -f state=pending -f context=ci -f description=Running -f target_url="$RUN_URL"
 
   dispatch-report:
-    needs: [dispatch-pending, check, pack, release-checks, python, rust, rust-msrv, interop]
+    needs: [dispatch-pending, check, pack, release-checks, python, python-floor, rust, rust-msrv, interop]
     if: always() && github.event_name == 'workflow_dispatch'
     permissions:
       actions: read

@@ -162,6 +162,15 @@ route that legitimately ships denser payloads raises them on both peers.
 | `max_total_bytes` | 2^26 | decoded bytes of every string and bytes value in one body, counting literals, enum members and dictionary, grammar and derived values |
 | `max_byte_amplification` | 64 | those decoded bytes per body byte: at most `max_byte_amplification` × (body length + 1) |
 
+Schemas and profiles need no stack sizing: one whose artifact nests up to the
+512-level limit compiles, validates and trains at any call depth, and a deeper one
+fails with `ir`. Values are encoded and decoded recursively, one Python frame per
+nesting level, and decoding takes two before Python 3.12. Under the default
+recursion limit of 1000, decoding a value nested more than about 490 levels deep on
+3.10 or 3.11 fails with `depth` even when `max_depth` allows it, and sooner when the
+call already starts deep in the stack; raise the limit with `sys.setrecursionlimit`
+if a route needs more.
+
 ## Errors
 
 Every failure the package raises on purpose is a `HyperflyError` with a stable

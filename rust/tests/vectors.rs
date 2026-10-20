@@ -174,7 +174,12 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn load(name: &str) -> Json {
     let path = format!("{}/../spec/vectors/{name}", env!("CARGO_MANIFEST_DIR"));
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut de = serde_json::Deserializer::from_str(&text);
+    de.disable_recursion_limit();
+    let json = serde::Deserialize::deserialize(serde_stacker::Deserializer::new(&mut de)).unwrap();
+    de.end().unwrap();
+    json
 }
 
 fn compile(ir: &Json, plan: Plan) -> Codec {

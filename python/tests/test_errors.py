@@ -256,12 +256,10 @@ def test_all_codec_constructors_read_original_options_once(factory):
 
 
 @pytest.mark.parametrize("factory", [Codec, compile_ir])
-def test_constructor_converts_ir_recursion_errors(factory):
+def test_constructor_rejects_ir_nested_past_the_cap(factory):
     ir = {"kind": "bool"}
     for _ in range(1500):
         ir = {"kind": "array", "element": ir}
     with pytest.raises(HyperflyError) as err:
         factory(ir)
-    assert (err.value.code, str(err.value)) == (
-        "ir", "$: IR or profile nesting exceeds Python's recursion limit",
-    )
+    assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")

@@ -25,7 +25,8 @@
     "./http": {
       "types": "./dist/http.d.ts",
       "import": "./dist/http.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

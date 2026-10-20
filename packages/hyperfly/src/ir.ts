@@ -1,4 +1,5 @@
-import { HyperflyError } from "./errors.js";
+import { HyperflyError, isInstance } from "./errors.js";
+import { checkIRNesting } from "./nesting.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
 export type LiteralValue = string | number | boolean | null;
@@ -39,7 +40,7 @@ export function withinStack<T>(fn: () => T): T {
     return fn();
   } catch (e) {
     // untrusted JSON can nest deeper than the host stack; that is invalid IR, not a crash
-    if (e instanceof RangeError) throw new HyperflyError("ir", "IR or profile nesting exceeds the call stack");
+    if (isInstance(e, RangeError)) throw new HyperflyError("ir", "IR or profile nesting exceeds the call stack");
     throw e;
   }
 }
@@ -102,6 +103,7 @@ function checkKeys(value: object, allowed: readonly string[], path: string): voi
 }
 
 export function validateIR(node: IRNode, path = "$"): void {
+  checkIRNesting(node);
   withinStack(() => checkNode(node, path));
 }
 

@@ -76,9 +76,21 @@ All fixed-width values are **little-endian**. `float64` is IEEE 754 binary64.
 
 ## 4. Node encodings (plan `row` v1)
 
-An integer-valued field accepts any JSON number whose value is an integer in
-`[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
-fractional values and values beyond that range are invalid IR.
+An integer-valued IR field accepts any JSON number whose value is an integer
+in `[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its
+sign; fractional values and values beyond that range are invalid IR.
+
+For an `int` node or an integer `literal`, a value MUST be accepted as an
+integer regardless of its host representation when it is a number whose
+value is an integer in that domain: `1.0` is 1 and `-0.0` is 0. Booleans are
+not numbers. Fractional, non-finite and out-of-domain values MUST be rejected
+on encode with `type`; declared bounds are checked as in §4.4.
+
+IR nodes MUST be objects whose `kind` names one of the kinds below, with all
+required members shown below; fields MUST be objects with `name` and `type`.
+Node-valued members MUST themselves be valid IR nodes. `members` and `fields`
+MUST be arrays. Optional members, when present, MUST have the declared type;
+`null` is not an absent member.
 
 ### 4.1 `bool`
 
@@ -90,18 +102,26 @@ Zero bytes. The value is part of the artifact. v0 literal values are strings,
 booleans, `null`, or JSON-safe integers (non-integer numeric literals are not
 representable in v0).
 
+An integer literal matches any numeric value equal to that integer under the
+§4 rule, including an integral floating-point value. A mismatch MUST be
+rejected on encode with `type`.
+
 ### 4.3 `enum { members }`
 
 ULEB128 index into `members`, in declared order. Index MUST be
-`< members.length`. Members are unique, non-empty, strings only. Declared
-order is canonical; reordering members is a new artifact.
+`< members.length`. `members` MUST contain at least one member, and each
+member MUST be a unique, non-empty string. Declared order is canonical;
+reordering members is a new artifact.
 
 ### 4.4 `int { min?, max? }`
 
 - If `min` is declared: `uvarint(value - min)` using exact integer arithmetic.
 - Otherwise: `svarint(value)`.
 - Declared bounds are validated on encode AND decode; out-of-bounds MUST be
-  rejected on both sides.
+  rejected on both sides with `range`. On encode, the §4 integer-domain
+  check precedes the bound checks, including for integral floating-point
+  values.
+- If both bounds are declared, `min` MUST NOT exceed `max`.
 
 ### 4.5 `float64`
 
@@ -123,6 +143,8 @@ surrogates. Decoders MUST reject invalid UTF-8 (no replacement characters).
 - Fixed (`length` declared): exactly `length` elements, no count on the wire.
 - Variable: `uvarint` count, then elements.
 
+A declared `length` MUST be a non-negative integer in the domain of §3.3.
+
 ### 4.9 `nullable { inner }`
 
 One byte: `0x00` null (nothing follows), `0x01` value follows. Other values
@@ -132,23 +154,38 @@ field flag (§4.10), which uses the bitmap instead.
 ### 4.10 `struct { fields }`
 
 Field order is declared order and is canonical.
+Field names MUST be non-empty strings and MUST be unique within a struct.
 
 **Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
 a decimal array index (`0`, or a digit string with no leading zero whose value
 is below 2^32 − 1). Some host languages reorder integer-index object keys and
 trap `__proto__` assignment, so such names cannot round-trip or fingerprint
 identically everywhere. Field names, enum members, and string literals MUST
-also be well-formed Unicode: a lone surrogate has no portable representation
-and MUST be rejected at IR validation.
+also be well-formed Unicode: a sequence of Unicode scalar values. Lone
+surrogates MUST be rejected at IR validation; every other scalar value,
+including NUL, U+FFFE, U+FFFF and unassigned code points, MUST be accepted
+subject to the other constraints on that string.
 
 **Closed objects.** IR nodes and fields MUST NOT carry keys this
 specification does not define for their kind, and profile objects MUST NOT
 carry keys the columnar plan's profile document (plan-columnar-v5 §6.2) does
 not define; such IR or profile is invalid.
 
+**Artifact nesting.** The canonical artifact text (§5, plan-columnar-v5
+§6.5) MUST NOT nest JSON containers deeper than 512. The artifact object is
+depth 1; every object or array value is one deeper than its container.
+This depth is a function of the IR and profile alone, independent of their
+input spelling. An IR or profile whose artifact would exceed this bound is
+invalid IR and MUST be rejected with `ir`. Acceptance within the bound
+MUST NOT depend on a host-language recursion limit, and an implementation
+MUST reject IR or a profile past the bound without unbounded recursion.
+Implementations MUST document any host stack sizing they require. This bound
+is independent of `maxDepth` (§6).
+
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
-value two wire encodings. Each field has `optional` and
+value two wire encodings. A field's `nullable` flag MUST NOT be true when its
+type is a `nullable` node. Each field has `optional` and
 `nullable` flags. When present, each flag MUST be a JSON boolean; any other
 value is invalid IR. Layout:
 
@@ -158,6 +195,12 @@ value is invalid IR. Layout:
    nullable field regardless of presence. Bit set = null. For an absent
    field the bit MUST be zero.
 3. Field values, in field order, for fields that are present and not null.
+
+A decoder MUST read the presence bitmap and then the null bitmap, validating
+each bitmap's padding, before processing fields in declared order. It MUST
+check a field's absent/null consistency when that field is reached, reporting
+a null bit for an absent field as `bitmap`; it MUST NOT check this before
+decoding earlier fields' values.
 
 Absent and null are distinct states and MUST NOT collapse. A required field
 cannot be absent; a non-nullable field cannot be null; violations are encode
@@ -203,8 +246,12 @@ Implementations MUST enforce configurable limits with these v0 defaults:
   nodes enclosing it, and decoding a node deeper than `maxDepth` is rejected
   with `depth`,
 - `maxItems` 2^24 per array, applied to a declared length as to a count,
-- `maxByteLength` 2^28 per string/bytes value, checked against the length
-  prefix before any payload byte is read,
+- `maxByteLength` 2^28 per string/bytes value and per declared inflated
+  total of a deflate-packed string column (plan-columnar-v5 §3), checked
+  against the length prefix before any payload byte is read; for a decoder
+  with inflate also per blob of such a column, checked against the blob
+  length before any blob byte is read (a decoder without inflate rejects the
+  column as `unsupported` without reading the blob length, below),
 - `maxAmplification` 32: an array count above
   `maxAmplification × (remaining bytes + 1)` is rejected, where remaining
   bytes are the body bytes after the count or, for a fixed-length array,
@@ -262,7 +309,9 @@ an exceeded budget as `limit`:
   declared inflated total, after `maxByteLength` is applied to each declared
   length and to the total, and before the blob length is read; a decoder
   without an inflate capability charges it the same way and only then
-  rejects the column as `unsupported`; its values are not charged again;
+  rejects the column as `unsupported`; otherwise it reads the blob length
+  and MUST reject a length above `maxByteLength` with `limit` before reading
+  any blob byte. Its values are not charged again;
 - a dictionary, grammar or derived value, when it is resolved, after its own
   checks (code range, source lookup) and after `maxByteLength` is applied to
   its length, and before it is built (a grammar value's length follows from
@@ -304,8 +353,9 @@ partial values.
 
 - Little-endian everywhere; no big-endian variant will exist.
 - The IR exclusions in §4.10 (portable field names, well-formed Unicode,
-  closed objects, unambiguous null) are permanent: they exist so that every
-  implementation accepts exactly the same set of artifacts.
+  closed objects, artifact nesting, unambiguous null) are permanent: they
+  exist so that every implementation accepts exactly the same set of
+  artifacts.
 - The fingerprint identifies the full codec artifact. Future columnar, delta,
   dictionary, or profiled layouts are new `plan` values under the same
   serialization scheme; v0 reserves no in-band escape values for them.
@@ -459,16 +509,18 @@ The JSON files under `spec/vectors/` are the 1.x compatibility suite:
 - `columnar.json` — payloads, profiles and artifacts (plan-columnar-v5).
 - `fingerprints.json` — IR → canonical text → fingerprint (§5,
   plan-columnar-v5 §6.5).
+- `http.json` — JSON body representation, response decoding and request bounds
+  (negotiation-v1 §§2, 4).
 - `ir.json` — invalid IR and valid near misses (§4, plan-columnar-v5 §6.2).
 - `limits.json` — limits at and past their bounds, encode and decode (§6).
 - `vectors.json` — row encode/decode pairs and invalid inputs (§3–§4).
 
 Every 1.x implementation MUST pass every applicable row: each row that pins
 Frozen behaviour, and each row for an Addition the implementation
-implements. `accept.json` binds only implementations that provide HTTP
-negotiation. A row whose input the implementation's value model cannot
-represent (a lone surrogate in a language whose strings are Unicode scalar
-values) does not apply to it. A row that decodes a deflate-packed column
-needs the inflate capability; an implementation without it reports
+implements. `accept.json` and `http.json` bind only implementations that
+provide HTTP negotiation. A row whose input the implementation's value model
+cannot represent (a lone surrogate in a language whose strings are Unicode
+scalar values) does not apply to it. A row that decodes a deflate-packed
+column needs the inflate capability; an implementation without it reports
 `unsupported` for that row after the §6 checks that precede it. Within 1.x,
 rows may be added, never changed or removed.
