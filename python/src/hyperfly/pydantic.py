@@ -140,8 +140,9 @@ def _unwrap_model_validators(
             raise _SchemaMismatch
         seen.add(id(schema))
         if schema["type"] == "model":
-            if (schema.get("cls") is not model or own_schema.get("cls") is not model
-                    or schema["schema"] != own_schema["schema"]):
+            # Class identity anchors the complete validator stack even when
+            # Pydantic replaces shared descendants with definition references.
+            if schema.get("cls") is not model or own_schema.get("cls") is not model:
                 raise _SchemaMismatch
             return schema
         if not schema["type"].startswith("function-") or not _model_validator(schema, model):

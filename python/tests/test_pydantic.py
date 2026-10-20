@@ -784,6 +784,59 @@ def test_model_validators_keep_declared_field_bounds(mode, nested, plan):
     assert "bypass field validation" in to_ir.__doc__
 
 
+@pytest.mark.parametrize("plan,fingerprint", [
+    ("row", "8c35cc9a22d846a6bc8e96a173a21f2f"),
+    ("columnar", "7892c2301f77b48b4c72cab3401810d1"),
+])
+@pytest.mark.parametrize("mode", ["after", "wrap"])
+def test_model_validator_with_shared_nested_definition_keeps_bounds(mode, plan, fingerprint):
+    class Leaf(BaseModel):
+        x: int = Field(ge=10, le=100)
+
+    class Inner(BaseModel):
+        leaf: Leaf
+        y: int = Field(ge=0)
+
+        if mode == "after":
+            @model_validator(mode="after")
+            def shift(self):
+                self.y -= 100
+                return self
+        else:
+            @model_validator(mode="wrap")
+            @classmethod
+            def shift(cls, value, handler):
+                instance = handler(value)
+                instance.y -= 100
+                return instance
+
+    class Outer(BaseModel):
+        a: Inner
+        b: Leaf
+
+    leaf_ir = {"kind": "struct", "fields": [
+        {"name": "x", "type": {"kind": "int", "min": 10, "max": 100}},
+    ]}
+    expected = {"kind": "struct", "fields": [
+        {"name": "a", "type": {"kind": "struct", "fields": [
+            {"name": "leaf", "type": leaf_ir},
+            {"name": "y", "type": {"kind": "int", "min": 0}},
+        ]}},
+        {"name": "b", "type": leaf_ir},
+    ]}
+    assert to_ir(Outer) == expected
+    codec = compile(Outer, validate=False, plan=plan)
+    # origin/main (5e555fe) fingerprints must survive definition inlining.
+    assert compile_ir(to_ir(Outer), plan=plan).fingerprint == fingerprint
+    assert codec.fingerprint == fingerprint
+    instance = Outer(a={"leaf": {"x": 10}, "y": 10}, b={"x": 20})
+    assert instance.a.y == -90
+    for encode in (codec.encode, codec.encode_body):
+        with pytest.raises(EncodeError) as error:
+            encode(instance)
+        assert error.value.code == "range"
+
+
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 def test_field_and_model_validators_using_the_same_function_remain_distinct(plan):
     def shift(value):
