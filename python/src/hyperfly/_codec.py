@@ -340,15 +340,32 @@ def _columnar_eligible(node: dict[str, Any]) -> bool:
 
 _Leaves = list[tuple[tuple[str, ...], dict[str, Any]]]
 
+_HEADED_KINDS = frozenset({"int", "float64", "string"})
 
-def _index_arrays(node: dict[str, Any], columnar: bool, out: dict[int, tuple[_Leaves | None, bool]]) -> None:
-    """Per array node: its columnar leaves (None when row-encoded) and whether its element is zero-bit."""
+
+def _wire_empty(node: dict[str, Any], columnar: bool) -> bool:
+    """Whether a zero-bit type also occupies no bytes: an eligible array's int, float64
+    and string columns write their mode byte even when no rows participate."""
+    kind = node["kind"]
+    if kind == "struct":
+        return all(_wire_empty(f["type"], columnar) for f in node["fields"])
+    if kind == "array":
+        if columnar and _columnar_eligible(node):
+            return all(f["type"]["kind"] not in _HEADED_KINDS for _segs, f in _flatten_leaves(node["element"]) or ())
+        return node["length"] == 0 or _wire_empty(node["element"], columnar)
+    return True
+
+
+def _index_arrays(node: dict[str, Any], columnar: bool, out: dict[int, tuple[_Leaves | None, bool, bool]]) -> None:
+    """Per array node: its columnar leaves (None when row-encoded), whether its element
+    is zero-bit, and whether that element also occupies no bytes."""
     kind = node["kind"]
     if kind == "array":
         element = node["element"]
         if id(node) not in out:
             leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
-            out[id(node)] = (leaves, not has_payload(element))
+            zero_bit = not has_payload(element)
+            out[id(node)] = (leaves, zero_bit, zero_bit and _wire_empty(element, columnar))
         _index_arrays(element, columnar, out)
     elif kind == "nullable":
         _index_arrays(node["inner"], columnar, out)
@@ -488,7 +505,7 @@ class _Ctx:
         inflate: Callable[[bytes, int], bytes] | None,
         profile: dict[str, Any] | None = None,
     ) -> None:
-        self.arrays: dict[int, tuple[_Leaves | None, bool]] = {}
+        self.arrays: dict[int, tuple[_Leaves | None, bool, bool]] = {}
         _index_arrays(ir, columnar, self.arrays)
         self.dicts: dict[int, list[str]] = {}
         self.codes: dict[int, dict[str, int]] = {}
@@ -533,7 +550,7 @@ class _Ctx:
         # built once a column is long enough to pay for it
         self.recodings: dict[int, dict[int, int]] = {}
         self.column_counts: dict[int, int] = {}
-        columnar_leaves = [leaves for leaves, _zero_bit in self.arrays.values() if leaves is not None]
+        columnar_leaves = [leaves for leaves, _zero_bit, _empty in self.arrays.values() if leaves is not None]
         self.leaf_plans = {
             id(leaves): [
                 ("[]." + ".".join(segs), segs[-1], len(segs), bool(f.get("optional")), bool(f.get("nullable")), f["type"])
@@ -666,7 +683,7 @@ def _encode_node(
             out.append(1)
             _encode_node(out, node["inner"], value, path, depth + 1, ctx, budget, column)
     elif kind == "array":
-        leaves, zero_bit = ctx.arrays[id(node)]
+        leaves, zero_bit, _empty = ctx.arrays[id(node)]
         if leaves is not None:
             _encode_columnar(out, node, value, path, depth, ctx, budget, leaves, column)
             return
@@ -1325,7 +1342,7 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             _dfail("marker", path, f"invalid nullable marker 0x{marker:x}")
         return _decode_node(r, node["inner"], path, depth + 1, ctx, column)
     if kind == "array":
-        leaves, zero_bit = ctx.arrays[id(node)]
+        leaves, zero_bit, empty = ctx.arrays[id(node)]
         if leaves is not None:
             return _decode_columnar(r, node, leaves, path, depth, ctx, column)
         length = node.get("length")
@@ -1337,10 +1354,10 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         budget = r.budget
         budget.charge(length, path, DecodeError)
         element = node["element"]
-        if zero_bit:
+        if empty:
             if not length:
                 return []
-            # every element decodes from the same zero bits to an equal value, so one
+            # every element decodes from no bytes to an equal value, so one
             # decode stands for all and charges the budgets for each
             counted, decoded = budget.total, budget.bytes
             first = _decode_node(r, element, f"{path}[0]", depth + 1, ctx, column)

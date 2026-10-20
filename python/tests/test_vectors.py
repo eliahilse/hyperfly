@@ -22,8 +22,9 @@ def deep_eq(a, b) -> bool:
 
 def run_valid(vector, plan):
     codec = compile_ir(vector["ir"], plan=plan)
-    assert codec.encode_body(vector["value"]).hex() == vector["hex"], vector["name"]
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+    value = revive(vector["value"])
+    assert codec.encode_body(value).hex() == vector["hex"], vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), value), vector["name"]
 
 
 def run_invalid_decode(vector, plan):
@@ -36,6 +37,8 @@ def run_invalid_decode(vector, plan):
 def revive(value):
     if isinstance(value, dict) and "$surrogate" in value:
         return chr(int(value["$surrogate"], 16))
+    if isinstance(value, dict) and set(value) == {"$bytes"}:
+        return bytes.fromhex(value["$bytes"])
     if isinstance(value, dict):
         return {key: revive(inner) for key, inner in value.items()}
     if isinstance(value, list):
@@ -103,7 +106,7 @@ def test_columnar_invalid_encode(vector):
 @pytest.mark.parametrize("vector", COLUMNAR["packedDecode"], ids=lambda v: v["name"])
 def test_columnar_packed_decode(vector):
     codec = compile_ir(vector["ir"], plan="columnar")
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"])
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), revive(vector["value"]))
 
 
 def test_packed_without_inflate_fails_closed():
@@ -120,8 +123,9 @@ PROFILED = COLUMNAR["profiled"]
 @pytest.mark.parametrize("vector", PROFILED["valid"], ids=lambda v: v["name"])
 def test_profiled_valid(vector):
     codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
-    assert codec.encode_body(vector["value"]).hex() == vector["hex"], vector["name"]
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+    value = revive(vector["value"])
+    assert codec.encode_body(value).hex() == vector["hex"], vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), value), vector["name"]
 
 
 @pytest.mark.parametrize("vector", PROFILED["invalidDecode"], ids=lambda v: v["name"])
@@ -143,7 +147,7 @@ def test_profiled_requires_profile(vector):
 @pytest.mark.parametrize("vector", PROFILED["decodeOnly"], ids=lambda v: v["name"])
 def test_profiled_decode_only(vector):
     codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), revive(vector["value"])), vector["name"]
 
 
 @pytest.mark.parametrize("vector", PROFILED["invalidProfile"], ids=lambda v: v["name"])
