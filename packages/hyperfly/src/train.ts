@@ -16,15 +16,15 @@ import {
 } from "./profile.js";
 
 export interface TrainOptions {
-  /** Minimum occurrences across samples; a safe integer >= 1. Defaults to 2. */
+  /** Minimum occurrences across samples; a non-negative integer, with 0 clamped to 1. Defaults to 2. */
   minOccurrences?: number;
-  /** Maximum dictionary entries; a safe integer in [0, 16383]. Defaults to 16383. */
+  /** Maximum dictionary entries; a non-negative integer, with values above 16383 clamped to 16383. Defaults to 16383. */
   maxEntries?: number;
 }
 
 function checkedTrainOptions(options: TrainOptions): Required<TrainOptions> {
   try {
-    if (typeof options !== "object" || options === null) {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
       throw new HyperflyError("options", "options: must be an object");
     }
     const prototype = Object.getPrototypeOf(options);
@@ -45,13 +45,16 @@ function checkedTrainOptions(options: TrainOptions): Required<TrainOptions> {
     };
     const minOccurrences = readOption("minOccurrences");
     const maxEntries = readOption("maxEntries");
-    if (minOccurrences !== undefined && (!Number.isSafeInteger(minOccurrences) || minOccurrences < 1)) {
-      throw new HyperflyError("options", "minOccurrences: must be a safe integer >= 1");
+    if (minOccurrences !== undefined && (!Number.isInteger(minOccurrences) || minOccurrences < 0)) {
+      throw new HyperflyError("options", "minOccurrences: must be a non-negative integer");
     }
-    if (maxEntries !== undefined && (!Number.isSafeInteger(maxEntries) || maxEntries < 0 || maxEntries > MAX_DICT_ENTRIES)) {
-      throw new HyperflyError("options", `maxEntries: must be a safe integer in [0, ${MAX_DICT_ENTRIES}]`);
+    if (maxEntries !== undefined && (!Number.isInteger(maxEntries) || maxEntries < 0)) {
+      throw new HyperflyError("options", "maxEntries: must be a non-negative integer");
     }
-    return { minOccurrences: minOccurrences ?? 2, maxEntries: maxEntries ?? MAX_DICT_ENTRIES };
+    return {
+      minOccurrences: Math.max(1, minOccurrences ?? 2),
+      maxEntries: Math.min(MAX_DICT_ENTRIES, maxEntries ?? MAX_DICT_ENTRIES),
+    };
   } catch (cause) {
     if (cause instanceof HyperflyError && cause.code === "options") throw cause;
     throw new HyperflyError("options", "options: could not read train options", { cause });
