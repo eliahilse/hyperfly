@@ -4,7 +4,7 @@ import pytest
 from pydantic import BaseModel, Field
 
 from conftest import load
-from hyperfly import UnsupportedSchemaError
+from hyperfly import UnsupportedSchemaError, compile_ir
 from hyperfly.pydantic import compile, to_ir
 
 
@@ -68,3 +68,40 @@ def test_cross_language_fingerprint_for_shared_schema():
 
     ir = to_ir(Shared)
     assert ir == {"kind": "struct", "fields": [{"name": "pct", "type": {"kind": "int", "min": 0, "max": 100}}]}
+
+
+@pytest.mark.parametrize("validate", [False, True])
+def test_profiled_columnar_roundtrip(validate):
+    class Row(BaseModel):
+        status: str
+
+    class Response(BaseModel):
+        rows: list[Row]
+
+    profile = {"version": 1, "shared": {"columns": [{"leaf": 0, "dict": ["online", "offline"]}]}}
+    codec = compile(Response, plan="columnar", profile=profile, pack=False, validate=validate)
+    reference = compile_ir(to_ir(Response), plan="columnar", profile=profile, pack=False)
+    assert codec.plan == "columnar"
+    assert codec.profile == profile
+    assert codec.ir == reference.ir
+    assert codec.fingerprint == reference.fingerprint
+    assert codec.artifact == reference.artifact
+    value = {"rows": [{"status": "online"}, {"status": "offline"}, {"status": "unknown"}]}
+    model = Response.model_validate(value)
+    expected = model if validate else value
+    assert codec.decode(codec.encode(model)) == expected
+    assert codec.decode_body(codec.encode_body(value)) == expected
+    assert codec.encode(value) == reference.encode(value)
+    codec.profile["shared"]["columns"][0]["dict"][0] = "changed"
+    codec.ir["fields"].clear()
+    profile["shared"]["columns"][0]["dict"][0] = "changed"
+    assert codec.decode(codec.encode(model)) == expected
+
+
+@pytest.mark.parametrize("attribute", ["fingerprint", "artifact", "plan", "ir", "profile"])
+def test_model_codec_metadata_is_read_only(attribute):
+    codec = compile(CandleResponse)
+    metadata = getattr(codec, attribute)
+    with pytest.raises(AttributeError):
+        setattr(codec, attribute, None)
+    assert getattr(codec, attribute) == metadata
