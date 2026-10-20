@@ -102,6 +102,10 @@ function checkKeys(value: object, allowed: readonly string[], path: string): voi
 }
 
 export function validateIR(node: IRNode, path = "$"): void {
+  withinStack(() => checkNode(node, path));
+}
+
+function checkNode(node: IRNode, path: string): void {
   if (!isObject(node)) fail(path, "IR node must be an object");
   if (typeof node.kind === "string" && Object.prototype.hasOwnProperty.call(NODE_KEYS, node.kind)) {
     checkKeys(node, NODE_KEYS[node.kind], path);
@@ -156,14 +160,14 @@ export function validateIR(node: IRNode, path = "$"): void {
       if (node.inner.kind === "literal" && node.inner.value === null) {
         fail(path, "nullable(literal null) has two encodings for null");
       }
-      validateIR(node.inner, `${path}?`);
+      checkNode(node.inner, `${path}?`);
       return;
     }
     case "array": {
       if (node.length !== undefined && (!isSafeInt(node.length) || node.length < 0)) {
         fail(path, "fixed array length must be a non-negative safe integer");
       }
-      validateIR(node.element, `${path}[]`);
+      checkNode(node.element, `${path}[]`);
       return;
     }
     case "struct": {
@@ -187,7 +191,7 @@ export function validateIR(node: IRNode, path = "$"): void {
         if (f.nullable && f.type.kind === "literal" && f.type.value === null) {
           fail(`${path}.${f.name}`, "nullable flag on a null literal has two encodings for null");
         }
-        validateIR(f.type, `${path}.${f.name}`);
+        checkNode(f.type, `${path}.${f.name}`);
       }
       return;
     }

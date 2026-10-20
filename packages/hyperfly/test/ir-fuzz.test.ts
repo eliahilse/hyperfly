@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileIR, HyperflyError, train, validateProfile, type IRNode, type Profile } from "../src/index.js";
+import { compileIR, HyperflyError, train, validateIR, validateProfile, type IRNode, type Profile } from "../src/index.js";
 
 /**
  * compileIR takes IR and profiles that may arrive as untyped JSON, so for ANY JSON
@@ -203,10 +203,11 @@ describe("IR fuzzing", () => {
     }
   });
 
-  test("pinned shapes train and validate profiles or fail with code ir", () => {
+  test("pinned shapes pass validateIR, train and validateProfile or fail with code ir", () => {
     const empty: Profile = { version: 1, shared: { columns: [] } };
     for (const input of PINNED_IR) {
       compilesOrRejects(() => train(input as IRNode, []), input);
+      compilesOrRejects(() => validateIR(input as IRNode), input);
       compilesOrRejects(() => validateProfile(input as IRNode, empty), input);
     }
   });
