@@ -92,6 +92,33 @@ class _WireName(str):
     pass
 
 
+@pytest.mark.parametrize("plan,fingerprint", [
+    ("row", "e6bae6502104cca8f16363f49fb9411e"),
+    ("columnar", "d8e8621a26bcafab2f3d2a2e7e1b3e1a"),
+])
+def test_field_level_grouped_bounds_change_schema_and_fingerprint(plan, fingerprint):
+    class Constrained(BaseModel):
+        x: Annotated[int, _Bounds()]
+
+    expected = {"kind": "struct", "fields": [
+        {"name": "x", "type": {"kind": "int", "min": 2, "max": 8}},
+    ]}
+    assert to_ir(Constrained) == expected
+    codec = compile(Constrained, plan=plan)
+    assert codec.fingerprint == fingerprint
+    assert codec.artifact == compile_ir(expected, plan=plan).artifact
+    plain = {"kind": "struct", "fields": [{"name": "x", "type": {"kind": "int"}}]}
+    assert codec.fingerprint != compile_ir(plain, plan=plan).fingerprint
+    for value in (2, 8):
+        assert codec.decode(codec.encode({"x": value})) == Constrained(x=value).model_dump()
+    for value in (1, 9):
+        with pytest.raises(ValidationError):
+            Constrained(x=value)
+        with pytest.raises(EncodeError) as err:
+            codec.encode({"x": value})
+        assert err.value.code == "range"
+
+
 @pytest.mark.parametrize("annotation,node,value", [
     (list[Annotated[int, Field(ge=0)]],
      {"kind": "array", "element": {"kind": "int", "min": 0}}, [0, 2]),
@@ -192,22 +219,37 @@ def test_annotated_unsupported_inner_type_keeps_path(annotation, path):
 
 
 @pytest.mark.parametrize("wire_name,message", [
-    ("", "field names must be non-empty strings"),
-    (_WireName("wire"), "field names must be non-empty strings"),
+    ("", "field names must be non-empty"),
+    (_WireName("wire"), "field names must be strings"),
+    (_WireName(""), "field names must be strings"),
     ("__proto__", 'field name "__proto__" is not portable'),
     ("0", 'field name "0" is an array index and would reorder as an object key'),
     ("4294967294", 'field name "4294967294" is an array index and would reorder as an object key'),
     ("\ud800", "field name contains a lone surrogate and has no portable encoding"),
     ("\udfff", "field name contains a lone surrogate and has no portable encoding"),
 ])
+@pytest.mark.parametrize("annotation", [int, dict[str, int]])
 @pytest.mark.parametrize("convert", [to_ir, compile])
-def test_nonportable_field_names_fail_with_adapter_path(wire_name, message, convert):
-    model = create_model("BadName", __config__=ConfigDict(defer_build=True), x=(int, Field(alias=wire_name)))
+def test_nonportable_field_names_fail_with_adapter_path(wire_name, message, annotation, convert):
+    model = create_model("BadName", __config__=ConfigDict(defer_build=True), x=(annotation, Field(alias=wire_name)))
     with pytest.raises(UnsupportedSchemaError) as err:
         convert(model)
     assert err.value.code == "unsupported"
     assert err.value.path == "$.x"
     assert str(err.value) == f"$.x: {message}"
+
+
+@pytest.mark.parametrize("wire_name", [0, False, b"wire"])
+@pytest.mark.parametrize("convert", [to_ir, compile])
+def test_non_string_wire_names_fail_with_adapter_path(wire_name, convert):
+    model = create_model("BadName", __config__=ConfigDict(defer_build=True), x=(int, ...))
+    info = model.model_fields["x"]
+    info.alias = info.serialization_alias = wire_name
+    with pytest.raises(UnsupportedSchemaError) as err:
+        convert(model)
+    assert err.value.code == "unsupported"
+    assert err.value.path == "$.x"
+    assert str(err.value) == "$.x: field names must be strings"
 
 
 def test_nonportable_nested_field_name_keeps_adapter_path():

@@ -188,8 +188,10 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
                 "use a single alias=... so the wire has one portable field name",
             )
         wire_name = ser_name
-        if type(wire_name) is not str or not wire_name:
-            _unsupported(field_path, "field names must be non-empty strings")
+        if type(wire_name) is not str:
+            _unsupported(field_path, "field names must be strings")
+        if not wire_name:
+            _unsupported(field_path, "field names must be non-empty")
         try:
             _check_string(wire_name, field_path, "field name")
             _check_field_name(wire_name, field_path)
