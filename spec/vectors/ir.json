@@ -909,6 +909,29 @@
         },
         "hints": {}
       }
+    },
+    {
+      "name": "field-unicode-noncharacter-fffe",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "\ufffe",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "enum-nul-member",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "\u0000"
+        ]
+      }
     }
   ]
 }
