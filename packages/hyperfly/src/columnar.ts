@@ -1194,9 +1194,30 @@ export function encodeColumnarArray(
 
   const leaves = flattenLeaves(element)!;
 
-  const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
-    let obj: Record<string, unknown> = row;
-    for (let d = 0; d < segs.length - 1; d++) {
+  // each nested container is read and checked once per row, when the first leaf under it
+  // reaches that row, so the first reported failure is the same as checking it per leaf
+  const prefixIds = new Map<string, number>();
+  const chains = leaves.map((leaf) => leaf.segs.slice(0, -1).map((_, d) => {
+    const prefix = leaf.segs.slice(0, d + 1).join(".");
+    let id = prefixIds.get(prefix);
+    if (id === undefined) prefixIds.set(prefix, (id = prefixIds.size));
+    return id;
+  }));
+  const containers = Array.from({ length: prefixIds.size }, (): Record<string, unknown>[] => []);
+  const containerOf = (
+    row: Record<string, unknown>,
+    segs: readonly string[],
+    chain: readonly number[],
+    i: number,
+  ): Record<string, unknown> => {
+    let obj = row;
+    for (let d = 0; d < chain.length; d++) {
+      const resolved = containers[chain[d]!]!;
+      const cached = resolved[i];
+      if (cached !== undefined) {
+        obj = cached;
+        continue;
+      }
       const key = segs[d]!;
       const v = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
       if (!isStructValue(v)) {
@@ -1205,17 +1226,18 @@ export function encodeColumnarArray(
           `${path}[${i}].${segs.slice(0, d + 1).join(".")}: expected object`,
         );
       }
-      obj = v;
+      resolved[i] = obj = v;
     }
     return obj;
   };
 
-  const inputs: ColumnInput[] = leaves.map((leaf) => {
+  const inputs: ColumnInput[] = leaves.map((leaf, leafIndex) => {
+    const chain = chains[leafIndex]!;
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const dotted = leaf.segs.join(".");
     const values: unknown[] = rows.map((row, i) => {
-      const holder = containerOf(row, leaf.segs, i);
+      const holder = containerOf(row, leaf.segs, chain, i);
       return Object.prototype.hasOwnProperty.call(holder, leafName) ? holder[leafName] : undefined;
     });
     const states: RowState[] = values.map((v, i) => {

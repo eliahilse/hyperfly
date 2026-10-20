@@ -27,10 +27,10 @@ export class Writer {
     this.buf[this.len++] = byte;
   }
 
-  bytes(data: Uint8Array): void {
-    this.ensure(data.length);
+  bytes(data: Uint8Array, length = data.length): void {
+    this.ensure(length);
     this.buf.set(data, this.len);
-    this.len += data.length;
+    this.len += length;
   }
 
   f64le(value: number): void {

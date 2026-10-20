@@ -508,6 +508,11 @@ describe("struct values", () => {
     ["Set", () => new Set([1])],
     ["Date", () => new Date(0)],
     ["boxed String", () => new String("a")],
+    ["boxed Number", () => new Number(1)],
+    ["boxed Boolean", () => new Boolean(true)],
+    ["DataView", () => new DataView(new ArrayBuffer(1))],
+    ["null-prototype Date", () => Object.setPrototypeOf(new Date(0), null) as unknown],
+    ["plain object with an own Map tag", () => ({ a: 1, [Symbol.toStringTag]: "Map" })],
   ];
 
   function typeErrorAt(run: () => unknown, path: string): void {
@@ -546,6 +551,80 @@ describe("struct values", () => {
       const codec = compileIR(NESTED, { plan });
       expect(codec.decodeBody(codec.encodeBody([{ s: make() }, { s: make() }]))).toEqual([{ s: { a: 1 } }, { s: { a: 1 } }]);
     }
+  });
+
+  test("an own Symbol.toStringTag decides, per the tag rule", () => {
+    const tagged = Object.defineProperty(Object.assign(new Map(), { a: 1 }), Symbol.toStringTag, { value: "Object" });
+    const row = compileIR(ROW);
+    expect(row.decode(row.encode(tagged as never))).toEqual({ a: 1 });
+    typeErrorAt(() => row.encode({ a: 1, [Symbol.toStringTag]: "Map" } as never), "$");
+  });
+
+  test("nested columnar containers report required, type and depth at their path", () => {
+    const DEEP: IRNode = {
+      kind: "array",
+      element: {
+        kind: "struct",
+        fields: [{ name: "s", type: { kind: "struct", fields: [{ name: "t", type: ROW }] } }],
+      },
+    };
+    const codec = compileIR(DEEP, { plan: "columnar" });
+    const codeAt = (value: unknown): [string, string] => {
+      try {
+        codec.encodeBody(value as never);
+      } catch (error) {
+        return [(error as HyperflyError).code, (error as HyperflyError).message];
+      }
+      throw new Error("expected encode to fail");
+    };
+    expect(codeAt([{ s: undefined }])).toEqual(["required", "$[0].s: expected object"]);
+    expect(codeAt([{}])).toEqual(["required", "$[0].s: expected object"]);
+    expect(codeAt([{ s: null }])).toEqual(["type", "$[0].s: expected object"]);
+    expect(codeAt([{ s: { t: new Map() } }])).toEqual(["type", "$[0].s.t: expected object"]);
+  });
+
+  test("the first failure is reported in leaf order, then row order", () => {
+    const TWO: IRNode = {
+      kind: "array",
+      element: {
+        kind: "struct",
+        fields: [
+          { name: "a", type: { kind: "int" } },
+          { name: "s", type: { kind: "struct", fields: [
+            { name: "x", type: { kind: "int" } },
+            { name: "t", type: ROW },
+          ] } },
+        ],
+      },
+    };
+    const codec = compileIR(TWO, { plan: "columnar" });
+    const first = (value: unknown): string => {
+      try {
+        codec.encodeBody(value as never);
+      } catch (error) {
+        return `${(error as HyperflyError).code} ${(error as HyperflyError).message}`;
+      }
+      throw new Error("expected encode to fail");
+    };
+    expect(first([{ a: 1, s: new Map() }, { s: { x: 1, t: {} } }])).toBe("required $[1].a: required field missing");
+    expect(first([{ a: 1, s: { x: 1, t: new Map() } }, { a: 1, s: new Set() }])).toBe("type $[1].s: expected object");
+    expect(first([{ a: 1, s: { t: {} } }, { a: 1, s: { x: 1, t: null } }])).toBe("required $[0].s.x: required field missing");
+  });
+
+  test.each([
+    ["a revoked proxy", () => { const { proxy, revoke } = Proxy.revocable({}, {}); revoke(); return proxy; }],
+    ["a proxy around a Uint8Array", () => new Proxy(new Uint8Array([1]), {})],
+  ])("a bytes value that is %s fails with type", (_, make) => {
+    const bytes = compileIR({ kind: "bytes" });
+    expect(() => bytes.encode(make() as never)).toThrow(expect.objectContaining({ code: "type", message: "$: expected Uint8Array" }));
+  });
+
+  test("a bytes value is measured by its real length, not an overridden one", () => {
+    class Lying extends Uint8Array {
+      override get length(): number { return 0; }
+    }
+    const bytes = compileIR({ kind: "bytes" });
+    expect(bytes.decode(bytes.encode(new Lying([1, 2])))).toEqual(new Uint8Array([1, 2]));
   });
 
   test("encodes a bytes value from another realm", () => {

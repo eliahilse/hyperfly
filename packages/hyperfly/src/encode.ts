@@ -2,7 +2,7 @@ import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
-import { isUint8Array } from "./typed-array.js";
+import { byteLengthOf, isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -16,6 +16,7 @@ function fail(code: ErrorCode, path: string, message: string): never {
 export function isStructValue(value: unknown): value is Record<string, unknown> {
   if (typeof value !== "object" || value === null) return false;
   try {
+    if (Object.getPrototypeOf(value) === Object.prototype && !(Symbol.toStringTag in value)) return true;
     return Object.prototype.toString.call(value) === "[object Object]";
   } catch {
     return false;
@@ -168,11 +169,12 @@ export function encodeNode(
       return;
     }
     case "bytes": {
-      if (!(value instanceof Uint8Array) && !isUint8Array(value)) fail("type", path, "expected Uint8Array");
-      if (value.length > ctx.maxByteLength) fail("limit", path, `bytes of ${value.length} exceeds the codec limit`);
-      chargeBytes(value.length, ctx, path);
-      writeUleb(w, BigInt(value.length));
-      w.bytes(value);
+      if (!isUint8Array(value)) fail("type", path, "expected Uint8Array");
+      const length = byteLengthOf(value);
+      if (length > ctx.maxByteLength) fail("limit", path, `bytes of ${length} exceeds the codec limit`);
+      chargeBytes(length, ctx, path);
+      writeUleb(w, BigInt(length));
+      w.bytes(value, length);
       return;
     }
     case "literal": {
