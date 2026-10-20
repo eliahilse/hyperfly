@@ -2423,15 +2423,26 @@ fn inflate_exact(blob: &[u8], expected: usize) -> std::result::Result<Vec<u8>, (
     use miniz_oxide::inflate::core::{decompress, inflate_flags, DecompressorOxide};
     use miniz_oxide::inflate::TINFLStatus;
 
-    let mut out = vec![0u8; expected];
+    let mut out = vec![0u8; expected.min(64 * 1024)];
     let mut dec = DecompressorOxide::new();
-    // raw deflate (no zlib header) into a single flat buffer, with the whole input present
     let flags = inflate_flags::TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF;
-    let (status, in_consumed, out_written) = decompress(&mut dec, blob, &mut out, 0, flags);
-    if status != TINFLStatus::Done || out_written != expected || in_consumed != blob.len() {
-        return Err(());
+    let mut in_pos = 0;
+    let mut out_pos = 0;
+    loop {
+        let (status, in_consumed, out_written) =
+            decompress(&mut dec, &blob[in_pos..], &mut out, out_pos, flags);
+        in_pos += in_consumed;
+        out_pos += out_written;
+        match status {
+            TINFLStatus::Done if out_pos == expected && in_pos == blob.len() => return Ok(out),
+            TINFLStatus::HasMoreOutput if out.len() < expected => {
+                let new_len = out.len().saturating_mul(2).min(expected);
+                out.reserve_exact(new_len - out.len());
+                out.resize(new_len, 0);
+            }
+            _ => return Err(()),
+        }
     }
-    Ok(out)
 }
 
 fn decode_utf8(data: &[u8], path: &str, index: usize) -> Result<String> {

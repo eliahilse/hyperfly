@@ -64,6 +64,11 @@ A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact
 could fetch from `serve_artifact`; once it has it, the same route answers in binary.
 There is no failure mode where the response is unreadable.
 
+The JSON fallback writes pydantic models with `model_dump(mode="json", by_alias=True)`,
+so field aliases and serializers such as `ser_json_bytes` apply. Raw dicts and lists
+must already be JSON-ready apart from enums (written as their values) and non-finite
+floats (written as `null`, as `JSON.stringify` does); `bytes` has no JSON form and raises.
+
 Registering the outgoing codec alongside the incoming one is what makes retraining
 safe: a new profile is a new fingerprint, so a deployment holding only one codec
 turns every rollout into a cutover.
