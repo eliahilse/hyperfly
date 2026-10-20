@@ -15,12 +15,12 @@ export interface DecodeLimits {
   maxAmplification: number;
 }
 
-export const DEFAULT_LIMITS: DecodeLimits = {
+export const DEFAULT_LIMITS: Readonly<DecodeLimits> = Object.freeze({
   maxDepth: 64,
   maxItems: 2 ** 24,
   maxByteLength: 2 ** 28,
   maxAmplification: 4096,
-};
+});
 
 export class Reader {
   private readonly buf: Uint8Array;
