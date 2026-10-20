@@ -6,7 +6,7 @@ import tracemalloc
 from enum import Enum, IntEnum
 
 import pytest
-from conftest import load, serializer_warnings, warning_details
+from conftest import load, pydantic_version, serializer_warnings, warning_details
 from pydantic import BaseModel
 
 from hyperfly import HEADER_SIZE, WIRE_VERSION, CodecRegistry, DecodeError, EncodeError, HyperflyError, Limits, compile_ir
@@ -27,6 +27,7 @@ from hyperfly.http import (
 from hyperfly.pydantic import compile as compile_model
 
 IR = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}]}
+PYDANTIC_VERSION = pydantic_version()
 IR_B = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}, {"name": "n", "type": {"kind": "int"}}]}
 CODEC_A = compile_ir(IR)
 CODEC_B = compile_ir(IR_B)
@@ -686,6 +687,10 @@ def test_json_fallback_respects_model_dump_exclusions(payload):
     assert value.secret == "hidden"
 
 
+@pytest.mark.skipif(
+    (2, 6) <= PYDANTIC_VERSION < (2, 10),
+    reason="pydantic 2.6-2.9 deep-copy field defaults while building the model",
+)
 def test_json_fallback_preserves_unpicklable_schema_defaults_and_callbacks():
     import threading
     from typing import Annotated, Any
