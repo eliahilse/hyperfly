@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import {
   compileIR,
   DEFAULT_LIMITS,
@@ -491,5 +492,71 @@ describe("IR acceptance", () => {
       }
       throw new Error("compiled invalid input");
     }
+  });
+});
+
+describe("struct values", () => {
+  const ROW: IRNode = { kind: "struct", fields: [{ name: "a", type: { kind: "int" }, optional: true }] };
+  const NESTED: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: ROW }] },
+  };
+  const rejected: [string, () => unknown][] = [
+    ["Uint8Array", () => new Uint8Array(1)],
+    ["ArrayBuffer", () => new ArrayBuffer(1)],
+    ["Map", () => new Map([["a", 1]])],
+    ["Set", () => new Set([1])],
+    ["Date", () => new Date(0)],
+    ["boxed String", () => new String("a")],
+  ];
+
+  function typeErrorAt(run: () => unknown, path: string): void {
+    try {
+      run();
+    } catch (error) {
+      expect(error).toBeInstanceOf(HyperflyError);
+      expect((error as HyperflyError).code).toBe("type");
+      expect((error as HyperflyError).message).toBe(`${path}: expected object`);
+      return;
+    }
+    throw new Error("expected encode to fail");
+  }
+
+  test.each(rejected)("rejects a %s with type at its path", (_, make) => {
+    typeErrorAt(() => compileIR(ROW).encode(make() as never), "$");
+    typeErrorAt(() => compileIR(NESTED).encodeBody([{ s: make() }]), "$[0].s");
+    typeErrorAt(() => compileIR(NESTED, { plan: "columnar" }).encodeBody([make()]), "$[0]");
+    typeErrorAt(() => compileIR(NESTED, { plan: "columnar" }).encodeBody([{ s: make() }]), "$[0].s");
+  });
+
+  class Point {
+    a = 1;
+  }
+  const accepted: [string, () => unknown][] = [
+    ["plain object", () => ({ a: 1 })],
+    ["null-prototype object", () => Object.assign(Object.create(null) as object, { a: 1 })],
+    ["class instance", () => new Point()],
+    ["object from another realm", () => runInNewContext("({ a: 1 })")],
+  ];
+
+  test.each(accepted)("encodes a %s", (_, make) => {
+    const row = compileIR(ROW);
+    expect(row.decode(row.encode(make() as never))).toEqual({ a: 1 });
+    for (const plan of ["row", "columnar"] as const) {
+      const codec = compileIR(NESTED, { plan });
+      expect(codec.decodeBody(codec.encodeBody([{ s: make() }, { s: make() }]))).toEqual([{ s: { a: 1 } }, { s: { a: 1 } }]);
+    }
+  });
+
+  test("encodes a bytes value from another realm", () => {
+    const foreign = runInNewContext("new Uint8Array([1, 2])") as Uint8Array;
+    expect(foreign instanceof Uint8Array).toBe(false);
+    const bytes = compileIR({ kind: "bytes" });
+    expect(bytes.decode(bytes.encode(foreign))).toEqual(new Uint8Array([1, 2]));
+    const rows = compileIR({
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "b", type: { kind: "bytes" } }] },
+    }, { plan: "columnar" });
+    expect(rows.decodeBody(rows.encodeBody([{ b: foreign }]))).toEqual([{ b: new Uint8Array([1, 2]) }]);
   });
 });

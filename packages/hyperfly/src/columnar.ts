@@ -1,5 +1,5 @@
 import { decodeNode, enterArray, type Inflate } from "./decode.js";
-import { chargeBytes, checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
+import { chargeBytes, checkAmplification, chargeItems, encodeNode, isStructValue, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
@@ -1188,10 +1188,8 @@ export function encodeColumnarArray(
   const payloadStart = w.size;
 
   const rows = value.map((row, i) => {
-    if (typeof row !== "object" || row === null || Array.isArray(row)) {
-      throw new EncodeError("type", `${path}[${i}]: expected object`);
-    }
-    return row as Record<string, unknown>;
+    if (!isStructValue(row)) throw new EncodeError("type", `${path}[${i}]: expected object`);
+    return row;
   });
 
   const leaves = flattenLeaves(element)!;
@@ -1201,13 +1199,13 @@ export function encodeColumnarArray(
     for (let d = 0; d < segs.length - 1; d++) {
       const key = segs[d]!;
       const v = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
-      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+      if (!isStructValue(v)) {
         throw new EncodeError(
           v === undefined ? "required" : "type",
           `${path}[${i}].${segs.slice(0, d + 1).join(".")}: expected object`,
         );
       }
-      obj = v as Record<string, unknown>;
+      obj = v;
     }
     return obj;
   };

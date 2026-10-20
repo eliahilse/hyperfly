@@ -2,6 +2,7 @@ import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
+import { isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -9,6 +10,16 @@ const encoder = new TextEncoder();
 
 function fail(code: ErrorCode, path: string, message: string): never {
   throw new EncodeError(code, `${path}: ${message}`);
+}
+
+/** A struct value is an object tagged "[object Object]": typed arrays, Map, Set, Date and boxed primitives are not. */
+export function isStructValue(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    return Object.prototype.toString.call(value) === "[object Object]";
+  } catch {
+    return false;
+  }
 }
 
 function checkSurrogates(s: string, path: string): void {
@@ -157,7 +168,7 @@ export function encodeNode(
       return;
     }
     case "bytes": {
-      if (!(value instanceof Uint8Array)) fail("type", path, "expected Uint8Array");
+      if (!(value instanceof Uint8Array) && !isUint8Array(value)) fail("type", path, "expected Uint8Array");
       if (value.length > ctx.maxByteLength) fail("limit", path, `bytes of ${value.length} exceeds the codec limit`);
       chargeBytes(value.length, ctx, path);
       writeUleb(w, BigInt(value.length));
@@ -208,10 +219,8 @@ export function encodeNode(
       return;
     }
     case "struct": {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        fail("type", path, "expected object");
-      }
-      const record = value as Record<string, unknown>;
+      if (!isStructValue(value)) fail("type", path, "expected object");
+      const record = value;
       // own properties only, snapshotted once: inherited Object.prototype members are not data,
       // and accessor properties must not desync the bitmap from the payload
       const snapshot = node.fields.map((field) =>
