@@ -159,8 +159,16 @@ export function acceptHeader(fingerprints: readonly string[]): string {
   return fingerprints.join(", ");
 }
 
+function trimOws(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && (s.charCodeAt(start) === 0x20 || s.charCodeAt(start) === 0x09)) start++;
+  while (end > start && (s.charCodeAt(end - 1) === 0x20 || s.charCodeAt(end - 1) === 0x09)) end--;
+  return s.slice(start, end);
+}
+
 function mediaType(contentType: string | null | undefined): string {
-  return (contentType ?? "application/json").split(";", 1)[0]!.replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase();
+  return trimOws((contentType ?? "application/json").split(";", 1)[0]!).toLowerCase();
 }
 
 function rejectsHyperfly(accept: string | null | undefined): boolean {
@@ -169,29 +177,31 @@ function rejectsHyperfly(accept: string | null | undefined): boolean {
   let specificity = 0;
   let refused = false;
   for (let count = 0; count < MAX_ENTRIES && start <= accept.length; count++) {
-    const comma = accept.indexOf(",", start);
-    const range = accept.slice(start, comma === -1 ? accept.length : comma);
-    start = comma === -1 ? accept.length + 1 : comma + 1;
+    let end = start;
+    let quoted = false;
+    for (; end < accept.length; end++) {
+      const code = accept.charCodeAt(end);
+      if (quoted && code === 0x5c) end++;
+      else if (code === 0x22) quoted = !quoted;
+      else if (!quoted && code === 0x2c) break;
+    }
+    const range = accept.slice(start, end);
+    start = end + 1;
     const semicolon = range.indexOf(";");
-    const type = range.slice(0, semicolon === -1 ? range.length : semicolon)
-      .replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase();
+    const type = trimOws(range.slice(0, semicolon === -1 ? range.length : semicolon)).toLowerCase();
     const rank = type === HYPERFLY_MEDIA_TYPE ? 3 : type === "application/*" ? 2 : type === "*/*" ? 1 : 0;
     if (rank <= specificity) continue;
     let valid = true;
     let zero = false;
-    let parameterStart = semicolon;
-    while (parameterStart !== -1) {
-      const next = range.indexOf(";", parameterStart + 1);
-      const parameter = range.slice(parameterStart + 1, next === -1 ? range.length : next);
+    if (semicolon !== -1) {
+      const parameter = range.slice(semicolon + 1);
       const equals = parameter.indexOf("=");
-      const name = parameter.slice(0, equals).replace(/^[ \t]+|[ \t]+$/g, "").toLowerCase();
-      const value = parameter.slice(equals + 1).replace(/^[ \t]+|[ \t]+$/g, "");
+      const name = trimOws(parameter.slice(0, equals)).toLowerCase();
+      const value = trimOws(parameter.slice(equals + 1));
       if (equals === -1 || name !== "q" || !/^(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)(?![\s\S])/.test(value)) {
         valid = false;
-        break;
       }
       zero = Number(value) === 0;
-      parameterStart = next;
     }
     if (valid) {
       specificity = rank;
@@ -253,6 +263,9 @@ export function respond<T>(
   });
   const { body, headers } = encodeFor(decision, value, options);
   const responseHeaders = new Headers(options.headers);
+  for (const name of ["Content-Type", "Content-Length", "Hyperfly-Codec", "Hyperfly-Offer"]) {
+    responseHeaders.delete(name);
+  }
   const vary = new Map<string, string>();
   for (const token of `${responseHeaders.get("vary") ?? ""},${headers.Vary}`.split(",")) {
     const name = token.trim();
@@ -281,17 +294,30 @@ export interface ReadBodyOptions {
 }
 
 /** Read a hyperfly or JSON request body (negotiation §4). */
-export async function readBody<T>(
+export function readBody<T>(
   request: Request,
   registry: CodecRegistry,
   options: ReadBodyOptions = {},
 ): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BODY_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError("maxBytes must be a non-negative safe integer");
+  }
+  return readBodyWithinLimit<T>(request, registry, maxBytes);
+}
+
+async function readBodyWithinLimit<T>(
+  request: Request,
+  registry: CodecRegistry,
+  maxBytes: number,
+): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
   const contentType = mediaType(request.headers.get("content-type"));
   const isHyperfly = contentType === HYPERFLY_MEDIA_TYPE;
-  if (!isHyperfly && contentType !== "application/json" && !contentType.endsWith("+json")) {
+  const isJson = contentType === "application/json"
+    || /^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+\+json(?![\s\S])/.test(contentType);
+  if (!isHyperfly && !isJson) {
     return { ok: false, response: new Response(null, { status: 415 }) };
   }
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BODY_BYTES;
   const contentLength = request.headers.get("content-length");
   if (contentLength !== null && /^\d+$/.test(contentLength.trim()) && Number(contentLength) > maxBytes) {
     return { ok: false, response: new Response(null, { status: 413 }) };
@@ -306,13 +332,23 @@ export async function readBody<T>(
         if (done) break;
         length += value.byteLength;
         if (length > maxBytes) {
-          await reader.cancel();
+          try {
+            reader.cancel().catch(() => {});
+          } catch {
+            // Cancellation is best effort.
+          }
           return { ok: false, response: new Response(null, { status: 413 }) };
         }
         chunks.push(value);
       }
+    } catch {
+      return { ok: false, response: new Response(null, { status: 400 }) };
     } finally {
-      reader.releaseLock();
+      try {
+        reader.releaseLock();
+      } catch {
+        // Stream cleanup must not replace the response.
+      }
     }
   }
   const bytes = new Uint8Array(length);
@@ -331,7 +367,7 @@ export async function readBody<T>(
   try {
     const fingerprint = peekFingerprint(bytes);
     const codecHeader = request.headers.get(CODEC_HEADER);
-    if (codecHeader !== null && codecHeader.replace(/^[ \t]+|[ \t]+$/g, "") !== fingerprint) {
+    if (codecHeader !== null && trimOws(codecHeader) !== fingerprint) {
       return { ok: false, response: new Response(null, { status: 400 }) };
     }
     const codec = registry.get(fingerprint);
