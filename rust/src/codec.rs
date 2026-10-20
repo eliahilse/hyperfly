@@ -6,8 +6,11 @@ use crate::value::Value;
 use crate::wire::*;
 use std::collections::HashMap;
 
+/// Envelope magic bytes, `0x68 0x66` (`hf`).
 pub const MAGIC: [u8; 2] = [0x68, 0x66];
+/// Envelope wire major version, 1.
 pub const WIRE_VERSION: u8 = 1;
+/// Envelope header size in bytes: 2 magic, 1 version, and 16 fingerprint bytes.
 pub const HEADER_SIZE: usize = 19;
 
 const NEG_ZERO_BITS: u64 = 0x8000_0000_0000_0000;
@@ -338,6 +341,7 @@ fn sig_bytes(x: u64) -> usize {
     (64 - x.leading_zeros() as usize).div_ceil(8)
 }
 
+/// A validated schema, layout, and optional profile for bounded encoding and decoding.
 pub struct Codec {
     ir: Node,
     plan: Plan,
@@ -348,16 +352,33 @@ pub struct Codec {
     codes: HashMap<usize, HashMap<String, u64>>,
     grammars: HashMap<usize, Vec<GrammarToken>>,
     derivations: HashMap<usize, Derivation>,
-    pub artifact: String,
+    artifact: String,
     fp: [u8; 16],
-    pub fingerprint: String,
+    fingerprint: String,
 }
 
 impl Codec {
+    /// Compiles `ir` with the body layout `plan` and no profile.
+    ///
+    /// `limits` bounds encoding and decoding. `pack` enables DEFLATE string-column
+    /// candidates and decoding packed string columns; false rejects packed input
+    /// with [`ErrorCode::Unsupported`]. Packing does not change the fingerprint.
+    ///
+    /// Returns [`ErrorCode::Ir`] if the schema or selected layout is invalid.
     pub fn compile(ir: Node, plan: Plan, limits: Limits, pack: bool) -> Result<Codec> {
         Codec::compile_with_profile(ir, plan, limits, pack, None)
     }
 
+    /// Compiles `ir` with `plan` and an optional decode-critical `profile`.
+    ///
+    /// `limits` bounds encoding and decoding. `pack` enables DEFLATE string-column
+    /// candidates and acceptance of packed input, independently of profile modes.
+    /// False rejects packed input with [`ErrorCode::Unsupported`]. Profiles apply
+    /// only to [`Plan::Columnar`]; their shared content changes the fingerprint,
+    /// while `pack` does not.
+    ///
+    /// Returns [`ErrorCode::Ir`] for an invalid schema, layout, profile, or a
+    /// profile supplied with [`Plan::Row`].
     pub fn compile_with_profile(
         ir: Node,
         plan: Plan,
@@ -426,6 +447,17 @@ impl Codec {
         })
     }
 
+    /// Returns the locally derived canonical artifact JSON.
+    pub fn artifact(&self) -> &str {
+        &self.artifact
+    }
+
+    /// Returns the artifact fingerprint as 32 lowercase hexadecimal characters.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// Returns the compiled profile, or `None` when compiled without one.
     pub fn profile(&self) -> Option<&Profile> {
         self.profile.as_ref()
     }
@@ -446,6 +478,10 @@ impl Codec {
         self.derivations.get(&ordinal)
     }
 
+    /// Encodes `value` as a body without an envelope header.
+    ///
+    /// Returns a typed error for schema mismatches, missing required fields,
+    /// out-of-range integers, non-finite floats, or exceeded resource limits.
     pub fn encode_body(&self, value: &Value) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         let mut budget = ItemBudget::new(self.limits.max_total_items);
@@ -456,6 +492,11 @@ impl Codec {
         Ok(out)
     }
 
+    /// Decodes a headerless body using this codec's schema, plan, and profile.
+    ///
+    /// Returns a typed error for malformed, truncated, trailing, or unsupported
+    /// input, out-of-range values, or exceeded resource limits. No partial value
+    /// is returned; the caller is responsible for selecting the matching codec.
     pub fn decode_body(&self, data: &[u8]) -> Result<Value> {
         let mut r = Reader::new(data, self.limits);
         let value = self.dec(&mut r, &self.ir, "$", 0, 0)?;
@@ -463,6 +504,8 @@ impl Codec {
         Ok(value)
     }
 
+    /// Encodes `value` with a [`HEADER_SIZE`]-byte magic, version, and fingerprint header.
+    /// Returns the same validation and resource-limit errors as [`Self::encode_body`].
     pub fn encode(&self, value: &Value) -> Result<Vec<u8>> {
         let body = self.encode_body(value)?;
         let mut out = Vec::with_capacity(HEADER_SIZE + body.len());
@@ -473,6 +516,11 @@ impl Codec {
         Ok(out)
     }
 
+    /// Verifies an envelope header before decoding its body, rejecting trailing bytes.
+    ///
+    /// Returns [`ErrorCode::Header`] for a short header, bad magic, or unsupported
+    /// wire version, [`ErrorCode::Fingerprint`] for a different artifact, and
+    /// the body errors described by [`Self::decode_body`].
     pub fn decode(&self, data: &[u8]) -> Result<Value> {
         if data.len() < HEADER_SIZE {
             return err(ErrorCode::Header, "shorter than envelope header");
