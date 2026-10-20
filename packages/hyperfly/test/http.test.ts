@@ -748,8 +748,11 @@ describe("request body limits", () => {
     })).toEqual({ ok: true, value: "é" });
   });
 
-  test("copies each chunk before the stream reuses its buffer", async () => {
-    const buffer = new Uint8Array(1);
+  test.each([
+    ["Uint8Array", () => new Uint8Array(1)],
+    ["Buffer", () => Buffer.alloc(1)],
+  ])("copies each %s chunk before the stream reuses its buffer", async (_, alloc) => {
+    const buffer = alloc();
     const digits = new TextEncoder().encode("12");
     let pulls = 0;
     const body = new ReadableStream<Uint8Array>({
