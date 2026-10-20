@@ -43,23 +43,43 @@ struct ColumnInput<'a> {
     participating: Vec<&'a Value>,
 }
 
-struct DecodedLeaf {
+#[derive(Default)]
+struct StrColumn {
+    text: String,
+    ends: Vec<usize>,
+}
+
+impl StrColumn {
+    fn push(&mut self, value: &str) {
+        self.text.push_str(value);
+        self.ends.push(self.text.len());
+    }
+
+    fn get(&self, index: usize) -> Option<&str> {
+        let end = *self.ends.get(index)?;
+        let start = if index == 0 { 0 } else { self.ends[index - 1] };
+        self.text.get(start..end)
+    }
+}
+
+struct DecodedLeaf<'a> {
     slots: Vec<usize>,
-    values: LeafValues,
+    values: LeafValues<'a>,
     null_rows: Vec<usize>,
 }
 
-enum LeafValues {
+enum LeafValues<'a> {
     Int(Vec<i64>),
     Float(Vec<f64>),
     Bool(Vec<bool>),
-    Str(Vec<String>),
+    Str(StrColumn),
+    Enum(Vec<usize>, &'a [String]),
     Bytes(Vec<Vec<u8>>),
     Repeated(Value, usize),
     Values(Vec<Value>),
 }
 
-impl LeafValues {
+impl LeafValues<'_> {
     fn take_value(&mut self, index: usize) -> Option<Value> {
         match self {
             LeafValues::Int(values) => values
@@ -71,9 +91,11 @@ impl LeafValues {
             LeafValues::Bool(values) => values
                 .get_mut(index)
                 .map(|value| Value::Bool(std::mem::take(value))),
-            LeafValues::Str(values) => values
-                .get_mut(index)
-                .map(|value| Value::Str(std::mem::take(value))),
+            LeafValues::Str(values) => values.get(index).map(|value| Value::Str(value.to_owned())),
+            LeafValues::Enum(indices, members) => indices
+                .get(index)
+                .and_then(|index| members.get(*index))
+                .map(|member| Value::Str(member.clone())),
             LeafValues::Bytes(values) => values
                 .get_mut(index)
                 .map(|value| Value::Bytes(std::mem::take(value))),
@@ -97,17 +119,17 @@ fn input_source_value<'a>(
     input.values.get(row).copied().flatten()
 }
 
-fn decoded_source_value(
-    decoded: &[DecodedLeaf],
+fn decoded_source_value<'a>(
+    decoded: &'a [DecodedLeaf<'_>],
     ordinal_base: usize,
     ordinal: usize,
     row: usize,
-) -> Option<&str> {
+) -> Option<&'a str> {
     let local = ordinal.checked_sub(ordinal_base)?;
     let entry = decoded.get(local)?;
     let participant = entry.slots.binary_search(&row).ok()?;
     match &entry.values {
-        LeafValues::Str(values) => values.get(participant).map(String::as_str),
+        LeafValues::Str(values) => values.get(participant),
         _ => None,
     }
 }
@@ -710,6 +732,21 @@ impl Codec {
                     code: ErrorCode::Limit,
                     message: format!("{path}: array payload size underflow"),
                 })?;
+                if has_payload(element) {
+                    let affordable = u128::try_from(payload_bytes)
+                        .ok()
+                        .and_then(|payload| payload.checked_mul(8))
+                        .ok_or_else(|| Error {
+                            code: ErrorCode::Limit,
+                            message: format!("{path}: row affordability arithmetic overflow"),
+                        })?;
+                    if u128::from(item_count) > affordable {
+                        return err(
+                            ErrorCode::Limit,
+                            format!("{path}: {item_count} items in {payload_bytes} payload byte(s) exceeds the one-bit floor"),
+                        );
+                    }
+                }
                 self.check_amplification(items.len(), payload_bytes, path)
             }
             Node::Struct(fields) => {
@@ -1435,9 +1472,10 @@ impl Codec {
                     self.derivation_of(ordinal_base + leaf_index),
                     &self.codes,
                 )?),
-                Node::Enum(members) => {
-                    LeafValues::Str(dec_enum_column(r, members, slots.len(), &field_path)?)
-                }
+                Node::Enum(members) => LeafValues::Enum(
+                    dec_enum_column(r, members, slots.len(), &field_path)?,
+                    members,
+                ),
                 Node::Literal(_) => match slots.first() {
                     Some(row) => LeafValues::Repeated(
                         self.dec(
@@ -1494,13 +1532,14 @@ impl Codec {
         // Materialize rows only after every column has decoded successfully. This
         // keeps a truncated hostile body from allocating one object per declared row.
         let mut rows: Vec<Vec<(String, Value)>> = (0..count).map(|_| Vec::new()).collect();
-        for (leaf_index, leaf) in leaves.iter().enumerate() {
+        let mut decoded = decoded.into_iter();
+        for leaf in leaves {
             if leaf.segs.len() > 1 {
                 for row in &mut rows {
                     ensure_path(row, &leaf.segs[..leaf.segs.len() - 1])?;
                 }
             }
-            let entry = decoded.get_mut(leaf_index).ok_or_else(|| Error {
+            let mut entry = decoded.next().ok_or_else(|| Error {
                 code: ErrorCode::Truncated,
                 message: format!("{path}: decoded leaf table is incomplete"),
             })?;
@@ -1641,7 +1680,7 @@ fn dec_enum_column(
     members: &[String],
     count: usize,
     path: &str,
-) -> Result<Vec<String>> {
+) -> Result<Vec<usize>> {
     let width = enum_width(members.len())?;
     let indices = unpack_bits(r, count, width, path)?;
     let mut out = Vec::with_capacity(count);
@@ -1650,13 +1689,13 @@ fn dec_enum_column(
             code: ErrorCode::Range,
             message: format!("{path}[{i}]: enum index is outside the host size domain"),
         })?;
-        let Some(member) = members.get(index) else {
+        if members.get(index).is_none() {
             return err(
                 ErrorCode::Range,
                 format!("{path}[{i}]: enum index {index} out of range"),
             );
-        };
-        out.push(member.clone());
+        }
+        out.push(index);
     }
     Ok(out)
 }
@@ -2532,21 +2571,19 @@ fn inflate_exact(blob: &[u8], expected: usize) -> std::result::Result<Vec<u8>, (
     }
 }
 
-fn decode_utf8(data: &[u8], path: &str, index: usize) -> Result<String> {
-    std::str::from_utf8(data)
-        .map(str::to_owned)
-        .map_err(|_| Error {
-            code: ErrorCode::Utf8,
-            message: format!("{path}[{index}]: invalid UTF-8"),
-        })
+fn decode_utf8<'a>(data: &'a [u8], path: &str, index: usize) -> Result<&'a str> {
+    std::str::from_utf8(data).map_err(|_| Error {
+        code: ErrorCode::Utf8,
+        message: format!("{path}[{index}]: invalid UTF-8"),
+    })
 }
 
-fn read_string_literal(
-    r: &mut Reader,
+fn read_string_literal<'a>(
+    r: &mut Reader<'a>,
     limits: &Limits,
     path: &str,
     index: usize,
-) -> Result<String> {
+) -> Result<&'a str> {
     let len = read_uleb(r)?;
     if len > limits.max_byte_length {
         return err(
@@ -2561,12 +2598,12 @@ fn read_string_literal(
     decode_utf8(r.take(len)?, path, index)
 }
 
-fn check_reconstructed_string(
-    value: String,
+fn check_reconstructed_string<'a>(
+    value: &'a str,
     limits: &Limits,
     path: &str,
     index: usize,
-) -> Result<String> {
+) -> Result<&'a str> {
     let len = u64::try_from(value.len()).map_err(|_| Error {
         code: ErrorCode::Limit,
         message: format!(
@@ -2628,7 +2665,7 @@ fn dec_string_column(
     grammar: Option<&[GrammarToken]>,
     derivation: Option<&Derivation>,
     all_codes: &HashMap<usize, HashMap<String, u64>>,
-) -> Result<Vec<String>> {
+) -> Result<StrColumn> {
     let count = slots.len();
     let mode = r.u8()?;
     if mode > 4 {
@@ -2644,10 +2681,13 @@ fn dec_string_column(
                 format!("{path}: empty column must use mode 0x00"),
             );
         }
-        return Ok(Vec::new());
+        return Ok(StrColumn::default());
     }
 
-    let mut out = Vec::with_capacity(count);
+    let mut out = StrColumn {
+        text: String::new(),
+        ends: Vec::with_capacity(count),
+    };
     if mode == 0x00 {
         for i in 0..count {
             out.push(read_string_literal(r, limits, path, i)?);
@@ -2684,7 +2724,7 @@ fn dec_string_column(
                 code: ErrorCode::Range,
                 message: format!("{path}[{i}]: dictionary code {code} out of range"),
             })?;
-            out.push(check_reconstructed_string(entry.clone(), limits, path, i)?);
+            out.push(check_reconstructed_string(entry, limits, path, i)?);
         }
         return Ok(out);
     }
@@ -2746,12 +2786,8 @@ fn dec_string_column(
                     message: format!("{path}[{i}]: grammar lane value is negative"),
                 })?);
             }
-            out.push(check_reconstructed_string(
-                render_grammar(grammar, &values)?,
-                limits,
-                path,
-                i,
-            )?);
+            let value = render_grammar(grammar, &values)?;
+            out.push(check_reconstructed_string(&value, limits, path, i)?);
             matched += 1;
         }
         return Ok(out);
@@ -2800,12 +2836,12 @@ fn dec_string_column(
                 code: ErrorCode::Range,
                 message: format!("{path}[{i}]: derived dictionary code is outside the mapping"),
             })?;
-            out.push(check_reconstructed_string(value.clone(), limits, path, i)?);
+            out.push(check_reconstructed_string(value, limits, path, i)?);
         }
         return Ok(out);
     }
 
-    let mut lengths = Vec::with_capacity(count);
+    let mut lengths = out.ends;
     let mut total = 0u64;
     for i in 0..count {
         let len = read_uleb(r)?;
@@ -2857,8 +2893,8 @@ fn dec_string_column(
         message: format!("{path}: packed blob failed to inflate or has trailing bytes"),
     })?;
     let mut offset = 0usize;
-    for (i, len) in lengths.into_iter().enumerate() {
-        let end = offset.checked_add(len).ok_or_else(|| Error {
+    for (i, len) in lengths.iter_mut().enumerate() {
+        let end = offset.checked_add(*len).ok_or_else(|| Error {
             code: ErrorCode::Packed,
             message: format!("{path}[{i}]: packed slice offset overflow"),
         })?;
@@ -2866,8 +2902,16 @@ fn dec_string_column(
             code: ErrorCode::Packed,
             message: format!("{path}[{i}]: packed slice exceeds inflated output"),
         })?;
-        out.push(decode_utf8(slice, path, i)?);
+        decode_utf8(slice, path, i)?;
+        *len = end;
         offset = end;
     }
-    Ok(out)
+    let text = String::from_utf8(inflated).map_err(|_| Error {
+        code: ErrorCode::Utf8,
+        message: format!("{path}[0]: invalid UTF-8"),
+    })?;
+    Ok(StrColumn {
+        text,
+        ends: lengths,
+    })
 }
