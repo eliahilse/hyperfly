@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # the release workflow dispatches CI on its release PR, which GITHUB_TOKEN pushes never trigger
+  workflow_dispatch:
 
 # pull requests share one group per branch and cancel superseded runs; every main run gets its own group
 concurrency:
