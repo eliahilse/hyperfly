@@ -538,14 +538,20 @@ function decodeFloatColumn(r: Reader, count: number, path: string): Column<numbe
       }
       return Number(m) / pow;
     };
+    let prev = 0n;
+    const next = (i: number): number => {
+      const form = unzigzag(readUleb(r));
+      prev = i === 0 || mode === 3 ? form : prev + form;
+      return mantissa(prev, i);
+    };
+    // every mantissa, and in delta mode every difference, costs at least one byte: a body
+    // too short for the column fails on its first bad value or its end, before allocating
+    if (r.remaining() < count) {
+      for (let i = 0; i < count; i++) next(i);
+    }
     r.need(count);
     const out = new Float64Array(count);
-    let prev = unzigzag(readUleb(r));
-    out[0] = mantissa(prev, 0);
-    for (let i = 1; i < count; i++) {
-      prev = mode === 3 ? unzigzag(readUleb(r)) : prev + unzigzag(readUleb(r));
-      out[i] = mantissa(prev, i);
-    }
+    for (let i = 0; i < count; i++) out[i] = next(i);
     return (j) => out[j]!;
   }
 
@@ -557,17 +563,21 @@ function decodeFloatColumn(r: Reader, count: number, path: string): Column<numbe
   };
 
   if (mode === 0) {
+    // a body too short for the column fails on its first bad value or its end, before allocating
+    if (r.remaining() < 8 * count) {
+      for (let i = 0; i < count; i++) validate(r.u64le(), i);
+    }
     r.need(8 * count);
     const out = new Float64Array(count);
     for (let i = 0; i < count; i++) out[i] = validate(r.u64le(), i);
     return (j) => out[j]!;
   }
-  // the first value takes 8 bytes, every later one at least its length byte
-  r.need(8 + count - 1);
-  const out = new Float64Array(count);
-  let prev = r.u64le();
-  out[0] = validate(prev, 0);
-  for (let i = 1; i < count; i++) {
+  let prev = 0n;
+  const next = (i: number): number => {
+    if (i === 0) {
+      prev = r.u64le();
+      return validate(prev, 0);
+    }
     const len = r.u8();
     if (len > 8) throw new DecodeError("marker", `${path}[${i}]: xor length ${len} exceeds 8`);
     let x = 0n;
@@ -576,8 +586,16 @@ function decodeFloatColumn(r: Reader, count: number, path: string): Column<numbe
       throw new DecodeError("float", `${path}[${i}]: non-minimal xor encoding`);
     }
     prev ^= x;
-    out[i] = validate(prev, i);
+    return validate(prev, i);
+  };
+  // the first value takes 8 bytes, every later one at least its length byte: a body too
+  // short for the column fails on its first bad value or its end, before allocating
+  if (r.remaining() < 8 + count - 1) {
+    for (let i = 0; i < count; i++) next(i);
   }
+  r.need(8 + count - 1);
+  const out = new Float64Array(count);
+  for (let i = 0; i < count; i++) out[i] = next(i);
   return (j) => out[j]!;
 }
 
@@ -869,15 +887,13 @@ function decodeStringColumn(
       values: [],
     };
   };
-  // escaped values follow in row order, each at least its length byte
-  const readEscaped = (escapes: Escapes): void => {
-    r.need(escapes.count);
-    for (let i = 0; i < count; i++) {
-      if (escapes.escaped(i)) escapes.values.push(readLiteral(i));
-    }
-  };
 
   if (mode === 0x00) {
+    // each literal costs at least its length byte: a body too short for the column fails
+    // on its first bad row or its end, before allocating
+    if (r.remaining() < count) {
+      for (let i = 0; i < count; i++) readLiteral(i);
+    }
     r.need(count);
     const out = new Array<string>(count);
     for (let i = 0; i < count; i++) out[i] = readLiteral(i);
@@ -929,13 +945,24 @@ function decodeStringColumn(
     const lanes = numeric.map((token, lane) =>
       decodeIntColumn(r, { min: 0n, max: grammarLimit(token) - 1n }, matchedCount, `${path}.lane[${lane}]`),
     );
-    readEscaped(escapes);
-    if (matchedCount > 0) {
-      // every numeric token renders exactly len ASCII digits, so all matched rows share one length
-      let first = 0;
-      while (escapes.escaped(first)) first++;
-      checkProfileLength(renderGrammar(grammar, lanes.map((lane) => lane(0))), first);
-    }
+    // every numeric token renders exactly len ASCII digits, so all matched rows share one length
+    const resolve = (values: string[] | null): void => {
+      let checked = false;
+      for (let i = 0; i < count; i++) {
+        if (escapes.escaped(i)) {
+          const value = readLiteral(i);
+          if (values) values.push(value);
+        } else if (!checked) {
+          checkProfileLength(renderGrammar(grammar, lanes.map((lane) => lane(0))), i);
+          checked = true;
+        }
+      }
+    };
+    // escaped values follow in row order, each at least its length byte: a body too short
+    // for them fails on its first bad row or its end, before allocating
+    if (r.remaining() < escapes.count) resolve(null);
+    r.need(escapes.count);
+    resolve(escapes.values);
     const rank = escapes.bits ? rankBits(escapes.bits, count) : null;
     return (j) => {
       const index = rank ? rank[j]! : j;
@@ -1309,13 +1336,20 @@ export function decodeColumnarArray(
         break;
       }
       default: {
-        // bytes: each value costs at least its length byte
+        const each = (out: unknown[] | null): void => {
+          for (let row = 0, j = 0; j < participating; row++) {
+            if (!participates(part, row)) continue;
+            const value = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex);
+            if (out) out[j] = value;
+            j++;
+          }
+        };
+        // bytes: each value costs at least its length byte, so a body too short for the
+        // column fails on its first bad value or its end, before allocating
+        if (r.remaining() < participating) each(null);
         r.need(participating);
         const out = new Array<unknown>(participating);
-        for (let row = 0, j = 0; j < participating; row++) {
-          if (!participates(part, row)) continue;
-          out[j++] = decodeNode(r, field.type, `${path}[${row}].${leafName}`, depth + 2, false, inflate, profile, ordinalBase + leafIndex);
-        }
+        each(out);
         values = (j) => out[j];
       }
     }

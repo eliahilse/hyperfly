@@ -553,4 +553,58 @@ describe("doubly-invalid columns report their first failure", () => {
     expect(codeOf(() => codec.decodeBody(fromHex("04010202")))).toBe("range");
     expect(codeOf(() => codec.decodeBody(fromHex("040102")))).toBe("truncated");
   });
+
+  test("a bad float value is its own code even when the column outruns the body", () => {
+    const IR: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "f", type: { kind: "float64" } }] },
+    };
+    const codec = compileIR(IR, { plan: "columnar" });
+    expect(codeOf(() => codec.decodeBody(fromHex("02000000000000000080")))).toBe("float");
+    expect(codeOf(() => codec.decodeBody(fromHex("02000000000000000000")))).toBe("truncated");
+    expect(codeOf(() => codec.decodeBody(fromHex("03010000000000000080")))).toBe("float");
+    expect(codeOf(() => codec.decodeBody(fromHex("0301000000000000000009")))).toBe("marker");
+    expect(codeOf(() => codec.decodeBody(fromHex("040100000000000000000100")))).toBe("float");
+    expect(codeOf(() => codec.decodeBody(fromHex("0301000000000000000000")))).toBe("truncated");
+    expect(codeOf(() => codec.decodeBody(fromHex("0c02008080808080808020")))).toBe("range");
+    expect(codeOf(() => codec.decodeBody(fromHex("0402008000")))).toBe("varint");
+    expect(codeOf(() => codec.decodeBody(fromHex("0c03008080808080808020")))).toBe("range");
+    expect(codeOf(() => codec.decodeBody(fromHex("0403000000")))).toBe("truncated");
+  });
+
+  test("a bad plain string is its own code even when the column outruns the body", () => {
+    const codec = compileIR(STRINGS, { plan: "columnar" });
+    expect(codeOf(() => codec.decodeBody(fromHex("050002fffe")))).toBe("utf8");
+    expect(codeOf(() => codec.decodeBody(fromHex("0a008180808001")))).toBe("limit");
+    expect(codeOf(() => codec.decodeBody(fromHex("05000161")))).toBe("truncated");
+  });
+
+  test("grammar escapes and the rendered length fail in row order", () => {
+    const profile = {
+      version: 2 as const,
+      shared: {
+        columns: [
+          { leaf: 0, grammar: [{ lit: "quite-a-long-prefix-" }, { num: { base: 10 as const, len: 2, case: "lower" as const } }] },
+        ],
+      },
+    };
+    const codec = compileIR(STRINGS, { plan: "columnar", profile });
+    const tight = compileIR(STRINGS, { plan: "columnar", profile, limits: { maxByteLength: 16 } as never });
+    expect(codeOf(() => codec.decodeBody(fromHex("0503050002fffe")))).toBe("utf8");
+    expect(codeOf(() => codec.decodeBody(fromHex("050305000161")))).toBe("truncated");
+    expect(codeOf(() => tight.decodeBody(fromHex("020301020007")))).toBe("limit");
+    expect(codeOf(() => tight.decodeBody(fromHex("02030102000702fffe")))).toBe("limit");
+    expect(codeOf(() => tight.decodeBody(fromHex("02030101000702fffe")))).toBe("utf8");
+    expect(codec.decodeBody(fromHex("0203010200070161"))).toEqual([{ s: "quite-a-long-prefix-07" }, { s: "a" }]);
+  });
+
+  test("a bytes length past maxByteLength is limit even when the column outruns the body", () => {
+    const IR: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "b", type: { kind: "bytes" } }] },
+    };
+    const codec = compileIR(IR, { plan: "columnar" });
+    expect(codeOf(() => codec.decodeBody(fromHex("0a8180808001")))).toBe("limit");
+    expect(codeOf(() => codec.decodeBody(fromHex("0a0161")))).toBe("truncated");
+  });
 });
