@@ -864,8 +864,8 @@ function decodeStringColumn(
   let inflated: Uint8Array;
   try {
     inflated = inflate(blob, total);
-  } catch {
-    throw new DecodeError("packed", `${path}: packed blob failed to inflate`);
+  } catch (err) {
+    throw new DecodeError("packed", `${path}: packed blob failed to inflate`, { cause: err });
   }
   if (inflated.length !== total) {
     throw new DecodeError("packed", `${path}: packed blob inflates to ${inflated.length} bytes, expected ${total}`);

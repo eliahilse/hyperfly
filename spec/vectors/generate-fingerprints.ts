@@ -1,4 +1,5 @@
-import { serializeArtifact, fingerprintOf, toHex, type IRNode, type PlanLayout } from "../../packages/hyperfly/src/index.js";
+import { serializeArtifact, fingerprintOf, toHex, type PlanLayout } from "../../packages/hyperfly/src/canonical.js";
+import type { IRNode } from "../../packages/hyperfly/src/ir.js";
 
 const CASES: { name: string; ir: IRNode }[] = [
   { name: "bool", ir: { kind: "bool" } },

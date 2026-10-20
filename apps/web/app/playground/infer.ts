@@ -8,8 +8,8 @@
  * shown verbatim, so nothing is hidden in the numbers. Everything is measured
  * in-sample and the UI says so.
  */
-import { gzipSync, deflateSync, inflateSync } from "fflate";
-import { compileIR, train, type IRNode } from "hyperfly";
+import { gzipSync, deflateSync } from "fflate";
+import { compileIR, defaultPackHooks, train, type IRNode } from "hyperfly";
 
 export interface InferError {
   path: string;
@@ -19,24 +19,10 @@ export interface InferError {
 const enc = new TextEncoder();
 const MAX_DEPTH = 64;
 
+// browsers have no synchronous deflate, so fflate packs; the package's bounded inflater unpacks
 export const packHooks = {
   deflate: (data: Uint8Array) => deflateSync(data, { level: 6 }),
-  // spec §4: exactly one complete stream — fflate ignores trailing bytes, so
-  // probe: a tight stream breaks when its last byte is dropped, a padded one does not
-  inflate: (data: Uint8Array, maxOutputLength: number) => {
-    const out = inflateSync(data);
-    if (out.length > maxOutputLength) throw new Error("inflated beyond the declared size");
-    if (data.length > 0) {
-      let tight = false;
-      try {
-        inflateSync(data.subarray(0, data.length - 1));
-      } catch {
-        tight = true;
-      }
-      if (!tight) throw new Error("trailing bytes after the deflate stream");
-    }
-    return out;
-  },
+  inflate: defaultPackHooks().inflate,
 };
 
 class Unsupported extends Error {
