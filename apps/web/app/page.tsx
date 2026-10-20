@@ -83,6 +83,7 @@ export default function Home() {
           <a href="#size">size</a>
           <a href="#pipeline">pipeline</a>
           <Link href="/playground">playground</Link>
+          <Link href="/docs">docs</Link>
           <a href={GITHUB} target="_blank" rel="noopener noreferrer">
             github
           </a>
@@ -106,15 +107,9 @@ export default function Home() {
                 github
                 <span aria-hidden="true">↗</span>
               </a>
-              <a
-                className="button"
-                href={`${GITHUB}#readme`}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
+              <Link className="button" href="/docs">
                 docs
-                <span aria-hidden="true">↗</span>
-              </a>
+              </Link>
             </div>
           </div>
           <div className="hero-rule" aria-hidden="true" />
