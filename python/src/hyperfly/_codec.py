@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
 import struct
 import zlib
 from bisect import bisect_left
+from collections.abc import Mapping
 from typing import Any
 
 from ._ir import (
@@ -1514,6 +1516,25 @@ class Codec:
         return self.decode_body(data[HEADER_SIZE:])
 
 
+def check_options(plan: Any, limits: Any, pack: Any) -> None:
+    """Rejects malformed compile options with code "options", before the IR is read."""
+    if limits is not None:
+        if not isinstance(limits, Limits):
+            raise HyperflyError("options", "limits: must be a Limits instance")
+        for field in dataclasses.fields(limits):
+            value = getattr(limits, field.name)
+            if type(value) is not int or not 0 <= value <= INT_MAX:
+                raise HyperflyError("options", f"limits.{field.name}: must be a non-negative safe integer")
+    if not isinstance(plan, str) or plan not in ("row", "columnar"):
+        raise HyperflyError("options", "plan: must be row or columnar")
+    if pack is not None and pack is not False:
+        if not isinstance(pack, Mapping):
+            raise HyperflyError("options", "pack: must be False or a mapping")
+        for key in ("deflate", "inflate"):
+            if pack.get(key) is not None and not callable(pack[key]):
+                raise HyperflyError("options", f"pack.{key}: must be callable")
+
+
 def compile_ir(
     ir: Any,
     *,
@@ -1522,6 +1543,7 @@ def compile_ir(
     pack=None,
     profile: Any = None,
 ) -> Codec:
+    check_options(plan, limits, pack)
     try:
         return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)
     except RecursionError:

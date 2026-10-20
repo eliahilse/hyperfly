@@ -156,13 +156,19 @@ stays reachable through `__cause__`.
 | `DecodeError` | `header`, `truncated`, `trailing`, `varint`, `bitmap`, `marker`, `float`, `utf8`, `range`, `depth`, `limit`, `packed`, `unsupported`, `json`, `validation` |
 | `FingerprintMismatchError` (a `DecodeError`) | `fingerprint` |
 | `UnsupportedSchemaError` | `unsupported` |
-| `HyperflyError` | `ir` |
+| `HyperflyError` | `ir`, `options` |
 
 `json` is a malformed JSON body read by `decode_response` or `decode_request`; its
 `__cause__` is the underlying error, a `json.JSONDecodeError`, `UnicodeDecodeError`
 or `RecursionError`. `validation` is a pydantic `ValidationError` from a codec
 compiled with `validate=True`, raised as `EncodeError` on the encode paths and
 `DecodeError` on the decode paths.
+
+`options` is a malformed compile option, raised by `compile_ir` and the pydantic
+`compile` before the schema is read: a `limits` that is not a `Limits` or has a field
+that is not an integer from 0 to 2^53 - 1, a `plan` other than `"row"` or
+`"columnar"`, a `pack` that is neither `False` nor a mapping of callables, or a
+non-boolean `validate`.
 
 `RequestError` is separate: it is not a `HyperflyError` and has no `code`. It is how
 `read_body` and `decode_request` refuse a request, carrying `status` (400, 413 or

@@ -5,8 +5,8 @@ import types
 import typing
 from typing import Any, Callable, Literal
 
-from ._codec import Codec, compile_ir
-from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, Limits, UnsupportedSchemaError
+from ._codec import Codec, check_options, compile_ir
+from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError, Limits, UnsupportedSchemaError
 
 try:
     import annotated_types as _at
@@ -255,5 +255,8 @@ def compile(  # noqa: A001 - mirrors the documented API
     pack: dict[str, Callable[..., bytes]] | Literal[False] | None = None,
     profile: dict[str, Any] | None = None,
 ) -> _ModelCodec:
+    check_options(plan, limits, pack)
+    if not isinstance(validate, bool):
+        raise HyperflyError("options", "validate: must be a boolean")
     codec = compile_ir(to_ir(model), plan=plan, limits=limits, pack=pack, profile=profile)
     return _ModelCodec(codec, model, validate)

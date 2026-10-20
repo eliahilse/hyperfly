@@ -1,8 +1,11 @@
+import dataclasses
 import math
 
 import pytest
+from pydantic import BaseModel
 
-from hyperfly import EncodeError, compile_ir
+from hyperfly import EncodeError, HyperflyError, Limits, compile_ir
+from hyperfly.pydantic import compile as compile_model
 
 
 @pytest.mark.parametrize("plan", ["row", "columnar"])
@@ -52,3 +55,66 @@ def test_codec_metadata_is_read_only(attribute):
     assert getattr(codec, attribute) == metadata
     assert wire[3:19].hex() == codec.fingerprint
     assert codec.decode(wire) == "hello"
+
+
+BOOL_IR = {"kind": "bool"}
+LIMIT_FIELDS = [field.name for field in dataclasses.fields(Limits)]
+
+
+@pytest.mark.parametrize("field", LIMIT_FIELDS)
+@pytest.mark.parametrize("value", [-1, 2**53, True, 1.0, "1", None])
+def test_invalid_limit_values_are_options_errors(field, value):
+    with pytest.raises(HyperflyError) as err:
+        compile_ir(BOOL_IR, limits=dataclasses.replace(Limits(), **{field: value}))
+    assert err.value.code == "options"
+    assert str(err.value) == f"limits.{field}: must be a non-negative safe integer"
+
+
+@pytest.mark.parametrize("field", LIMIT_FIELDS)
+def test_limit_bounds_are_accepted(field):
+    for value in (0, 2**53 - 1):
+        compile_ir(BOOL_IR, limits=dataclasses.replace(Limits(), **{field: value}))
+
+
+@pytest.mark.parametrize("options, message", [
+    ({"limits": {"max_depth": 3}}, "limits: must be a Limits instance"),
+    ({"plan": "rows"}, "plan: must be row or columnar"),
+    ({"plan": None}, "plan: must be row or columnar"),
+    ({"plan": ["row"]}, "plan: must be row or columnar"),
+    ({"pack": True}, "pack: must be False or a mapping"),
+    ({"pack": "zlib"}, "pack: must be False or a mapping"),
+    ({"pack": {"deflate": 1}}, "pack.deflate: must be callable"),
+    ({"pack": {"inflate": "zlib"}}, "pack.inflate: must be callable"),
+])
+def test_malformed_compile_options_are_options_errors(options, message):
+    with pytest.raises(HyperflyError) as err:
+        compile_ir(BOOL_IR, **options)
+    assert (err.value.code, str(err.value)) == ("options", message)
+
+
+def test_options_are_checked_before_the_ir():
+    with pytest.raises(HyperflyError) as err:
+        compile_ir(None, plan="rows")
+    assert err.value.code == "options"
+
+
+def test_well_formed_pack_options_compile():
+    compile_ir(BOOL_IR, pack=False)
+    compile_ir(BOOL_IR, pack={})
+    compile_ir(BOOL_IR, pack={"deflate": None, "inflate": lambda data, size: data})
+
+
+class Flag(BaseModel):
+    on: bool
+
+
+@pytest.mark.parametrize("options, message", [
+    ({"validate": 1}, "validate: must be a boolean"),
+    ({"validate": None}, "validate: must be a boolean"),
+    ({"plan": "rows"}, "plan: must be row or columnar"),
+    ({"limits": Limits(max_items=-1)}, "limits.max_items: must be a non-negative safe integer"),
+])
+def test_malformed_model_compile_options_are_options_errors(options, message):
+    with pytest.raises(HyperflyError) as err:
+        compile_model(Flag, **options)
+    assert (err.value.code, str(err.value)) == ("options", message)
