@@ -2,4 +2,4 @@
 "hyperfly": minor
 ---
 
-Malformed JSON, failed zod validation and invalid compile options now throw `HyperflyError` subclasses with codes `json`, `validation` and `options`. JSON and validation failures keep the original error as `cause`.
+Malformed JSON, failed zod validation and invalid compile options now throw a `HyperflyError` with code `json`, `validation` or `options`, keeping the original error as `cause` where there is one.
