@@ -56,7 +56,7 @@ def json_copy(value: Any) -> Any:
     return holder[0]
 
 
-def check_artifact_nesting(ir: Any, path: str = "$") -> None:
+def check_artifact_nesting(ir: Any) -> None:
     """Reject IR whose canonical artifact would nest JSON containers deeper than
     MAX_NESTING (wire-v0 section 4), without recursion. The artifact object is depth 1
     and the IR depth 2; only the containers canonical JSON keeps are counted."""
@@ -79,7 +79,7 @@ def check_artifact_nesting(ir: Any, path: str = "$") -> None:
                 reached = depth + 2 if fields else depth + 1
                 stack.extend((f.get("type"), depth + 3) for f in fields if isinstance(f, dict))
         if reached > MAX_NESTING:
-            _fail(path, f"artifact nests deeper than {MAX_NESTING}")
+            raise HyperflyError("ir", f"artifact nests deeper than {MAX_NESTING}")
 
 
 _SCALAR_KEYS = frozenset({"kind"})
@@ -122,7 +122,7 @@ def _check_field_name(name: str, path: str) -> None:
 
 def validate_ir(node: Any, path: str = "$") -> None:
     """Validate a v0 schema; raise code ``ir`` prefixed with the failing path."""
-    check_artifact_nesting(node, path)
+    check_artifact_nesting(node)
     try:
         _check_node(node, path)
     except RecursionError:
@@ -411,13 +411,13 @@ def _walk_column_refs(
 
 
 def validate_profile(ir: dict[str, Any], profile: Any) -> None:
-    """Validate the profile as JSON data, the IR, then the profile against the IR;
+    """Validate the IR, the profile as JSON data, then the profile against the IR;
     raise code ``ir`` on invalid data.
 
     Profile errors have the same ``profile:`` prefix as compilation errors.
     """
-    checked = snapshot_profile(profile)
     validate_ir(ir)
+    checked = snapshot_profile(profile)
     try:
         _validate_profile(ir, checked)
     except RecursionError:
@@ -428,19 +428,19 @@ _PROFILE_CONTAINERS = (list, tuple, set, frozenset, Mapping)
 
 
 def snapshot_profile(profile: Any) -> Any:
-    """A copy of the profile document, which must be JSON data: plain dicts with string
-    keys, lists, strings, booleans, None, ints and finite floats, acyclic and nested at
-    most MAX_NESTING deep."""
+    """A copy of the profile document, which must be acyclic JSON data: plain dicts with
+    string keys, lists, strings, booleans, None, ints and finite floats. Advisory hints
+    may nest to any depth; they are not part of the artifact."""
 
     def fail(message: str) -> NoReturn:
         _fail("profile", message)
 
     holder: list[Any] = [None]
     active: set[int] = set()
-    # (value, depth, parent, key); a None parent marks leaving the container `value`
-    stack: list[tuple[Any, int, Any, Any]] = [(profile, 1, holder, 0)]
+    # (value, parent, key); a None parent marks leaving the container `value`
+    stack: list[tuple[Any, Any, Any]] = [(profile, holder, 0)]
     while stack:
-        item, depth, parent, key = stack.pop()
+        item, parent, key = stack.pop()
         if parent is None:
             active.discard(item)
             continue
@@ -452,21 +452,19 @@ def snapshot_profile(profile: Any) -> Any:
             continue
         if not (kind is dict or kind is list or isinstance(item, _PROFILE_CONTAINERS)):
             fail("must contain only JSON data")
-        if depth > MAX_NESTING:
-            fail(f"nests deeper than {MAX_NESTING}")
         if id(item) in active:
             fail("must not contain cycles")
         if kind is not dict and kind is not list:
             fail("must contain only plain objects and arrays")
         active.add(id(item))
-        stack.append((id(item), depth, None, None))
+        stack.append((id(item), None, None))
         copy: Any
         if kind is list:
             copy = [None] * len(item)
-            stack.extend((item[i], depth + 1, copy, i) for i in range(len(item) - 1, -1, -1))
+            stack.extend((item[i], copy, i) for i in range(len(item) - 1, -1, -1))
         else:
             copy = {}
-            stack.extend((inner, depth + 1, copy, k) for k, inner in reversed(item.items()))
+            stack.extend((inner, copy, k) for k, inner in reversed(item.items()))
         parent[key] = copy
     return holder[0]
 

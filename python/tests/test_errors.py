@@ -262,4 +262,4 @@ def test_constructor_rejects_ir_nested_past_the_cap(factory):
         ir = {"kind": "array", "element": ir}
     with pytest.raises(HyperflyError) as err:
         factory(ir)
-    assert (err.value.code, str(err.value)) == ("ir", "$: artifact nests deeper than 512")
+    assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")

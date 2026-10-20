@@ -56,6 +56,12 @@ def deep_hints(levels):
     return {**PROFILE, "hints": hints}
 
 
+def nested_value(levels, value):
+    for _ in range(levels):
+        value = [value]
+    return value
+
+
 def at_depth(frames, fn):
     return at_depth(frames - 1, fn) if frames else fn()
 
@@ -106,7 +112,7 @@ def test_artifact_nested_512_deep_is_accepted(chain, entry, frames):
 def test_artifact_nested_513_deep_is_rejected(chain, entry, frames):
     with pytest.raises(HyperflyError) as err:
         at_depth(frames, ir_entry_points(CHAINS[chain](DEEPEST + 1))[entry])
-    assert (err.value.code, str(err.value)) == ("ir", "$: artifact nests deeper than 512")
+    assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")
 
 
 @pytest.mark.parametrize("leaf", [
@@ -127,10 +133,10 @@ def test_nesting_ignores_input_the_artifact_drops():
     assert str(err.value) == "$: unknown key extra"
 
 
-def test_nesting_path_follows_the_caller():
+def test_nesting_counts_from_the_artifact_whatever_the_path():
     with pytest.raises(HyperflyError) as err:
         validate_ir(array_chain(DEEPEST + 1), "$.items")
-    assert str(err.value) == "$.items: artifact nests deeper than 512"
+    assert str(err.value) == "artifact nests deeper than 512"
 
 
 def test_cyclic_ir_is_rejected_before_any_walk():
@@ -139,7 +145,7 @@ def test_cyclic_ir_is_rejected_before_any_walk():
     for entry in ("validate_ir", "compile_row", "serialize_node"):
         with pytest.raises(HyperflyError) as err:
             ir_entry_points(ir)[entry]()
-        assert (err.value.code, str(err.value)) == ("ir", "$: artifact nests deeper than 512")
+        assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")
 
 
 def test_validate_ir_never_leaks_recursion_errors():
@@ -192,32 +198,51 @@ def test_deep_values_past_the_stack_are_coded_errors():
     assert err.value.code == "depth"
 
 
+TWO_STRINGS = {"kind": "array", "element": {"kind": "struct", "fields": [
+    {"name": "a", "type": {"kind": "string"}}, {"name": "b", "type": {"kind": "string"}},
+]}}
+DEEPEST_PROFILE = {"version": 2, "shared": {"columns": [
+    {"leaf": 0, "dict": ["id_01"], "grammar": [{"lit": "id_"}, {"num": {"base": 10, "len": 2, "case": "lower"}}]},
+    {"leaf": 1, "derived": {"source": 0, "values": ["one"]}},
+]}}
+
+
+def test_profiles_at_their_deepest_canonical_shape_work_with_ir_at_the_cap():
+    ir = array_chain(507, TWO_STRINGS)
+    value = nested_value(506, [{"a": "id_01", "b": "one"}])
+    validate_profile(ir, DEEPEST_PROFILE)
+    limits = dataclasses.replace(Limits(), max_depth=512)
+    codec = compile_ir(ir, plan="columnar", profile=DEEPEST_PROFILE, limits=limits, pack=False)
+    assert json_depth(json.loads(codec.artifact)) == 512
+    assert codec.artifact == serialize_artifact(ir, "columnar", DEEPEST_PROFILE)
+    assert codec.decode(codec.encode(value)) == value
+    assert train(ir, [value, value]) is not None
+    deeper = {"kind": "array", "element": ir}
+    for check in (
+        lambda: compile_ir(deeper, plan="columnar", profile=DEEPEST_PROFILE),
+        lambda: validate_profile(deeper, DEEPEST_PROFILE),
+        lambda: serialize_artifact(deeper, "columnar", DEEPEST_PROFILE),
+        lambda: train(deeper, []),
+    ):
+        with pytest.raises(HyperflyError) as err:
+            check()
+        assert (err.value.code, str(err.value)) == ("ir", "artifact nests deeper than 512")
+
+
 @pytest.mark.parametrize("frames", [0, 100])
-@pytest.mark.parametrize("plan", ["row", "columnar"])
-def test_profile_nested_512_deep_is_accepted(plan, frames):
-    profile = deep_hints(512)
-    assert json_depth(profile) == 512
+@pytest.mark.parametrize("levels", [512, 513, 20_000])
+def test_advisory_hints_nest_to_any_depth(levels, frames):
+    baseline = compile_ir(ROWS, plan="columnar", profile=PROFILE)
+    profile = deep_hints(levels)
     at_depth(frames, lambda: validate_profile(ROWS, profile))
     codec = at_depth(frames, lambda: compile_ir(ROWS, plan="columnar", profile=profile))
-    assert codec.profile == profile
-
-
-@pytest.mark.parametrize("frames", [0, 100])
-def test_profile_nested_513_deep_is_rejected(frames):
-    profile = deep_hints(513)
-    for check in (lambda: validate_profile(ROWS, profile), lambda: compile_ir(ROWS, plan="columnar", profile=profile)):
-        with pytest.raises(HyperflyError) as err:
-            at_depth(frames, check)
-        assert (err.value.code, str(err.value)) == ("ir", "profile: nests deeper than 512")
-
-
-def test_primitives_at_the_cap_do_not_count():
-    profile = deep_hints(512)
-    inner = profile["hints"]
-    while inner:
-        inner = inner["x"]
-    inner["leaf"] = 1
-    validate_profile(ROWS, profile)
+    assert codec.fingerprint == baseline.fingerprint
+    assert codec.artifact == serialize_artifact(ROWS, "columnar", profile)
+    copy = codec.profile["hints"]
+    assert copy is not profile["hints"]
+    for _ in range(levels - 2):
+        copy = copy["x"]
+    assert copy == {}
 
 
 class Opaque:
@@ -276,10 +301,10 @@ def test_whole_profile_document_is_json_data(profile, message):
     assert (err.value.code, str(err.value)) == ("ir", message)
 
 
-def test_profile_json_data_is_checked_before_the_ir():
+def test_the_ir_is_checked_before_the_profile():
     with pytest.raises(HyperflyError) as err:
         validate_profile({"kind": "nope"}, {**PROFILE, "hints": {"x": math.nan}})
-    assert str(err.value) == "profile: must contain only JSON data"
+    assert str(err.value) == "$: unknown IR kind nope"
 
 
 def test_json_hints_are_kept_and_isolated():
