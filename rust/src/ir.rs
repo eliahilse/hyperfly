@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 /// A schema constant that occupies no body bytes.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     /// The null value.
     Null,
@@ -17,7 +17,7 @@ pub enum Literal {
 
 /// A schema node; struct fields and enum members retain their declared order.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     /// A boolean.
     Bool,
@@ -52,7 +52,7 @@ pub enum Node {
 }
 
 /// A named struct field with independent absence and null permissions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     /// Unique, nonempty name; `__proto__` and decimal array indices below `2^32 - 1` are invalid.
     pub name: String,
@@ -359,7 +359,7 @@ pub struct Derivation {
 
 /// Decode-critical knowledge for one string column; at least one coding option is required.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProfileColumn {
     /// Zero-based leaf ordinal from a depth-first schema walk in declared order.
     /// Each eligible array contributes its flattened leaves without further descent.
@@ -433,7 +433,7 @@ impl ProfileColumn {
 /// # Ok::<(), hyperfly_core::Error>(())
 /// ```
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
     /// Profile version: 1 permits dictionaries only; 2 also permits grammars and derivations.
     pub version: u32,

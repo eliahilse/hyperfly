@@ -106,7 +106,7 @@ fn reconstructed_profile_strings_obey_byte_limit() {
         string_array(vec![string_field("s")]),
         CompileOptions::new()
             .with_plan(Plan::Columnar)
-            .with_limits(limits)
+            .with_limits(limits.clone())
             .with_pack(false)
             .with_profile(dict),
     )
@@ -135,7 +135,7 @@ fn reconstructed_profile_strings_obey_byte_limit() {
         string_array(vec![string_field("s")]),
         CompileOptions::new()
             .with_plan(Plan::Columnar)
-            .with_limits(limits)
+            .with_limits(limits.clone())
             .with_pack(false)
             .with_profile(grammar),
     )

@@ -368,7 +368,7 @@ fn sig_bytes(x: u64) -> usize {
 ///
 /// Build from [`CompileOptions::new`] or [`Default`] and chain the `with_*` setters.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompileOptions {
     /// Body layout; default [`Plan::Row`].
     pub plan: Plan,
@@ -619,7 +619,7 @@ impl Codec {
     /// input, out-of-range values, or exceeded resource limits. No partial value
     /// is returned; the caller is responsible for selecting the matching codec.
     pub fn decode_body(&self, data: &[u8]) -> Result<Value> {
-        let mut r = Reader::new(data, self.limits);
+        let mut r = Reader::new(data, &self.limits);
         let value = self.dec(&mut r, &self.ir, "$", 0, 0)?;
         r.expect_end()?;
         Ok(value)

@@ -44,9 +44,13 @@ fn main() -> Result<(), hyperfly_core::Error> {
 
 `Plan::Columnar` lays arrays of structs out column by column. A `Profile`
 adds decode-critical knowledge for string columns: dictionaries, grammars and
-derived columns. Each `ProfileColumn` names a string leaf by its ordinal in a
-depth-first walk of the schema in declared order. The fingerprint covers the
-profile, so peers only agree when they compiled the same one.
+derived columns. Each `ProfileColumn` names its column by leaf ordinal. Ordinals
+come from a depth-first walk of the schema in declared order that continues
+through struct fields, nullable inner nodes and the elements of ineligible
+arrays. Each eligible array contributes all of its flattened leaves, of every
+kind, as consecutive ordinals and is not descended into further. The
+fingerprint covers the profile, so peers only agree when they compiled the
+same one.
 
 ```rust
 use hyperfly_core::{Codec, CompileOptions, Field, Node, Plan, Profile, ProfileColumn, Value};
@@ -105,15 +109,18 @@ fn main() -> Result<(), hyperfly_core::Error> {
 - `max_items` bounds the element count of each array, and `max_total_items`
   the sum of all array counts in one body.
 - `max_byte_length` bounds each string or bytes value, packed blob and
-  inflated column, and `max_total_bytes` the decoded string and bytes total in
-  one body.
+  inflated column. Literal and enum values are schema constants and are exempt,
+  though they still count toward the byte budget.
+- `max_total_bytes` bounds the decoded string and bytes total in one body,
+  including reconstructed values: literals, enum members and dictionary,
+  grammar and derived strings.
 - `max_amplification` and `max_byte_amplification` scale item and byte budgets
   with the body length, so a short body cannot declare a large result.
 
 ## Errors
 
 Every failure carries an `ErrorCode` and a message. The codes are the same
-strings the TypeScript and Python packages report.
+codec error codes the TypeScript and Python packages report.
 
 ```rust
 use hyperfly_core::{Codec, CompileOptions, ErrorCode, Limits, Node};
@@ -139,15 +146,17 @@ fn main() -> Result<(), hyperfly_core::Error> {
 ## Stability
 
 hyperfly-core follows semantic versioning from 1.0. Within 1.x the wire format
-and the public API are stable. Enums and option structs marked
+and the public API are stable; the minimum supported Rust version is covered by
+its own policy below. Enums and option structs marked
 `#[non_exhaustive]` may gain variants or fields in minor releases, so match
 them with a wildcard arm and build options from `Default` or `new()`. The crate
 has no `unsafe` code and no cargo features.
 
 ## Minimum supported Rust version
 
-Rust 1.82 for the library. The MSRV is raised only in a minor release and noted
-in the changelog, never in a patch release.
+Rust 1.82 for the library. The MSRV is not part of the API stability
+guarantee: it may be raised in a minor release, noted in the changelog, and
+never in a patch release.
 
 ## Specification
 

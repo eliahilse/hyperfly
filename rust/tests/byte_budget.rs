@@ -24,7 +24,11 @@ fn byte_budget_checks_length_prefixes_before_payloads() {
     let mut limits = Limits::default();
     limits.max_total_bytes = 1;
     for ty in [Node::Str, Node::Bytes] {
-        let codec = Codec::compile(ty.clone(), CompileOptions::new().with_limits(limits)).unwrap();
+        let codec = Codec::compile(
+            ty.clone(),
+            CompileOptions::new().with_limits(limits.clone()),
+        )
+        .unwrap();
         assert_eq!(
             codec.decode_body(&[2]).unwrap_err().code(),
             ErrorCode::Limit
@@ -42,7 +46,7 @@ fn byte_budget_checks_length_prefixes_before_payloads() {
             column(ty),
             CompileOptions::new()
                 .with_plan(Plan::Columnar)
-                .with_limits(limits),
+                .with_limits(limits.clone()),
         )
         .unwrap();
         assert_eq!(
@@ -159,7 +163,9 @@ fn zero_byte_budget_accepts_empty_values_and_non_string_nodes() {
     for plan in [Plan::Row, Plan::Columnar] {
         let codec = Codec::compile(
             ir.clone(),
-            CompileOptions::new().with_plan(plan).with_limits(limits),
+            CompileOptions::new()
+                .with_plan(plan)
+                .with_limits(limits.clone()),
         )
         .unwrap();
         let body = codec.encode_body(&value).unwrap();

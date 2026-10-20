@@ -45,7 +45,7 @@ pub enum ErrorCode {
 impl ErrorCode {
     /// Returns the lowercase wire error code name.
     ///
-    /// These are the same codes the TypeScript and Python packages report.
+    /// These are the same codec error codes the TypeScript and Python packages report.
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Varint => "varint",
@@ -76,7 +76,7 @@ impl fmt::Display for ErrorCode {
 }
 
 /// A codec failure with a stable code and a human-readable explanation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Error {
     pub(crate) code: ErrorCode,
     pub(crate) message: String,
@@ -141,7 +141,7 @@ const MAX_ULEB_BYTES: usize = 8;
 /// assert_eq!(codec.limits().max_depth, 16);
 /// ```
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
     /// Maximum nesting depth from root depth zero; default 64. Structs, arrays, and nullable nodes count.
     pub max_depth: u32,
@@ -238,7 +238,7 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(buf: &'a [u8], limits: Limits) -> Self {
+    pub fn new(buf: &'a [u8], limits: &Limits) -> Self {
         Reader {
             buf,
             pos: 0,
