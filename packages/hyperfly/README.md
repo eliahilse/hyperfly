@@ -330,9 +330,9 @@ Compiling, encoding, decoding and loading artifacts throw `HyperflyError` with a
 message. `EncodeError` and `DecodeError` say which direction failed, `FingerprintMismatchError` is a `DecodeError`
 with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `path`. When an underlying error caused
 it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate hook, that error is the standard
-`cause`; an error that describes the input itself has none. Two exceptions are not `HyperflyError`s: network errors
-and aborts from `fetchArtifact` propagate unchanged, and a `maxBytes` that is not a non-negative safe integer throws
-`RangeError`.
+`cause`; an error that describes the input itself has none. A `maxBytes` that is not a non-negative safe integer is
+code `options`. In `fetchArtifact`, a rejected `fetch` and an abort propagate unchanged; a failure while reading the
+artifact body is code `ir`.
 
 ```ts
 import { HyperflyError } from "hyperfly";
@@ -367,7 +367,7 @@ try {
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
 | `json` | Malformed JSON in `decodeResponse` or in artifact text; the `SyntaxError` is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
-| `options` | Invalid compile, artifact or `train` options, such as an unknown limit or a non-boolean `validate`. |
+| `options` | Invalid compile, artifact, `train` or HTTP options, such as an unknown limit or an invalid `maxBytes`. |
 
 ## Entry points
 
@@ -434,7 +434,7 @@ production traffic has been measured yet.
 ## Guarantees
 
 - **Exact-schema compatibility.** Any change to the canonical IR, the plan or the
-  profile is a new fingerprint. Zod refinements and string/array length constraints
+  shared profile (not its training `hints`) is a new fingerprint. Zod refinements and string/array length constraints
   are not part of the IR, so they do not change it. A mismatch fails before the body
   is parsed; it never misreads.
 - **Canonical output.** Encoding is canonical for a given implementation, version and set of pack hooks;
