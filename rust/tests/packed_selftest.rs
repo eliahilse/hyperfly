@@ -73,7 +73,7 @@ fn amplification_limit_bounds_zero_byte_columns() {
 
 #[test]
 fn reconstructed_profile_strings_obey_byte_limit() {
-    use hyperfly_core::ir::{
+    use hyperfly_core::{
         Derivation, GrammarCase, GrammarNum, GrammarToken, Profile, ProfileColumn,
     };
 
@@ -188,7 +188,7 @@ fn reconstructed_profile_strings_obey_byte_limit() {
 /// Two schema positions sharing one array node must still get distinct column ordinals.
 #[test]
 fn aliased_array_nodes_get_distinct_ordinals() {
-    use hyperfly_core::ir::{Profile, ProfileColumn};
+    use hyperfly_core::{Profile, ProfileColumn};
 
     let arr = Node::Array {
         element: Box::new(Node::Struct(vec![Field {
