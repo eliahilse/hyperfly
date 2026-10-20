@@ -14,9 +14,10 @@ import binascii
 import json
 import math
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
-from typing import Any, Callable, Iterable, Iterator, Literal, NamedTuple, cast
+from typing import Any, Callable, Literal, NamedTuple, cast
 from weakref import WeakKeyDictionary
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
@@ -43,8 +44,8 @@ _CLOSING_QUOTE = re.compile(r'(?<!\\)\\*"')
 _RANKS = {HYPERFLY_MEDIA_TYPE: 3, "application/*": 2, "*/*": 1}
 _QVALUE = re.compile(r"0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?")
 _JSON_SUFFIX = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+/[!#$%&'*+.^_`|~0-9a-z-]+\+json")
-_MODEL_HAS_BYTES: WeakKeyDictionary[type[Any], bool] = WeakKeyDictionary()
-_MODEL_HAS_EXTRAS: WeakKeyDictionary[type[Any], bool] = WeakKeyDictionary()
+_MODEL_BYTES: WeakKeyDictionary[type[Any], tuple[bool, bool]] = WeakKeyDictionary()
+_SCAN = object()
 
 
 def parse_accept(header: str | None) -> list[str]:
@@ -218,99 +219,163 @@ def negotiate(
 
 
 def _json_key(key: Any) -> Any:
+    if isinstance(key, str):
+        return key
     if isinstance(key, Enum):
         key = key.value
     if isinstance(key, float) and not math.isfinite(key):
         return "NaN" if key != key else ("Infinity" if key > 0 else "-Infinity")
-    return key
+    if key is None or isinstance(key, (str, int, float, bool)):
+        return key
+    from pydantic_core import to_jsonable_python
+
+    return next(iter(to_jsonable_python({key: None})))
 
 
-def _model_has_bytes(cls: type[Any]) -> bool:
-    cached = _MODEL_HAS_BYTES.get(cls)
+def _model_bytes(cls: type[Any]) -> tuple[bool, bool]:
+    cached = _MODEL_BYTES.get(cls)
     if cached is not None:
         return cached
     pending = [cls.__pydantic_core_schema__]
     seen: set[int] = set()
     has_bytes = False
-    has_extras = False
+    scan_runtime = False
     while pending:
         node = pending.pop()
+        while isinstance(node, Enum):
+            node = node.value
+        if isinstance(node, (bytes, bytearray)):
+            has_bytes = True
+            continue
+        if isinstance(node, type) and issubclass(node, Enum):
+            pending.extend(node.__members__.values())
+            continue
         if id(node) in seen:
             continue
         seen.add(id(node))
         if isinstance(node, dict):
-            if node.get("type") in ("bytes", "any"):
+            if node.get("type") == "bytes":
                 has_bytes = True
-            if node.get("extra_fields_behavior") == "allow":
-                has_extras = True
+            if (node.get("extra_fields_behavior") == "allow"
+                    or node.get("type") in ("any", "generator")):
+                scan_runtime = True
+            if node.get("type") == "is-instance":
+                instance_class = node.get("cls")
+                if not (isinstance(instance_class, type) and issubclass(instance_class, Enum)):
+                    scan_runtime = True
             pending.extend(node.values())
         elif isinstance(node, (list, tuple)):
             pending.extend(node)
-    _MODEL_HAS_BYTES[cls] = has_bytes
-    _MODEL_HAS_EXTRAS[cls] = has_extras
-    return has_bytes
+    flags = (has_bytes, scan_runtime)
+    _MODEL_BYTES[cls] = flags
+    return flags
 
 
-def _extras_have_bytes(value: Any) -> bool:
-    from pydantic import BaseModel
+def _value_children(value: Any) -> tuple[bool, Iterable[tuple[Any, Any]]] | None:
+    """Expose object fields or iterable elements without interpreting their values."""
+    if isinstance(value, dict) or isinstance(value, Mapping):
+        return True, value.items()
+    if is_dataclass(value) and not isinstance(value, type):
+        return True, ((item.name, getattr(value, item.name)) for item in fields(value))
+    if hasattr(type(value), "__pydantic_core_schema__") and hasattr(value, "__dict__"):
+        extras = getattr(value, "__pydantic_extra__", None) or {}
+        from itertools import chain
 
-    pending = [iter((value,))]
+        return True, chain(value.__dict__.items(), extras.items())
+    if isinstance(value, Iterable) and not isinstance(value, str):
+        return False, enumerate(value)
+    return None
+
+
+def _model_json_key_matches(key: Any, json_key: Any) -> bool:
+    if isinstance(key, str):
+        return bool(key == json_key)
+    from pydantic_core import to_jsonable_python
+
+    # The enclosing model may configure UTF-8, base64 or hex bytes keys.
+    for mode in ("utf8", "base64", "hex"):
+        try:
+            if json_key in to_jsonable_python({key: None}, bytes_mode=mode):
+                return True
+        except (UnicodeDecodeError, ValueError):
+            continue
+    return False
+
+
+def _byte_children(value: Any, target: Any) -> Iterator[tuple[Any, Any, Any]]:
+    children = _value_children(value)
+    if children is None:
+        return
+    mapping, items = children
+    if target is _SCAN:
+        for _, item in items:
+            yield [_SCAN], 0, item
+    elif mapping and isinstance(target, dict):
+        if not isinstance(value, Mapping):
+            value = dict(items)
+            items = value.items()
+        if len(value) == len(target):
+            for (original, item), name in zip(items, target):
+                if _model_json_key_matches(original, name):
+                    yield target, name, item
+        else:
+            from pydantic_core import to_jsonable_python
+
+            # JSON key conversion can collapse distinct Python keys.
+            for mode in ("utf8", "base64", "hex"):
+                try:
+                    collapsed = {next(iter(to_jsonable_python({name: None}, bytes_mode=mode))): item
+                                 for name, item in value.items()}
+                except (UnicodeDecodeError, ValueError):
+                    continue
+                if list(collapsed) == list(target):
+                    for name, item in collapsed.items():
+                        yield target, name, item
+                    break
+    elif not mapping and isinstance(target, list):
+        # Serializer shape changes are authoritative; only overlay matching arrays.
+        if not hasattr(value, "__len__") or len(value) == len(target):
+            for index, item in items:
+                if index < len(target):
+                    yield target, index, item
+
+
+def _walk_bytes(source: Any, parent: Any = None) -> Iterator[tuple[Any, Any, Any]]:
+    """Find bytes using the same traversal for detection and JSON-position overlay."""
+    if parent is None:
+        parent = [_SCAN]
+    pending = [iter(((parent, 0, source),))]
     seen: set[int] = set()
     while pending:
         try:
-            item = next(pending[-1])
+            parent, key, value = next(pending[-1])
         except StopIteration:
             pending.pop()
             continue
-        if isinstance(item, (bytes, bytearray)):
-            return True
-        if id(item) in seen:
+        while isinstance(value, Enum):
+            value = value.value
+        if isinstance(value, (bytes, bytearray)):
+            yield parent, key, value
             continue
-        if isinstance(item, BaseModel):
-            seen.add(id(item))
-            pending.append(iter(item.__dict__.values()))
-            if item.__pydantic_extra__:
-                pending.append(iter(item.__pydantic_extra__.values()))
-        elif isinstance(item, dict):
-            seen.add(id(item))
-            pending.append(iter(item.values()))
-        elif isinstance(item, (list, tuple, set, frozenset)):
-            seen.add(id(item))
-            pending.append(iter(item))
-    return False
+        if value is None or isinstance(value, (str, int, float, bool)):
+            continue
+        target = parent[key]
+        if target is _SCAN:
+            if id(value) in seen:
+                continue
+            seen.add(id(value))
+            # A one-shot iterable must be dumped before inspection consumes it.
+            if isinstance(value, Iterator):
+                yield parent, key, None
+                continue
+        pending.append(_byte_children(value, target))
 
 
 def _overlay_model_bytes(plain: Any, python: Any) -> Any:
     root = [plain]
-    pending: list[tuple[Any, Any, Any]] = [(root, 0, python)]
-    while pending:
-        parent, key, source = pending.pop()
-        target = parent[key]
-        if isinstance(source, (bytes, bytearray)):
-            parent[key] = base64.b64encode(source).decode("ascii")
-        elif isinstance(source, dict) and isinstance(target, dict) and len(source) == len(target):
-            for (name, item), json_name in zip(source.items(), target):
-                if _model_json_key_matches(name, json_name):
-                    pending.append((target, json_name, item))
-        elif isinstance(source, (list, tuple, set, frozenset)) and isinstance(target, list) and len(source) == len(target):
-            pending.extend((target, index, item) for index, item in enumerate(source))
+    for parent, key, value in _walk_bytes(python, root):
+        parent[key] = base64.b64encode(value).decode("ascii")
     return root[0]
-
-
-def _model_json_key_matches(key: Any, json_key: Any) -> bool:
-    if key == json_key or str(key) == json_key:
-        return True
-    if isinstance(key, Enum):
-        return _model_json_key_matches(key.value, json_key)
-    if key is None:
-        return bool(json_key == "null")
-    if isinstance(key, bool):
-        return bool(json_key == ("true" if key else "false"))
-    if isinstance(key, float):
-        from pydantic_core import to_jsonable_python
-
-        return json_key in to_jsonable_python({key: None})
-    return False
 
 
 def _is_utf8_error(error: Exception) -> bool:
@@ -321,6 +386,11 @@ def _is_utf8_error(error: Exception) -> bool:
 
 
 def _json_value(value: Any) -> Any:
+    kind = type(value)
+    if kind in (str, int, bool) or value is None:
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
         try:
@@ -331,14 +401,19 @@ def _json_value(value: Any) -> Any:
             if isinstance(value, BaseModel):
                 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
+                has_bytes, scan_runtime = _model_bytes(type(value))
+                if scan_runtime:
+                    for _, _, payload in _walk_bytes(value):
+                        if payload is None:
+                            return to_jsonable_python(_json_value(model_dump(mode="python", by_alias=True)))
+                        has_bytes = True
                 try:
                     plain = model_dump(mode="json", by_alias=True)
                 except (UnicodeDecodeError, PydanticSerializationError) as error:
                     if not _is_utf8_error(error):
                         raise
                     return to_jsonable_python(_json_value(model_dump(mode="python", by_alias=True)))
-                if (_model_has_bytes(type(value))
-                        or (_MODEL_HAS_EXTRAS[type(value)] and _extras_have_bytes(value))):
+                if has_bytes:
                     plain = _overlay_model_bytes(plain, model_dump(mode="python", by_alias=True))
                 return _json_value(plain)
         value = model_dump(mode="json", by_alias=True)
@@ -348,21 +423,33 @@ def _json_value(value: Any) -> Any:
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, float) and not math.isfinite(value):
         return None
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
     if isinstance(value, dict):
         return {_json_key(key): _json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, list):
         return [_json_value(item) for item in value]
+    children = _value_children(value)
+    if children is not None:
+        mapping, items = children
+        if mapping:
+            return {_json_key(key): _json_value(item) for key, item in items}
+        return [_json_value(item) for _, item in items]
     return value
 
 
 def _json_body(value: Any) -> bytes:
     try:
         plain = _json_value(value)
-    except RecursionError:
-        raise ValueError("JSON fallback value is circular or nested too deeply") from None
-    text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
-    return text.encode("utf-8", "backslashreplace")
+        text = json.dumps(plain, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        # lone surrogates become \uXXXX escapes, as JSON.stringify writes them
+        return text.encode("utf-8", "backslashreplace")
+    except EncodeError:
+        raise
+    except Exception as error:
+        if isinstance(error, RecursionError):
+            raise EncodeError("json", "JSON fallback value is circular or nested too deeply") from error
+        raise EncodeError("json", f"JSON fallback serialization failed: {error}") from error
 
 
 def encode_for(
@@ -378,8 +465,9 @@ def encode_for(
     JSON fallback writes bytes and bytearray values as standard padded base64,
     without requiring a codec. Models are dumped in JSON mode with bytes values
     as standard padded base64, including bytes in allowed extras and their
-    containers. If a model's bytes are not UTF-8 and its JSON dump
-    fails, its Python dump is used; JSON-only serializers do not run in that case.
+    containers. Non-UTF-8 bytes that fail JSON dumping and one-shot iterables
+    use the Python dump; JSON-only serializers do not run in those cases.
+    Serialization failures raise EncodeError with code ``json``.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:
         try:

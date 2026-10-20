@@ -2,4 +2,4 @@
 "@hyperfly/python": patch
 ---
 
-JSON bodies decoded under a codec are converted and schema checked, restoring bytes from base64 and ints from integral numbers; failures raise `json` or a 400. Bytes are written as base64; `offer=""` suppresses the offer.
+JSON fallback validates codec schemas, restores bytes from base64 and integral numbers as ints, and reports JSON failures consistently. Bytes values in models and nested containers use standard padded base64; `offer=""` suppresses the offer.

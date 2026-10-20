@@ -35,8 +35,10 @@ def same_value(actual, expected, ir=None, *, decoded=False):
             if kind == "int" or (kind == "literal" and type(ir["value"]) in (int, float)):
                 if type(actual) is not int:
                     return False
-            elif kind == "float64" and type(actual) is not float:
-                return False
+            elif kind == "float64":
+                if type(actual) is not float:
+                    return False
+                return actual == float(expected)
         return actual == expected
     if isinstance(actual, dict) and isinstance(expected, dict):
         fields = {field["name"]: field["type"] for field in ir["fields"]} if ir and ir["kind"] == "struct" else None
@@ -128,3 +130,14 @@ def test_decode_comparison_requires_numeric_types_at_every_depth(ir, valid, wron
     expected = {"rows": [valid]}
     assert same_value({"rows": [valid]}, expected, schema, decoded=True)
     assert not same_value({"rows": [wrong]}, expected, schema, decoded=True)
+
+
+@pytest.mark.parametrize("actual,expected,kind,matches", [
+    (9007199254740992.0, 9007199254740993, "float64", True),
+    (9007199254740992, 9007199254740993, "float64", False),
+    (7, 7.0, "int", True),
+    (7.0, 7, "int", False),
+    (True, 1, "int", False),
+])
+def test_numeric_vector_comparison_normalizes_binary64(actual, expected, kind, matches):
+    assert same_value(actual, expected, {"kind": kind}, decoded=True) is matches

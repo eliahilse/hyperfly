@@ -551,7 +551,7 @@ def test_json_fallback_handles_wrapped_utf8_serialization_errors(wrapped):
     assert json.loads(body) == {"payload": "/w=="}
 
 
-def test_json_fallback_propagates_unrelated_model_serialization_errors():
+def test_json_fallback_wraps_unrelated_model_serialization_errors():
     from pydantic import field_serializer
     from pydantic_core import PydanticSerializationError
 
@@ -562,8 +562,10 @@ def test_json_fallback_propagates_unrelated_model_serialization_errors():
         def fail(self, value):
             raise ValueError("serializer failed")
 
-    with pytest.raises(PydanticSerializationError, match="serializer failed"):
+    with pytest.raises(EncodeError, match="serializer failed") as raised:
         encode_for(negotiate(None, CodecRegistry()), Response(payload=b"hi"))
+    assert raised.value.code == "json"
+    assert isinstance(raised.value.__cause__, PydanticSerializationError)
 
 
 @pytest.mark.parametrize("shape", ["dict-length", "dict-order", "dict-key", "list-length"])
@@ -646,8 +648,9 @@ def test_json_fallback_writes_enum_values_and_keys():
 def test_json_fallback_rejects_circular_values():
     circular: list = []
     circular.append(circular)
-    with pytest.raises(ValueError):
+    with pytest.raises(EncodeError, match="circular or nested too deeply") as raised:
         encode_for(negotiate(None, CodecRegistry()), circular)
+    assert raised.value.code == "json"
 
 
 @pytest.mark.parametrize("factory", [bytes, bytearray])
@@ -1650,4 +1653,395 @@ def test_json_fallback_dumps_bytes_free_models_with_extras_once(monkeypatch, nes
         body, _ = encode_for(negotiate(None, CodecRegistry()), value)
         expected = {"number": 1, "metadata": {"items": ["text", 2, None]}}
         assert json.loads(body) == ({"children": {"entry": [expected]}} if nested else expected)
+    assert calls == [{"mode": "json", "by_alias": True}] * 2
+
+
+def test_json_fallback_publishes_one_complete_weak_cache_entry(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from weakref import WeakKeyDictionary
+    from pydantic import ConfigDict
+    import hyperfly.http as http
+
+    class Response(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        number: int
+
+    published = threading.Event()
+    observed = threading.Event()
+    lookups = []
+    stores = []
+
+    class Cache(WeakKeyDictionary):
+        def get(self, key, default=None):
+            lookups.append(key)
+            return super().get(key, default)
+
+        def __setitem__(self, key, flags):
+            assert flags == (False, True)
+            stores.append((key, flags))
+            super().__setitem__(key, flags)
+            published.set()
+            assert observed.wait(5)
+
+    cache = Cache()
+    monkeypatch.setattr(http, "_MODEL_BYTES", cache)
+    value = Response(number=1, payload=b"test")
+    decision = negotiate(None, CodecRegistry())
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(encode_for, decision, value)
+        assert published.wait(5)
+        try:
+            second = pool.submit(encode_for, decision, value)
+            assert json.loads(second.result(timeout=5)[0]) == {"number": 1, "payload": "dGVzdA=="}
+        finally:
+            observed.set()
+        assert first.result(timeout=5) == second.result(timeout=5)
+    assert stores == [(Response, (False, True))]
+    assert lookups == [Response, Response]
+    assert list(cache.items()) == stores
+    assert not hasattr(http, "_MODEL_HAS_BYTES")
+    assert not hasattr(http, "_MODEL_HAS_EXTRAS")
+
+
+def test_json_fallback_concurrent_first_encodes():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from pydantic import ConfigDict
+
+    decision = negotiate(None, CodecRegistry())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for _ in range(30):
+            class Extra(BaseModel):
+                model_config = ConfigDict(extra="allow")
+                number: int
+
+            class Binary(BaseModel):
+                payload: bytes
+
+            barrier = threading.Barrier(8)
+
+            def encode(worker):
+                barrier.wait(timeout=5)
+                for _ in range(20):
+                    value = Extra(number=worker, payload=b"test") if worker % 2 else Binary(payload=b"test")
+                    plain = json.loads(encode_for(decision, value)[0])
+                    assert plain.pop("payload") == "dGVzdA=="
+                    assert plain == ({"number": worker} if worker % 2 else {})
+
+            futures = [pool.submit(encode, worker) for worker in range(8)]
+            for future in futures:
+                future.result(timeout=10)
+
+
+@pytest.mark.parametrize("placement", ["extra", "any", "plain"])
+@pytest.mark.parametrize("container", ["dataclass", "pydantic-dataclass", "enum", "deque", "tuple-key", "bytes-key"])
+@pytest.mark.parametrize("payload", [b"test", b"\xfb\xff\xfe\x00"])
+def test_json_fallback_generic_bytes_values(placement, container, payload):
+    import base64
+    from collections import deque
+    from dataclasses import dataclass
+    from typing import Any
+    from pydantic import ConfigDict
+    from pydantic.dataclasses import dataclass as pydantic_dataclass
+
+    @dataclass
+    class Data:
+        data: bytes
+
+    @pydantic_dataclass
+    class PydanticData:
+        data: bytes
+
+    class Binary(Enum):
+        data = payload
+
+    class Extra(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+    class Response(BaseModel):
+        data: Any
+
+    value = {
+        "dataclass": Data(payload), "pydantic-dataclass": PydanticData(payload),
+        "enum": Binary.data, "deque": deque([payload]),
+        "tuple-key": {(b"key", 7): payload}, "bytes-key": {b"key": payload},
+    }[container]
+    expected = base64.b64encode(payload).decode("ascii")
+    if container in ("dataclass", "pydantic-dataclass"):
+        expected = {"data": expected}
+    elif container == "deque":
+        expected = [expected]
+    elif container == "tuple-key":
+        expected = {"key,7": expected}
+    elif container == "bytes-key":
+        expected = {"key": expected}
+    if placement != "plain":
+        value = Extra(data=value) if placement == "extra" else Response(data=value)
+        expected = {"data": expected}
+        if container == "deque":
+            from pydantic_core import PydanticSerializationError
+
+            try:
+                value.model_dump(mode="json")
+            except UnicodeDecodeError:
+                pass
+            except PydanticSerializationError as error:
+                if "unknown type" not in str(error):
+                    raise
+                # Older pydantic cannot serialize undeclared deques at all.
+                with pytest.raises(EncodeError, match="unknown type") as raised:
+                    encode_for(negotiate(None, CodecRegistry()), value)
+                assert raised.value.code == "json"
+                return
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == expected
+
+
+@pytest.mark.parametrize("bytes_mode", ["utf8", "base64", "hex"])
+def test_json_fallback_preserves_declared_bytes_key_spelling(bytes_mode):
+    from pydantic import ConfigDict
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        data: dict[bytes, bytes]
+        tuples: dict[tuple[bytes, int], bytes]
+
+    value = Response(data={b"key": b"test"}, tuples={(b"key", 7): b"test"})
+    plain = value.model_dump(mode="json")
+    expected = {field: {key: "dGVzdA==" for key in mapping} for field, mapping in plain.items()}
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_json_fallback_wraps_non_utf8_bytes_key_failures(declared):
+    from pydantic import ConfigDict
+
+    class Extra(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+    class Response(BaseModel):
+        data: dict[bytes, bytes]
+
+    value = Response(data={b"\xff": b"test"}) if declared else Extra(data={b"\xff": b"test"})
+    with pytest.raises(EncodeError) as raised:
+        encode_for(negotiate(None, CodecRegistry()), value)
+    assert raised.value.code == "json"
+    assert isinstance(raised.value.__cause__, UnicodeDecodeError)
+
+
+@pytest.mark.parametrize("limited", [False, True])
+@pytest.mark.parametrize("failure", ["unicode", "pydantic", "type", "value"])
+def test_json_fallback_wraps_serialization_failures(limited, failure):
+    from pydantic_core import PydanticSerializationError
+
+    errors = {
+        "unicode": UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+        "pydantic": PydanticSerializationError("serializer failed"),
+        "type": TypeError("serializer failed"),
+        "value": ValueError("serializer failed"),
+    }
+
+    class Value:
+        def model_dump(self, **kwargs):
+            raise errors[failure]
+
+    class Limited:
+        fingerprint = "a" * 32
+
+        def encode(self, value):
+            raise EncodeError("limit", "too large")
+
+    from hyperfly.http import Negotiation
+
+    decision = Negotiation("hyperfly", {}, Limited()) if limited else negotiate(None, CodecRegistry())
+    with pytest.raises(EncodeError) as raised:
+        encode_for(decision, Value())
+    assert raised.value.code == "json"
+    assert raised.value.__cause__ is errors[failure]
+
+
+def test_json_fallback_randomized_differential_bytes_overlay():
+    import base64
+    import copy
+    import random
+    from collections import deque
+    from dataclasses import dataclass
+    from typing import Any
+    from pydantic import ConfigDict
+    from pydantic.dataclasses import dataclass as pydantic_dataclass
+    from pydantic_core import to_jsonable_python
+
+    @dataclass
+    class Data:
+        data: Any
+
+    @pydantic_dataclass
+    class PydanticData:
+        data: Any
+
+    class Binary(Enum):
+        data = b"enum bytes"
+
+    class Model(BaseModel):
+        data: Any
+        number: int = 7
+
+    class Extra(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        number: int = 7
+
+    class DequeModel(BaseModel):
+        data: deque[Any]
+
+    rng = random.Random(775)
+
+    def generate(depth):
+        if depth == 0:
+            return rng.choice([b"test", bytearray(b"bytearray"), Binary.data, "unchanged", 7, None, True])
+        kind = rng.randrange(12)
+        if kind == 0:
+            return Data(generate(depth - 1))
+        if kind == 1:
+            return PydanticData(generate(depth - 1))
+        if kind == 2:
+            return Model(data=generate(depth - 1))
+        if kind == 3:
+            return Extra(payload=generate(depth - 1))
+        if kind < 6:
+            keys = ["str", b"bytes", 13, (b"tuple", 17)]
+            rng.shuffle(keys)
+            return {key: generate(depth - 1) for key in keys[:rng.randrange(1, 5)]}
+        if kind < 9:
+            factory = [list, tuple, deque][kind - 6]
+            items = factory(generate(depth - 1) for _ in range(rng.randrange(1, 4)))
+            return DequeModel(data=items) if kind == 8 else items
+        if kind == 9:
+            return set(rng.sample([b"test", b"second", b"third"], rng.randrange(1, 4)))
+        if kind == 10:
+            return frozenset(rng.sample([b"test", b"second"], rng.randrange(1, 3)))
+        return generate(0)
+
+    byte_positions = 0
+
+    def assert_overlay(source, expected, actual):
+        nonlocal byte_positions
+        if isinstance(source, Enum):
+            source = source.value
+        if isinstance(source, (bytes, bytearray)):
+            byte_positions += 1
+            assert base64.b64decode(actual, validate=True) == source
+            assert actual == base64.b64encode(source).decode("ascii")
+        elif isinstance(source, dict):
+            assert list(actual) == list(expected)
+            for key, value in source.items():
+                spelling = next(iter(to_jsonable_python({key: None})))
+                assert_overlay(value, expected[spelling], actual[spelling])
+        elif isinstance(source, (list, tuple, set, frozenset, deque)):
+            assert len(actual) == len(expected) == len(source)
+            for value, old, new in zip(source, expected, actual):
+                assert_overlay(value, old, new)
+        else:
+            assert type(actual) is type(expected)
+            assert actual == expected
+
+    decision = negotiate(None, CodecRegistry())
+    for index in range(600):
+        nested = generate(3)
+        value = Model(data=nested) if index % 2 else Extra(payload=nested)
+        source = value.model_dump(mode="python", by_alias=True)
+        expected = value.model_dump(mode="json", by_alias=True)
+        saved = copy.deepcopy(source)
+        actual = json.loads(encode_for(decision, value)[0])
+        assert_overlay(source, expected, actual)
+        assert source == saved
+    assert byte_positions > 1000
+
+
+def test_json_fallback_overlays_values_after_json_key_collisions():
+    from typing import Any
+
+    class Response(BaseModel):
+        data: Any
+
+    value = Response(data={b"key": b"first", "key": b"last", (b"a", 1): b"first", "a,1": b"last"})
+    assert value.model_dump(mode="json") == {"data": {"key": "last", "a,1": "last"}}
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == {
+        "data": {"key": "bGFzdA==", "a,1": "bGFzdA=="},
+    }
+
+
+def test_json_fallback_overlays_declared_bytes_enum():
+    class Binary(Enum):
+        data = b"test"
+
+    class Response(BaseModel):
+        data: Binary
+
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), Response(data=Binary.data))[0]) == {
+        "data": "dGVzdA==",
+    }
+
+
+@pytest.mark.parametrize("placement", ["extra", "any", "declared"])
+def test_json_fallback_serializes_bytes_in_one_shot_iterables_once(placement):
+    from typing import Any, Iterable
+    from pydantic import ConfigDict
+
+    class Extra(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+    class Response(BaseModel):
+        data: Any
+
+    class Declared(BaseModel):
+        data: Iterable[bytes]
+
+    visited = []
+
+    def chunks():
+        for payload in (b"test", b"\xfb\xff\xfe\x00"):
+            visited.append(payload)
+            yield payload
+
+    model = {"extra": Extra, "any": Response, "declared": Declared}[placement]
+    value = model(data=chunks())
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"data": ["dGVzdA==", "+//+AA=="]}
+    assert visited == [b"test", b"\xfb\xff\xfe\x00"]
+
+
+def test_json_fallback_overlays_declared_bytes_literal():
+    from typing import Literal
+
+    class Response(BaseModel):
+        data: Literal[b"test"]
+
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), Response(data=b"test"))[0]) == {
+        "data": "dGVzdA==",
+    }
+
+
+def test_json_fallback_dumps_bytes_free_any_and_enum_models_once(monkeypatch):
+    from typing import Any
+
+    class State(Enum):
+        ready = "ready"
+
+    class EnumResponse(BaseModel):
+        state: State
+
+    class AnyResponse(BaseModel):
+        data: Any
+
+    calls = []
+    dump = BaseModel.model_dump
+
+    def counted(self, **kwargs):
+        calls.append(kwargs)
+        return dump(self, **kwargs)
+
+    monkeypatch.setattr(BaseModel, "model_dump", counted)
+    for value in (EnumResponse(state=State.ready), AnyResponse(data={"nested": [7, "text"]})):
+        encode_for(negotiate(None, CodecRegistry()), value)
     assert calls == [{"mode": "json", "by_alias": True}] * 2
