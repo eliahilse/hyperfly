@@ -5,7 +5,8 @@ from enum import IntEnum
 import pytest
 from pydantic import BaseModel
 
-from hyperfly import EncodeError, HyperflyError, Limits, compile_ir
+from hyperfly import Codec, EncodeError, HyperflyError, Limits, compile_ir
+from hyperfly.pydantic import ModelCodec
 from hyperfly.pydantic import compile as compile_model
 
 
@@ -201,3 +202,66 @@ def test_malformed_model_compile_options_are_options_errors(options, message):
     with pytest.raises(HyperflyError) as err:
         compile_model(Flag, **options)
     assert (err.value.code, str(err.value)) == ("options", message)
+
+
+@pytest.mark.parametrize("factory", [Codec, compile_ir])
+@pytest.mark.parametrize("options, message", [
+    ({"limits": {}}, "limits: must be a Limits instance"),
+    ({"limits": Limits(max_depth=-1)}, "limits.max_depth: must be a non-negative safe integer"),
+    ({"plan": "rows"}, "plan: must be row or columnar"),
+    ({"pack": True}, "pack: must be False or a mapping"),
+    ({"pack": {"deflate": 1}}, "pack.deflate: must be callable"),
+    ({"pack": {"inflate": 1}}, "pack.inflate: must be callable"),
+])
+def test_constructor_and_compile_check_options_before_ir(factory, options, message):
+    with pytest.raises(HyperflyError) as err:
+        factory(None, **options)
+    assert (err.value.code, str(err.value)) == ("options", message)
+
+
+def test_codec_constructor_defaults_and_keyword_only_options():
+    assert Codec(BOOL_IR).encode(True) == compile_ir(BOOL_IR).encode(True)
+    with pytest.raises(TypeError):
+        Codec(BOOL_IR, "row")
+
+
+@pytest.mark.parametrize("factory", [
+    Codec, compile_ir,
+    lambda ir, **options: compile_model(Flag, **options),
+    lambda ir, **options: ModelCodec(Flag, **options),
+])
+def test_all_codec_constructors_read_original_options_once(factory):
+    reads = []
+
+    class Hooks(dict):
+        def get(self, name):
+            reads.append(name)
+            if reads.count(name) > 1:
+                raise ValueError("read twice")
+            return None
+
+    limit_reads = []
+
+    class Counted(Limits):
+        def __getattribute__(self, name):
+            if name in LIMIT_FIELDS:
+                limit_reads.append(name)
+                if limit_reads.count(name) > 1:
+                    raise ValueError("read twice")
+            return super().__getattribute__(name)
+
+    factory(BOOL_IR, pack=Hooks(), limits=Counted())
+    assert reads == ["deflate", "inflate"]
+    assert sorted(limit_reads) == sorted(LIMIT_FIELDS)
+
+
+@pytest.mark.parametrize("factory", [Codec, compile_ir])
+def test_constructor_converts_ir_recursion_errors(factory):
+    ir = {"kind": "bool"}
+    for _ in range(1500):
+        ir = {"kind": "array", "element": ir}
+    with pytest.raises(HyperflyError) as err:
+        factory(ir)
+    assert (err.value.code, str(err.value)) == (
+        "ir", "$: IR or profile nesting exceeds Python's recursion limit",
+    )

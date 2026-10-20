@@ -2,7 +2,6 @@ import { columnarEligible, flattenLeaves } from "./columnar.js";
 import { HyperflyError, isInstance } from "./errors.js";
 import { describeValue, hasLoneSurrogate, validateIR, withinStack } from "./ir.js";
 import type { IRNode } from "./ir.js";
-import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 
 export type GrammarCase = "lower" | "upper";
 export type GrammarBase = 10 | 16 | 36;
@@ -118,14 +117,18 @@ function own(value: Record<string, unknown>, key: string): boolean {
 
 function snapshotProfile(profile: Profile): Profile {
   const active = new WeakSet<object>();
-  const visit = (value: unknown, depth: number): unknown => {
+  const stack: {
+    source: Record<string, unknown> | unknown[];
+    copy: object;
+    keys: string[] | undefined;
+    length: number;
+    next: number;
+  }[] = [];
+  const visit = (value: unknown): unknown => {
     if (value === null || typeof value === "string" || typeof value === "boolean") return value;
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value !== "object" || value === null) {
       throw new HyperflyError("ir", "profile: must contain only JSON data");
-    }
-    if (depth > MAX_ARTIFACT_NESTING) {
-      throw new HyperflyError("ir", `profile: nests deeper than ${MAX_ARTIFACT_NESTING}`);
     }
     if (active.has(value)) throw new HyperflyError("ir", "profile: must not contain cycles");
     const array = Array.isArray(value);
@@ -133,36 +136,37 @@ function snapshotProfile(profile: Profile): Profile {
     if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
       throw new HyperflyError("ir", "profile: must contain only plain objects and arrays");
     }
-    active.add(value);
-    let copy: unknown;
-    if (array) {
-      const length = value.length;
-      for (const key of Reflect.ownKeys(value)) {
-        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
-        if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= length) {
+    const keys: string[] = [];
+    for (const key of Reflect.ownKeys(value)) {
+      if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+      if (array) {
+        if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length) {
           throw new HyperflyError("ir", "profile: arrays must contain only indexed JSON data");
         }
-      }
-      copy = Array.from({ length }, (_, i) => visit(value[i], depth + 1));
-    } else {
-      const record: Record<string, unknown> = {};
-      for (const key of Reflect.ownKeys(value)) {
-        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+      } else {
         if (typeof key !== "string") throw new HyperflyError("ir", "profile: JSON keys must be strings");
-        Object.defineProperty(record, key, {
-          value: visit((value as Record<string, unknown>)[key], depth + 1),
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
+        keys.push(key);
       }
-      copy = record;
     }
-    active.delete(value);
+    const copy = array ? new Array<unknown>(value.length) : {};
+    active.add(value);
+    stack.push({ source: value as Record<string, unknown> | unknown[], copy, keys: array ? undefined : keys, length: array ? value.length : keys.length, next: 0 });
     return copy;
   };
   try {
-    return visit(profile, 1) as Profile;
+    const result = visit(profile) as Profile;
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      if (frame.next === frame.length) {
+        active.delete(frame.source);
+        stack.pop();
+        continue;
+      }
+      const key = frame.keys ? frame.keys[frame.next++]! : String(frame.next++);
+      const value = visit((frame.source as Record<string, unknown>)[key]);
+      Object.defineProperty(frame.copy, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    return result;
   } catch (cause) {
     if (isInstance(cause, HyperflyError) && cause.code === "ir") throw cause;
     throw new HyperflyError("ir", "profile: could not read JSON data", { cause });
@@ -174,11 +178,12 @@ export function validateProfile(ir: IRNode, profile: Profile): void {
 }
 
 export function checkedProfile(ir: IRNode, profile: Profile): Profile {
+  // Canonical shared profiles have depth at most 7; advisory hints are excluded.
+  validateIR(ir);
   return withinStack(() => checkProfile(ir, snapshotProfile(profile)));
 }
 
 function checkProfile(ir: IRNode, profile: Profile): Profile {
-  validateIR(ir);
   const fail = (message: string): never => {
     throw new HyperflyError("ir", `profile: ${message}`);
   };

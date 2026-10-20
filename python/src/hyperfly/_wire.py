@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 INT_MIN = -(2**53 - 1)
 INT_MAX = 2**53 - 1
@@ -11,36 +11,53 @@ _MAX_ULEB_BYTES = 8
 
 
 class HyperflyError(Exception):
+    """A Hyperfly failure with a stable ``code`` and descriptive message."""
+
     code = "ir"
 
     def __init__(self, code: str, message: str) -> None:
+        """Store the error code and human-readable message."""
         super().__init__(message)
         self.code = code
 
 
 class EncodeError(HyperflyError):
-    pass
+    """An invalid input value or exceeded encoding bound, identified by ``code``."""
 
 
 class DecodeError(HyperflyError):
-    pass
+    """Malformed binary data or an exceeded decoding bound, identified by ``code``."""
 
 
 class FingerprintMismatchError(DecodeError):
+    """Code ``fingerprint`` with hexadecimal ``expected`` and ``actual`` fingerprints."""
+
     def __init__(self, expected: str, actual: str) -> None:
+        """Record the codec fingerprint and the envelope fingerprint it received."""
         super().__init__("fingerprint", f"codec fingerprint {expected} does not match payload {actual}")
         self.expected = expected
         self.actual = actual
 
 
 class UnsupportedSchemaError(HyperflyError):
+    """Code ``unsupported`` with the model field ``path`` that has no v0 encoding."""
+
     def __init__(self, path: str, message: str) -> None:
+        """Record the unsupported field path and explain its encoding limitation."""
         super().__init__("unsupported", f"{path}: {message}")
         self.path = path
 
 
 @dataclass(frozen=True)
 class Limits:
+    """Immutable per-value and aggregate resource bounds (wire-v0 section 6).
+
+    max_depth bounds nesting; max_items bounds an array's item count;
+    max_byte_length bounds a string, byte value, or packed blob. max_total_items
+    and max_total_bytes cap a body's decoded items and bytes. max_amplification
+    and max_byte_amplification bound those totals relative to encoded body size.
+    """
+
     max_depth: int = 64
     max_items: int = 2**24
     max_byte_length: int = 2**28
@@ -114,7 +131,7 @@ class Reader:
         self.limits = limits
         self.budget = Budget(limits.item_budget(len(buf)), limits.byte_budget(len(buf)))
         # arrays whose items are built only once the whole body has decoded
-        self.deferred: list[tuple[list, Callable[[], Iterable]]] = []
+        self.deferred: list[tuple[list[Any], Callable[[], Iterable[Any]]]] = []
 
     def u8(self) -> int:
         if self.pos >= len(self.buf):
@@ -183,7 +200,7 @@ def uleb_at(buf: bytes, pos: int) -> tuple[int, int]:
     raise DecodeError("varint", f"uvarint longer than {_MAX_ULEB_BYTES} bytes")
 
 
-def read_ulebs(r: Reader, count: int) -> tuple[array, DecodeError | None]:
+def read_ulebs(r: Reader, count: int) -> tuple[array[int], DecodeError | None]:
     """Up to `count` uvarints, stopping at the first malformed one. Its error is
     returned rather than raised, so a caller can report an earlier value first."""
     buf = r.buf

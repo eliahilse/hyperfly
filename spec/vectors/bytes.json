@@ -1547,6 +1547,30 @@
       },
       "hex": "0203000001808004",
       "error": "limit"
+    },
+    {
+      "name": "packed-blob-length-over-max-byte-length-before-read",
+      "description": "One declared value and inflated total of 2 fit maxByteLength 2; blob length 3 is rejected before its missing bytes are read.",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxByteLength": 2
+      },
+      "hex": "01020203",
+      "error": "limit"
     }
   ],
   "invalidEncode": [

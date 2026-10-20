@@ -49,7 +49,7 @@ describe("golden vectors: valid", () => {
     test(v.name, () => {
       const codec = compileIR(v.ir as IRNode);
       expect(toHex(codec.encodeBody(v.value))).toBe(v.hex);
-      expect(codec.decodeBody(fromHex(v.hex))).toEqual(v.value);
+      expect(codec.decodeBody(fromHex(v.hex))).toEqual(Object.is(v.value, -0) ? 0 : v.value);
     });
   }
 });

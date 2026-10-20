@@ -117,6 +117,16 @@ fn main() -> Result<(), hyperfly_core::Error> {
 - `max_amplification` and `max_byte_amplification` scale item and byte budgets
   with the body length, so a short body cannot declare a large result.
 
+Schemas have their own bound, independent of `max_depth`: `Codec::compile`
+returns `ErrorCode::Ir` for a schema or profile whose canonical artifact would
+nest JSON containers deeper than 512.
+
+Compiling any schema within that bound, and encoding or decoding at default
+limits, fit a 2 MiB thread stack in debug and release builds. Encoding and
+decoding recurse once per nesting level, so raising `max_depth` far above the
+default needs proportionally more stack, roughly 9 KiB per level in a debug
+build.
+
 ## Errors
 
 Every failure carries an `ErrorCode` and a message. The codes are the same

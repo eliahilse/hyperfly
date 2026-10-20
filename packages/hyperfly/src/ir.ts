@@ -1,4 +1,5 @@
 import { HyperflyError, isInstance } from "./errors.js";
+import { checkIRNesting } from "./nesting.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
 export type LiteralValue = string | number | boolean | null;
@@ -102,6 +103,7 @@ function checkKeys(value: object, allowed: readonly string[], path: string): voi
 }
 
 export function validateIR(node: IRNode, path = "$"): void {
+  checkIRNesting(node);
   withinStack(() => checkNode(node, path));
 }
 
