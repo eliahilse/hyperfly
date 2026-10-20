@@ -56,7 +56,13 @@ function checkedTrainOptions(options: TrainOptions): Required<TrainOptions> {
       maxEntries: Math.min(MAX_DICT_ENTRIES, maxEntries ?? MAX_DICT_ENTRIES),
     };
   } catch (cause) {
-    if (cause instanceof HyperflyError && cause.code === "options") throw cause;
+    let isOurs = false;
+    try {
+      isOurs = cause instanceof HyperflyError && cause.code === "options";
+    } catch {
+      isOurs = false;
+    }
+    if (isOurs) throw cause;
     throw new HyperflyError("options", "options: could not read train options", { cause });
   }
 }

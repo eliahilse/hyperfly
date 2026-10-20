@@ -130,6 +130,24 @@ describe("train options", () => {
     expect(run).toThrow(expect.objectContaining({ code: "options", cause }));
   });
 
+  test.each(["getPrototypeOf", "ownKeys", "get"] as const)("wraps an uninspectable cause from a proxy %s trap", (trap) => {
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const cause = trap === "ownKeys"
+      ? new Proxy({}, { getPrototypeOf() { throw new TypeError("cannot inspect cause"); } })
+      : revoked.proxy;
+    const options = new Proxy({}, { [trap]() { throw cause; } });
+    let error: unknown;
+    try {
+      train(ROWS, [], options);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(HyperflyError);
+    expect((error as HyperflyError).code).toBe("options");
+    expect((error as HyperflyError).cause).toBe(cause);
+  });
+
   test("reads each option once and trains with the validated values", () => {
     const reads = { minOccurrences: 0, maxEntries: 0 };
     const profile = train(ROWS, samples([["a long unique value"]]), {
