@@ -447,7 +447,7 @@ production traffic has been measured yet.
   [Python](https://github.com/eliahilse/hyperfly/tree/main/python) and
   [Rust](https://github.com/eliahilse/hyperfly/tree/main/rust) are verified against
   the same golden vectors, and CI runs a TypeScript server against a Python client
-  over real HTTP on every push.
+  over real HTTP on every pull request and every push to `main`.
 
 ## Reference
 
