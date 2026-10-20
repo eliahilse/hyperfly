@@ -6,8 +6,8 @@ import tracemalloc
 from enum import Enum, IntEnum
 
 import pytest
-from conftest import load, serializer_warnings
-from pydantic import VERSION, BaseModel
+from conftest import load, serializer_warnings, warning_details
+from pydantic import BaseModel
 
 from hyperfly import HEADER_SIZE, WIRE_VERSION, CodecRegistry, DecodeError, EncodeError, HyperflyError, Limits, compile_ir
 from hyperfly.http import (
@@ -25,8 +25,6 @@ from hyperfly.http import (
     serve_artifact,
 )
 from hyperfly.pydantic import compile as compile_model
-
-PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:2])
 
 IR = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}]}
 IR_B = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}, {"name": "n", "type": {"kind": "int"}}]}
@@ -395,14 +393,12 @@ def test_json_fallback_unvalidated_bytes_positions_follow_json_mode(construction
         value = Response.model_construct()
         value.payload = data
 
-    with serializer_warnings(payload is not None) as expected_warnings:
+    with serializer_warnings(payload is not None, match="Expected `bytes`") as expected_warnings:
         expected = value.model_dump(mode="json", by_alias=True)
-    with serializer_warnings(payload is not None) as actual_warnings:
+    with serializer_warnings(payload is not None, match="Expected `bytes`") as actual_warnings:
         body, _ = encode_for(negotiate(None, CodecRegistry()), value)
     assert json.loads(body) == expected
-    assert [(item.category, str(item.message)) for item in actual_warnings] == [
-        (item.category, str(item.message)) for item in expected_warnings
-    ]
+    assert warning_details(actual_warnings) == warning_details(expected_warnings)
 
 
 @pytest.mark.parametrize("construction", ["construct", "assign"])
@@ -417,17 +413,15 @@ def test_json_fallback_unvalidated_bytes_positions_preserve_failures(constructio
     if construction == "assign":
         value.payload = data
 
-    with serializer_warnings(False) as expected_warnings:
+    with serializer_warnings(False, match="Expected `bytes`") as expected_warnings:
         with pytest.raises(Exception) as original:
             value.model_dump(mode="json", by_alias=True)
-    with serializer_warnings(False) as actual_warnings:
+    with serializer_warnings(False, match="Expected `bytes`") as actual_warnings:
         with pytest.raises(EncodeError) as raised:
             encode_for(negotiate(None, CodecRegistry()), value)
     assert raised.value.code == "json"
     assert str(original.value) in str(raised.value)
-    assert [(item.category, str(item.message)) for item in actual_warnings] == [
-        (item.category, str(item.message)) for item in expected_warnings
-    ]
+    assert warning_details(actual_warnings) == warning_details(expected_warnings)
 
 
 @pytest.mark.parametrize("payload", [b"\xfb\xff", bytearray(b"\xfb\xff")])
@@ -487,23 +481,29 @@ def test_json_fallback_unvalidated_model_subtrees_follow_json_mode(construction,
     if construction == "assign":
         value.child = data
 
-    # RootModel mismatches warn in 2.14; 2.5 serializes them without warning.
-    warns = (position != "root-model" and payload in {"dict", "bytes-dict", "binary-dict", "str", "list", "tuple"}
-             or position == "root-model" and payload != "none" and PYDANTIC_VERSION >= (2, 14))
+    fragment = "Expected `RootModel[bytes]`" if position == "root-model" else "Expected `Child`"
+    warns = (None if position == "root-model" and payload != "none" else
+             payload in {"dict", "bytes-dict", "binary-dict", "str", "list", "tuple"})
     # Failed UTF-8 serialization aborts before Pydantic emits its warning.
-    warns = warns and not (bytes_mode == "utf8" and payload in {"binary-dict", "binary-model"})
-    with serializer_warnings(warns):
+    if bytes_mode == "utf8" and payload in {"binary-dict", "binary-model"}:
+        warns = False
+    original = None
+    with serializer_warnings(warns, match=fragment):
         try:
             expected = value.model_dump(mode="json", by_alias=True)
-        except Exception as original:
+        except Exception as error:
+            original = error
+    if original is not None:
+        with serializer_warnings(warns, match=fragment):
             with pytest.raises(EncodeError) as raised:
                 encode_for(negotiate(None, CodecRegistry()), value)
-            assert raised.value.code == "json"
-            assert str(original) in str(raised.value)
-        else:
-            expected["sibling"] = "dGVzdA=="
+        assert raised.value.code == "json"
+        assert str(original) in str(raised.value)
+    else:
+        expected["sibling"] = "dGVzdA=="
+        with serializer_warnings(warns, match=fragment):
             body, _ = encode_for(negotiate(None, CodecRegistry()), value)
-            assert json.loads(body) == expected
+        assert json.loads(body) == expected
 
 
 @pytest.mark.parametrize("construction", ["construct", "assign"])
@@ -538,10 +538,15 @@ def test_json_fallback_unvalidated_sequence_subtrees_follow_json_mode(constructi
     if construction == "assign":
         value.child = data
 
-    with serializer_warnings(payload != "none"):
+    fragment = {"list": "Expected `list[bytes]`", "tuple": "Expected `tuple[bytes, ...]`",
+                "fixed-tuple": "Expected `tuple[bytes]`", "nested-list": "Expected `list[bytes]`",
+                "list-model": "Expected `list[Child]`", "tuple-model": "Expected `tuple[Child, ...]`"}[position]
+    with serializer_warnings(payload != "none", match=fragment):
         expected = value.model_dump(mode="json", by_alias=True)
-        expected["sibling"] = "dGVzdA=="
-        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+    expected["sibling"] = "dGVzdA=="
+    with serializer_warnings(payload != "none", match=fragment):
+        body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == expected
 
 
 @pytest.mark.parametrize("payload", ["already text", {"payload": "already text"}, None])
@@ -550,9 +555,12 @@ def test_json_fallback_unvalidated_fixed_tuple_extra_items_keep_json_mode(payloa
         children: tuple[bytes]
 
     value = Response.model_construct(children=("already text", payload))
-    with serializer_warnings():
+    fragment = ("Expected `bytes`", "Unexpected extra items present in tuple")
+    with serializer_warnings(match=fragment):
         expected = value.model_dump(mode="json", by_alias=True)
-        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+    with serializer_warnings(match=fragment):
+        body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == expected
 
 
 @pytest.mark.parametrize("position", ["list", "tuple", "model"])
@@ -578,9 +586,13 @@ def test_json_fallback_unvalidated_subtrees_keep_enclosing_model_config_and_excl
 
     data = {"list": (b"test", b"hidden"), "tuple": [b"test", b"hidden"], "model": {"payload": b"test"}}[position]
     value = Response(child=Child.model_construct(data=data))
-    with serializer_warnings():
+    fragment = {"list": "Expected `list[bytes]`", "tuple": "Expected `tuple[bytes, ...]`",
+                "model": "Expected `Row`"}[position]
+    with serializer_warnings(match=fragment):
         expected = value.model_dump(mode="json", by_alias=True)
-        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+    with serializer_warnings(match=fragment):
+        body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == expected
 
 
 def test_json_fallback_model_and_sequence_subclasses_still_overlay_bytes():
@@ -2150,14 +2162,18 @@ def test_json_fallback_bytes_validators_preserve_unexpected_values(style, mode, 
         sibling: bytes = b"hi"
 
     value = Response.model_construct(data=payload)
+    fragment = "Expected `Child`" if position == "nested" else (
+        "Expected `bytes`", "Expected `list[bytes]`", "Expected `list[wrap_function[<lambda>, bytes]]`",
+    )
+    if mode == "plain" and style == "annotated-item" and position == "list":
+        fragment += ("Expected `list[any]`",)
     warns = not (isinstance(payload, bytes) and position in ("bytes", "nullable"))
-    if mode == "plain":
-        # 2.5's plain serializers skip checking these unexpected values.
-        if (position == "nested" and style != "annotated-item"
-                or isinstance(payload, bytes) and position in ("bytes", "nullable")):
-            warns = PYDANTIC_VERSION >= (2, 14)
-    with serializer_warnings(warns):
+    # Plain validators can discard the checked serializer, depending on Pydantic.
+    if mode == "plain" and not (style == "annotated-item" and position in ("list", "nested")):
+        warns = None
+    with serializer_warnings(warns, match=fragment):
         original = value.model_dump(mode="json", by_alias=True)
+    with serializer_warnings(warns, match=fragment):
         body, _ = encode_for(negotiate(None, CodecRegistry()), value)
     expected = dict(original, sibling="aGk=")
     if isinstance(payload, bytes) and position in ("bytes", "nullable"):
@@ -2209,12 +2225,17 @@ def test_json_fallback_plain_model_validators_preserve_dynamic_serialization(sty
             "mixed-tuple": (b"hi", child)}[position]
     model = BinaryResponse if sibling else Response
     value = model(item=data)
-    with serializer_warnings(PYDANTIC_VERSION >= (2, 14) and (runtime != "none" or position in ("tuple", "mixed-tuple"))):
+    fragment = ("Expected `Child`", "Expected `list[", "Expected `tuple[")
+    if runtime == "other-model":
+        fragment += ("Expected `bytes`",)
+    warns = None if runtime != "none" or position in ("tuple", "mixed-tuple") else False
+    with serializer_warnings(warns, match=fragment):
         expected = value.model_dump(mode="json", by_alias=True)
-        if sibling:
-            expected["payload"] = "aGk="
+    if sibling:
+        expected["payload"] = "aGk="
+    with serializer_warnings(warns, match=fragment):
         body, _ = encode_for(negotiate(None, CodecRegistry()), value)
-        assert json.loads(body) == expected
+    assert json.loads(body) == expected
 
 
 @pytest.mark.parametrize("style", ["annotated", "decorated"])
@@ -2346,21 +2367,23 @@ def test_json_fallback_plain_model_validators_respect_serializer_boundaries(styl
             "fixed": (exact, 7), "variadic": (exact,), "list-boundary": [exact],
             "nullable-boundary": exact}[position]
     value = (BinaryResponse if sibling else Response)(item=data)
-    with serializer_warnings(
-        PYDANTIC_VERSION >= (2, 14) and (
-            position in ("fixed", "variadic")
-            or position in ("model", "nullable", "list", "nested") and (
-                serializer in ("model-wrap", "field-plain", "field-wrap")
-                or serializer == "wrap" and position != "model"
-            )
+    fragment = ("Expected `Child`", "Expected `list[", "Expected `tuple[")
+    warns = None if (
+        position in ("fixed", "variadic")
+        or position in ("model", "nullable", "list", "nested") and (
+            serializer in ("model-wrap", "field-plain", "field-wrap")
+            or serializer == "wrap" and position != "model"
         )
-    ):
+    ) else False
+    with serializer_warnings(warns, match=fragment):
         expected = value.model_dump(mode="json", by_alias=True)
-        if sibling:
-            expected["payload"] = "aGk="
-        decision = negotiate(None, CodecRegistry())
-        for _ in range(2):
-            assert json.loads(encode_for(decision, value)[0]) == expected
+    if sibling:
+        expected["payload"] = "aGk="
+    decision = negotiate(None, CodecRegistry())
+    for _ in range(2):
+        with serializer_warnings(warns, match=fragment):
+            body, _ = encode_for(decision, value)
+        assert json.loads(body) == expected
 
 
 @pytest.mark.parametrize("style", ["annotated", "decorated"])
@@ -2396,11 +2419,14 @@ def test_json_fallback_plain_model_dispatch_stops_only_at_custom_positions(style
     child = Child(data=b"hi")
     custom_value = {"model": child, "nullable": child, "list": [child], "tuple": (child,)}[boundary]
     value = Response(item=(child, [custom_value]))
-    with serializer_warnings(PYDANTIC_VERSION >= (2, 14)):
+    fragment = ("Expected `Child`", "Expected `tuple[")
+    with serializer_warnings(None, match=fragment):
         expected = value.model_dump(mode="json", by_alias=True)
-        expected["item"][0] = {"data": "aGk="}
-        for _ in range(2):
-            assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+    expected["item"][0] = {"data": "aGk="}
+    for _ in range(2):
+        with serializer_warnings(None, match=fragment):
+            body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+        assert json.loads(body) == expected
 
 
 @pytest.mark.parametrize("style", ["annotated", "decorated", "annotated-item"])

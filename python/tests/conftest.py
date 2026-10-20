@@ -4,7 +4,6 @@ import sys
 import warnings
 from contextlib import contextmanager
 
-import pytest
 
 VECTOR_DIR = pathlib.Path(__file__).resolve().parents[2] / "spec" / "vectors"
 
@@ -33,15 +32,24 @@ def calls(run) -> int:
 
 
 @contextmanager
-def serializer_warnings(expected=True):
-    """Assert serializer warnings, including their absence in version-specific cases."""
-    if expected:
-        with pytest.warns(UserWarning, match="Pydantic serializer warnings") as found:
+def serializer_warnings(expected=True, *, match):
+    """Validate every serializer warning; None allows version-dependent presence."""
+    # Recording also catches warnings inside tests that expect broad exceptions.
+    with warnings.catch_warnings(record=True) as found:
+        warnings.simplefilter("always")
+        try:
             yield found
-        assert all(item.category is UserWarning for item in found)
-    else:
-        # Recording also catches warnings inside tests that expect broad exceptions.
-        with warnings.catch_warnings(record=True) as found:
-            warnings.simplefilter("always")
-            yield found
-        assert not found
+        finally:
+            for item in found:
+                assert item.category is UserWarning
+                message = str(item.message)
+                assert message.startswith("Pydantic serializer warnings:")
+                fragments = (match,) if isinstance(match, str) else match
+                assert any(fragment in message for fragment in fragments), message
+            if expected is not None:
+                assert bool(found) is expected
+
+
+def warning_details(found):
+    """Compare categories and complete messages, including field and type details."""
+    return [(item.category, str(item.message)) for item in found]
