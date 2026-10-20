@@ -439,6 +439,7 @@ def read_body(
             raise
         except Exception as error:
             raise RequestError(400, "unreadable") from error
+        del chunk
         length += size
         if length > max_bytes:
             close = getattr(iterator, "close", None)

@@ -984,3 +984,14 @@ def test_interrupts_and_memory_errors_from_the_stream_propagate():
     for error in (KeyboardInterrupt, MemoryError):
         with pytest.raises(error):
             read_body(Chunks([], fail=error()))
+
+
+def test_read_body_releases_a_yielded_memoryview_before_the_next_pull():
+    def stream():
+        buffer = bytearray(b"[1")
+        yield memoryview(buffer)
+        buffer.clear()
+        buffer.extend(b"]")
+        yield bytes(buffer)
+
+    assert read_body(stream()) == b"[1]"
