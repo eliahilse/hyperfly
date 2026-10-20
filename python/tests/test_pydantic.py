@@ -12,7 +12,7 @@ from pydantic import (
 from pydantic_core import SchemaError, core_schema
 from pydantic.fields import FieldInfo
 
-from conftest import load
+from conftest import load, serializer_warnings
 from hyperfly import (
     INT_MAX, INT_MIN, Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError,
     UnsupportedSchemaError, compile_ir,
@@ -657,8 +657,9 @@ def test_validator_around_nested_model_container(mode, optional, plan):
     codec = compile(model, validate=False, plan=plan)
     leaf = codec.ir["fields"][0]["type"]["element"]["fields"][0]["type"]
     assert leaf == ({"kind": "int", "min": 10} if mode == "before" else {"kind": "int"})
-    assert codec.decode(codec.encode(instance)) == instance.model_dump()
-    assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+    with serializer_warnings(mode == "plain" and PYDANTIC_VERSION >= (2, 14)):
+        assert codec.decode(codec.encode(instance)) == instance.model_dump()
+        assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
 
 
 @pytest.mark.parametrize("default,field_validates,config_validates", [
@@ -742,13 +743,14 @@ def test_all_defaults_keep_declared_bounds(shape, factory, field_validates, conf
         return
     instance = model()
     assert calls == int(factory)
-    for encode, decode in ((codec.encode, codec.decode), (codec.encode_body, codec.decode_body)):
-        if outside:
-            with pytest.raises(EncodeError) as error:
-                encode(instance)
-            assert error.value.code == "range"
-        else:
-            assert decode(encode(instance)) == {"x": default}
+    with serializer_warnings(shape == "model" and not validates):
+        for encode, decode in ((codec.encode, codec.decode), (codec.encode_body, codec.decode_body)):
+            if outside:
+                with pytest.raises(EncodeError) as error:
+                    encode(instance)
+                assert error.value.code == "range"
+            else:
+                assert decode(encode(instance)) == {"x": default}
 
 
 @pytest.mark.parametrize("mode", ["after", "wrap", "before"])

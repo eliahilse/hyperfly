@@ -1,6 +1,10 @@
 import json
 import pathlib
 import sys
+import warnings
+from contextlib import contextmanager
+
+import pytest
 
 VECTOR_DIR = pathlib.Path(__file__).resolve().parents[2] / "spec" / "vectors"
 
@@ -26,3 +30,18 @@ def calls(run) -> int:
     finally:
         sys.setprofile(previous)
     return count
+
+
+@contextmanager
+def serializer_warnings(expected=True):
+    """Assert serializer warnings, including their absence in version-specific cases."""
+    if expected:
+        with pytest.warns(UserWarning, match="Pydantic serializer warnings") as found:
+            yield found
+        assert all(item.category is UserWarning for item in found)
+    else:
+        # Recording also catches warnings inside tests that expect broad exceptions.
+        with warnings.catch_warnings(record=True) as found:
+            warnings.simplefilter("always")
+            yield found
+        assert not found
