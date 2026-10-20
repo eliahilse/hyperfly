@@ -1,5 +1,6 @@
 import tracemalloc
 from array import array
+from collections import Counter
 from itertools import combinations, islice
 
 import pytest
@@ -1009,6 +1010,59 @@ def test_derived_totals_count_codes_once_per_source(spied):
     # x and yy: one tally of s serves every consumer; x and y need none
     assert spied["tally"] == 1
 
+
+def _many_readers(lists, rows=1024, readers=512):
+    """`readers` required derived columns reading `lists` in turn over one source of
+    rows + 1 codes, each list empty but at the last code, which only row 0 selects."""
+    words = [f"s{i}" for i in range(rows)] + ["unused"]
+    ir = _array(_field("s", "string"), *(_field(f"d{i}", "string") for i in range(readers)), _field("n", "int"))
+    profile = _profile(
+        {"leaf": 0, "dict": words},
+        *({"leaf": i + 1, "derived": {"source": 0, "values": lists[i % len(lists)]}} for i in range(readers)),
+    )
+    data = []
+    for r in range(rows):
+        code = -1 if r == 0 else r
+        data.append({"s": words[code], **{f"d{i}": lists[i % len(lists)][code] for i in range(readers)}, "n": r})
+    return ir, profile, data
+
+
+@pytest.mark.parametrize(
+    "tails, sums",
+    [(["y" * 3000], 1), (["y" * 3000, "y" * 2999], 2), (["y" * 3000, "z" * 3000], 1)],
+    ids=["one list", "two lists of two sizes", "two lists of one size"],
+)
+def test_readers_with_one_sizes_table_sum_a_tally_once(tails, sums, readers, monkeypatch):
+    scans = []
+
+    class Scanned(Counter):
+        def __iter__(self):
+            scans.append(1)
+            return super().__iter__()
+
+    def wrap(name, scanned):
+        original = getattr(_codec, name)
+        monkeypatch.setattr(_codec, name, lambda *args: scanned(original(*args)))
+
+    taken = []
+    wrap("_tally", Scanned)
+    wrap("_tally_runs", lambda result: result and (taken.append(1) or (Scanned(result[0]), result[1])))
+    ir, profile, data = _many_readers([[""] * 1024 + [tail] for tail in tails])
+    loose = Limits(max_total_bytes=2**40, max_byte_amplification=2**40)
+    body = compile_ir(ir, plan="columnar", profile=profile, limits=loose).encode_body(data)
+    total = sum(len(value.encode()) for row in data for value in row.values() if type(value) is str)
+    # every column is charged exactly, and a sum from the source's tally serves every
+    # reader with the same sizes
+    limits = Limits(max_total_bytes=total, max_byte_amplification=2**40)
+    assert compile_ir(ir, plan="columnar", profile=profile, limits=limits).decode_body(body) == data
+    budget = readers[-1].budget
+    budget.settle()
+    assert budget.bytes == total
+    assert len(taken) + len(scans) == sums
+    limits = Limits(max_total_bytes=total - 1, max_byte_amplification=2**40)
+    with pytest.raises(HyperflyError) as err:
+        compile_ir(ir, plan="columnar", profile=profile, limits=limits).decode_body(body)
+    assert err.value.code == "limit" and str(err.value).startswith("$[].d511[0]: ")
 
 
 TABLE = {0: 1, 3: 2, 9: 3}

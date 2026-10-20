@@ -546,9 +546,13 @@ class _Ctx:
         }
         # decoded byte lengths by code, for the byte budget; code 0 is an escape
         self.entry_bytes = {ordinal: (0, *map(_text_bytes, entries)) for ordinal, entries in self.dicts.items()}
-        self.derived_bytes = {
-            ordinal: (0, *map(_text_bytes, derivation["values"])) for ordinal, derivation in self.derivations.items()
-        }
+        # one table for the derivations whose values have the same lengths, so a charge
+        # from a source's tally serves them all
+        tables: dict[tuple[int, ...], tuple[int, ...]] = {}
+        self.derived_bytes: dict[int, tuple[int, ...]] = {}
+        for ordinal, derivation in self.derivations.items():
+            sizes = (0, *map(_text_bytes, derivation["values"]))
+            self.derived_bytes[ordinal] = tables.setdefault(sizes, sizes)
         self.longest_entry = {ordinal: max(sizes) for ordinal, sizes in self.entry_bytes.items()}
         self.longest_derived = {ordinal: max(sizes) for ordinal, sizes in self.derived_bytes.items()}
         # the dictionaries and derivations whose values all have one length
@@ -2599,7 +2603,8 @@ def _source_codes(
     unless a second column that will is known, from `reader`, given as it reads the
     codes, or from the plan reading them at every row, as a tally pays only for a
     second one. Every derived column that reads one source with the same participation
-    shares one result, held in `found`."""
+    shares one result, and with the same sizes table one sum from a tally, held in
+    `found`."""
     if reader:
         found[("readers", ordinal, part)] = found.get(("readers", ordinal, part), 0) + 1
     if counts or charge is not None:
@@ -2624,10 +2629,15 @@ def _source_codes(
                     if taken is None:
                         return None
                     found[("counts", ordinal, part)], total = taken
+                    found[("charged", ordinal, part, id(sizes))] = total
                     return total
         if charge is None:
             return tally
-        return sum(map(mul, map(charge[0].__getitem__, tally), tally.values()))
+        key = ("charged", ordinal, part, id(charge[0]))
+        charged = found.get(key)
+        if charged is None:
+            charged = found[key] = sum(map(mul, map(charge[0].__getitem__, tally), tally.values()))
+        return charged
     known = found.get((ordinal, part))
     if known is not None:
         return known
