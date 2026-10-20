@@ -89,6 +89,8 @@ matrix, the Rust MSRV, package checks on the npm tarball, and the cross-language
 interop exchange on every pull request and every push to `main`. [CONTRIBUTING.md](CONTRIBUTING.md) covers
 changesets and how releases are published.
 
+[Stability and versioning](STABILITY.md) covers compatibility; [the security policy](SECURITY.md) covers vulnerability reporting.
+
 ## License
 
 [Apache License 2.0](LICENSE)

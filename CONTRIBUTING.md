@@ -1,6 +1,7 @@
 # Contributing
 
 Read [AGENTS.md](AGENTS.md) first: it holds the rules every change follows.
+See [STABILITY.md](STABILITY.md) for what counts as a breaking change.
 
 ## Setup
 
