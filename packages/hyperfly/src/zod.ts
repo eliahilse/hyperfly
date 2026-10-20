@@ -1,5 +1,5 @@
-import { compileIR, type Codec, type CompileOptions } from "./codec.js";
-import { DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError } from "./errors.js";
+import { checkedOptions, compileIR, type Codec, type CompileOptions } from "./codec.js";
+import { DecodeError, EncodeError, UnsupportedSchemaError } from "./errors.js";
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
@@ -221,11 +221,9 @@ export function compile<S extends ZodSchemaLike>(
   schema: S,
   options: ZodCompileOptions = {},
 ): Codec<InferOutput<S>> {
-  if (options != null && options.validate !== undefined && typeof options.validate !== "boolean") {
-    throw new HyperflyError("options", "validate: must be a boolean");
-  }
-  const codec = compileIR<InferOutput<S>>(toIR(schema), options);
-  if (!options.validate) return codec;
+  const checked = checkedOptions(options);
+  const codec = compileIR<InferOutput<S>>(toIR(schema), checked);
+  if (!checked.validate) return codec;
 
   if (typeof schema.parse !== "function") {
     unsupported("$", "validate: true requires a schema with .parse()");

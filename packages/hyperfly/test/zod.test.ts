@@ -129,6 +129,39 @@ describe("coded validation errors", () => {
     expect(run).toThrow(expect.objectContaining({ code: "options", message: "validate: must be a boolean" }));
   });
 
+  test.each([
+    null, [], new Date(), new (class Options {})(),
+    { plan: "bad" }, { limits: { bogus: 1 } }, { pack: 42 }, { pack: [] },
+    { limits: new Date() }, { pack: new (class Pack {})() },
+  ].map((options) => [options] as const))("checks options %p before an unsupported schema", (options) => {
+    for (const schema of [{} as never, z.union([z.string(), z.number()])]) {
+      const run = () => compile(schema, options as never);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options" }));
+    }
+  });
+
+  test("reads option getters once before compiling", () => {
+    const reads = { limits: 0, plan: 0, pack: 0, profile: 0, validate: 0 };
+    const codec = compile(z.string().min(3), {
+      get limits() { reads.limits++; return {}; },
+      get plan(): "row" { return ++reads.plan === 1 ? "row" : "bad" as never; },
+      get pack(): false { return ++reads.pack === 1 ? false : 42 as never; },
+      get profile() { reads.profile++; return undefined; },
+      get validate() { return ++reads.validate === 1; },
+    });
+    expect(reads).toEqual({ limits: 1, plan: 1, pack: 1, profile: 1, validate: 1 });
+    expect(() => codec.encode("x")).toThrow(EncodeError);
+  });
+
+  test.each(["plan", "validate"] as const)("wraps a throwing %s getter before compiling", (key) => {
+    const cause = new Error("cannot read option");
+    const options = Object.defineProperty({}, key, { get() { throw cause; } });
+    const run = () => compile({} as never, options);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "options", cause }));
+  });
+
   test.each(["encode", "encodeBody", "decode", "decodeBody"] as const)("wraps %s parse errors and preserves their cause", (method) => {
     const schema = z.string().min(3);
     const originalParse = schema.parse.bind(schema);
@@ -181,6 +214,7 @@ describe("coded validation errors", () => {
     const schema = z.string();
     schema.parse = () => { throw cause; };
     const codec = compile(schema, { validate: true });
+    expect(() => codec.encode("value")).toThrow(EncodeError);
     expect(() => codec.encode("value")).toThrow(expect.objectContaining({ code: "validation", cause }));
   });
 

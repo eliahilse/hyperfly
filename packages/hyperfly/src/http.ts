@@ -1,6 +1,7 @@
 import { compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
 import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
 import type { IRNode } from "./ir.js";
+import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
 import type { DecodeLimits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
@@ -168,8 +169,6 @@ function checkedFingerprint(fingerprint: string): string {
   }
   return fingerprint.toLowerCase();
 }
-
-const MAX_ARTIFACT_NESTING = 512;
 
 function checkNesting(value: unknown): void {
   const stack: [unknown, number][] = [[value, 1]];

@@ -2,6 +2,7 @@ import { columnarEligible, flattenLeaves } from "./columnar.js";
 import { HyperflyError } from "./errors.js";
 import { hasLoneSurrogate } from "./ir.js";
 import type { IRNode } from "./ir.js";
+import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 
 export type GrammarCase = "lower" | "upper";
 export type GrammarBase = 10 | 16 | 36;
@@ -115,7 +116,60 @@ function own(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
+function snapshotProfile(profile: Profile): Profile {
+  const active = new WeakSet<object>();
+  const visit = (value: unknown, depth: number): unknown => {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value !== "object" || value === null) {
+      throw new HyperflyError("ir", "profile: must contain only JSON data");
+    }
+    if (depth > MAX_ARTIFACT_NESTING) {
+      throw new HyperflyError("ir", `profile: nests deeper than ${MAX_ARTIFACT_NESTING}`);
+    }
+    if (active.has(value)) throw new HyperflyError("ir", "profile: must not contain cycles");
+    const array = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+      throw new HyperflyError("ir", "profile: must contain only plain objects and arrays");
+    }
+    active.add(value);
+    let copy: unknown;
+    if (array) {
+      const length = value.length;
+      for (const key of Reflect.ownKeys(value)) {
+        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+        if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= length) {
+          throw new HyperflyError("ir", "profile: arrays must contain only indexed JSON data");
+        }
+      }
+      copy = Array.from({ length }, (_, i) => visit(value[i], depth + 1));
+    } else {
+      const record: Record<string, unknown> = Object.create(null);
+      for (const key of Reflect.ownKeys(value)) {
+        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+        if (typeof key !== "string") throw new HyperflyError("ir", "profile: JSON keys must be strings");
+        record[key] = visit((value as Record<string, unknown>)[key], depth + 1);
+      }
+      copy = record;
+    }
+    active.delete(value);
+    return copy;
+  };
+  try {
+    return visit(profile, 1) as Profile;
+  } catch (cause) {
+    if (cause instanceof HyperflyError && cause.code === "ir") throw cause;
+    throw new HyperflyError("ir", "profile: could not read JSON data", { cause });
+  }
+}
+
 export function validateProfile(ir: IRNode, profile: Profile): void {
+  checkedProfile(ir, profile);
+}
+
+export function checkedProfile(ir: IRNode, profile: Profile): Profile {
+  profile = snapshotProfile(profile);
   const fail = (message: string): never => {
     throw new HyperflyError("ir", `profile: ${message}`);
   };
@@ -279,6 +333,7 @@ export function validateProfile(ir: IRNode, profile: Profile): void {
       fail(`leaf ${column.leaf}: derived values length must equal source dictionary length ${sourceLength}`);
     }
   }
+  return profile;
 }
 
 /** Validated profile lookup tables used by column encoders and decoders. */
