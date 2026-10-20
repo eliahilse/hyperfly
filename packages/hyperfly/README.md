@@ -92,14 +92,23 @@ export default {
 ```
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
-same route can answer in binary. If the encoder refuses a value under its limits, `respond` answers JSON and calls
-`onFallback(error)`. Responses carry `Vary: Hyperfly-Accept, Accept`.
+same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
 A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it advertises a matching fingerprint.
 
-For request bodies, `readBody` returns `{ ok: true, value }` or `{ ok: false, response }`; forward the latter:
+### JSON fallback
+
+When the encoder refuses a value under its [limits](#limits) (an `EncodeError` with code `limit` or `depth`),
+`respond` and `encodeFor` send the same value as JSON with `Hyperfly-Offer` naming the codec, and call
+`onFallback(error)`. The client reads it like any other JSON response. Any other `EncodeError` (`type`, `required`,
+`range`, `validation`, ...) means the value does not match the schema; it is thrown, not answered as JSON. Pass
+`enabled: false` to answer JSON without consulting the registry, as an operator switch or to shed load.
+
+### Request bodies
+
+`readBody` returns `{ ok: true, value }` or `{ ok: false, response }`; forward the latter:
 
 ```ts
-import { readBody } from "hyperfly/http";
+import { readBody, respond } from "hyperfly/http";
 
 async function receive(request: Request) {
   const result = await readBody(request, registry, { maxBytes: 1 << 20 });
@@ -146,11 +155,52 @@ createServer((req, res) => {
 }).listen(3000);
 ```
 
-In Express 4 or 5, use the same calls with `req.headers` and `req.path`, set the returned status and headers, and
-send binary as `Buffer.from(body)` so Express does not serialize the Uint8Array as JSON. Send a string body
-directly. For body routes, copy headers into `Headers` and build a `Request` with an absolute URL, the method,
-`Readable.toWeb(req)` as its body and `duplex: "half"`. Pass it to `readBody` before any Express body parser
-consumes the stream; forward its response's status, headers and body when `ok` is false.
+In Express, the shortest path is to hand the fetch-style helpers a `Request` and copy their `Response` back:
+
+```ts
+import express, { type Request as ExpressRequest, type Response as ExpressResponse } from "express";
+import { Readable } from "node:stream";
+import { readBody, respond, serveArtifact } from "hyperfly/http";
+
+function toFetchRequest(req: ExpressRequest): Request {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+  }
+  const body = req.method === "GET" || req.method === "HEAD" ? undefined : Readable.toWeb(req);
+  // Node needs duplex for a streamed body; not every RequestInit type declares it yet
+  const init: RequestInit & { duplex: "half" } = {
+    method: req.method,
+    headers,
+    body: body as ReadableStream<Uint8Array> | undefined,
+    duplex: "half",
+  };
+  return new Request(new URL(req.originalUrl, `${req.protocol}://${req.get("host")}`), init);
+}
+
+async function send(res: ExpressResponse, response: Response) {
+  res.status(response.status);
+  response.headers.forEach((value, name) => res.setHeader(name, value));
+  res.end(Buffer.from(await response.arrayBuffer()));
+}
+
+const app = express();
+app.use((req, res, next) => {
+  const artifact = serveArtifact(req.path, registry);
+  if (!artifact) return next();
+  res.status(artifact.status).set(artifact.headers).end(artifact.body);
+});
+app.get("/events", (req, res) => send(res, respond(toFetchRequest(req), response, registry)));
+app.post("/events", async (req, res) => {
+  const request = toFetchRequest(req);
+  const result = await readBody<typeof response>(request, registry);
+  await send(res, result.ok ? respond(request, result.value, registry) : result.response);
+});
+app.listen(3000);
+```
+
+Mount `readBody` routes before any Express body parser, which would consume the stream first. With
+`negotiate`/`encodeFor` instead, send binary as `Buffer.from(body)`: Express serializes a bare `Uint8Array` as JSON.
 
 ## Clients
 
@@ -169,7 +219,7 @@ async function getEvents(url: string) {
   const decoded = decodeResponse(result.headers.get("content-type"), bytes, registry);
   if (decoded.kind === "unknown-codec") throw new Error("Unadvertised codec");
   const offer = result.headers.get("hyperfly-offer");
-  if (decoded.kind === "json" && offer) {
+  if (decoded.kind === "json" && offer && !registry.has(offer)) {
     const codec = await fetchArtifact(new URL(url).origin, offer);
     if (codec) registry.add(codec);
   }
@@ -184,42 +234,100 @@ verification for artifact text obtained without fetching.
 
 ## Tenants and authorization
 
-Use a separate `CodecRegistry` per tenant. Fingerprints identify schemas and trained dictionaries, so `.well-known`
-discovery must apply the same authorization as the routes it describes. Never serve one tenant's artifact to
-another. Route `discovery()` after your auth middleware, select that tenant's registry, and apply your authorization
-policy to discovery caching as well. `fetchArtifact` accepts `headers` for credentials, plus `fetch`, `signal`,
-`maxBytes`, `limits` and `pack` options.
+An artifact contains its schema and, when profiled, a dictionary trained on real responses: actor names, ids,
+recurring values. Treat it as data from the routes it serves. Use a separate `CodecRegistry` per tenant, and put
+`.well-known` discovery behind the same authentication and authorization as those routes:
+
+```ts
+import { CodecRegistry } from "hyperfly";
+import { discovery, respond } from "hyperfly/http";
+
+const registries = new Map<string, CodecRegistry>();
+
+async function handle(request: Request): Promise<Response> {
+  const tenant = await authenticate(request);
+  if (!tenant) return new Response(null, { status: 401 });
+  const registry = registries.get(tenant.id) ?? new CodecRegistry();
+  const artifact = discovery(request, registry);
+  if (artifact) {
+    if (artifact.ok) artifact.headers.set("Cache-Control", "private, max-age=31536000, immutable");
+    return artifact;
+  }
+  return respond(request, await loadEvents(tenant), registry);
+}
+```
+
+`discovery` marks a hit `public, max-age=31536000, immutable`, which suits a public schema. For anything
+tenant-scoped, override it as above so a shared cache or CDN never hands one tenant's artifact to another. On the
+client, `fetchArtifact` accepts `headers` for credentials, plus `fetch`, `signal`, `maxBytes`, `limits` and `pack`
+options.
 
 Register the outgoing codec alongside the incoming one during rotation. Clients can list the new fingerprint first,
 then the old codec can be removed once its traffic reaches zero. A new profile is a new fingerprint.
 
 ## Limits
 
-`DecodeLimits` defaults follow wire v0 §6 and apply to encoding as well:
+A few bytes of columnar or profiled body can describe millions of rows or megabytes of text, so a decoder bounds the
+work any input can demand. `DecodeLimits` follow [wire v0 §6](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md)
+and apply to encoding as well (`DEFAULT_LIMITS` holds the defaults):
 
-| Limit | Default | Meaning |
+| Limit | Default | Bounds |
 |---|---|---|
-| `maxDepth` | 64 | Maximum enclosing struct, array and nullable nodes. |
-| `maxItems` | 2^24 | Maximum elements in any one array, including fixed-length arrays. |
-| `maxByteLength` | 2^28 | Maximum bytes in a string/bytes value or packed string payload. |
-| `maxAmplification` | 32 | Bounds array counts against available bytes and the per-message item budget. |
-| `maxTotalItems` | 2^24 | Maximum sum of all array element counts in one message. |
+| `maxDepth` | 64 | Enclosing struct, array and nullable nodes. |
+| `maxItems` | 2^24 | Elements in any one array, including fixed-length arrays. |
+| `maxByteLength` | 2^28 | Bytes in one string or bytes value, and the inflated size of one packed string column. |
+| `maxAmplification` | 32 | Array counts per remaining body byte, and the item budget per body byte. |
+| `maxTotalItems` | 2^24 | Item budget: the sum of every array count in one body. |
+| `maxByteAmplification` | 64 | Byte budget per body byte. |
+| `maxTotalBytes` | 2^26 | Byte budget: the decoded UTF-8 and bytes length of every string and bytes value in one body. |
 
-Pass overrides with `compile(schema, { limits })`, `compileIR(ir, { limits })`, or the `limits` option to
-`loadArtifact` and `fetchArtifact`. Limits are local to each peer and are not negotiated or included in the
-fingerprint. The per-message item budget is `min(maxTotalItems, maxAmplification × (body length + 1))`; columnar
-arrays charge their row count once, not once per column; body length excludes the envelope header.
+The **item budget** is `min(maxTotalItems, maxAmplification × (body length + 1))`, where body length excludes the
+envelope header; a columnar array charges its row count once, not once per column. The **byte budget** is
+`min(maxTotalBytes, maxByteAmplification × (body length + 1))`, and counts the values a decoder reconstructs as
+well as those it reads: enum members, literals, dictionary, grammar and derived values, and inflated string columns. A failed
+bound is code `limit`, or `depth` for `maxDepth`.
 
-For dense routes such as width-zero telemetry batches or arrays of literals, raise `maxAmplification` and
-`maxTotalItems` on **both peers** as needed. An encoder limit refusal over HTTP falls back to JSON and calls
-`onFallback`. Separately, `readBody`'s `maxBytes` bounds incoming request bytes, including JSON; it defaults to
-`DEFAULT_MAX_BODY_BYTES` from `hyperfly/http`, 1 MiB (1,048,576 bytes). `fetchArtifact` uses the same default byte
-bound for artifact downloads.
+Limits are local to each peer: they are not negotiated and not part of the fingerprint. A route that legitimately
+ships denser payloads (long runs of constant columns, arrays of literals, strings that are mostly dictionary hits)
+raises them on **both peers**, `maxAmplification` for items and `maxByteAmplification` for bytes:
+
+```ts
+import { fetchArtifact } from "hyperfly/http";
+
+const limits = { maxAmplification: 1024, maxTotalItems: 2 ** 26, maxByteAmplification: 4096 };
+
+const serverCodec = compile(EventResponse, { plan: "columnar", profile, limits });
+const clientCodec = await fetchArtifact(origin, serverCodec.fingerprint, { limits });
+```
+
+The same `limits` option is accepted by `compileIR` and `loadArtifact`; unknown keys and values that are not
+non-negative safe integers throw code `options`. Raising limits only on the server lets it send bodies the client
+rejects. Raising them only on the client changes nothing: the server's encoder still refuses the value and answers
+through the [JSON fallback](#json-fallback).
+
+Separately, `readBody`'s `maxBytes` bounds incoming request bytes, JSON included, and answers 413 past it; it
+defaults to `DEFAULT_MAX_BODY_BYTES` from `hyperfly/http`, 1 MiB (1,048,576 bytes). `fetchArtifact` applies the same
+default to artifact downloads and throws code `limit` past it.
 
 ## Errors
 
-`HyperflyError` exposes `code` and carries `cause` when an underlying error exists. Subclasses: `EncodeError`,
-`DecodeError`, `FingerprintMismatchError` (`expected`, `actual`) and `UnsupportedSchemaError` (`path`).
+Compiling, encoding, decoding and loading artifacts throw `HyperflyError` with a `code`; match on `code`, not on the
+message. `EncodeError` and `DecodeError` say which direction failed, `FingerprintMismatchError` is a `DecodeError`
+with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `path`. When an underlying error caused
+it, such as a `SyntaxError`, a `ZodError` or an inflate failure, that error is the standard `cause`. Network errors
+and aborts from `fetchArtifact` propagate unchanged.
+
+```ts
+import { HyperflyError } from "hyperfly";
+
+try {
+  codec.decode(bytes);
+} catch (error) {
+  if (!(error instanceof HyperflyError)) throw error;
+  if (error.code === "limit" || error.code === "depth") console.warn("over the decode limits", error.message);
+  else console.warn(`malformed body (${error.code})`, error.cause ?? error.message);
+}
+```
 
 | ErrorCode | Meaning |
 |---|---|
@@ -234,35 +342,59 @@ bound for artifact downloads.
 | `trailing` | Bytes remain after a complete body. |
 | `truncated` | Input ends before a required byte or value. |
 | `depth` | Nesting exceeds `maxDepth`. |
-| `limit` | An item, byte, amplification or per-message budget bound is exceeded. |
+| `limit` | `maxItems`, `maxByteLength`, an amplification bound, the item or byte budget, or a `maxBytes` download bound. |
 | `header` | Envelope is too short, has bad magic or an unsupported wire major. |
 | `fingerprint` | Fingerprint mismatch, invalid artifact fingerprint or failed artifact HTTP status other than 404. |
 | `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
 | `packed` | Invalid compressed stream or decompressed length mismatch. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
-| `json` | Malformed JSON; the underlying `SyntaxError` is `cause`. |
-| `validation` | Zod `validate: true` failed; the underlying `ZodError` is `cause`. |
+| `json` | Malformed JSON in `decodeResponse` or in artifact text; the `SyntaxError` is `cause`. |
+| `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
+| `options` | Invalid compile, artifact or `train` options, such as an unknown limit or a non-boolean `validate`. |
+
+## Entry points
+
+ESM only, three entry points:
+
+- `hyperfly`: the codec. `compileIR`, `CodecRegistry`, `train`, `defaultPackHooks`, `serializeArtifact`,
+  `validateIR`, `validateProfile`, `DEFAULT_LIMITS`, the error classes, and the `Codec`, `CompileOptions`,
+  `DecodeLimits`, `PackHooks`, `Profile`, `IRNode` and related types.
+- `hyperfly/zod`: `compile` and `toIR` for Zod 4 schemas, with `InferOutput` and `ZodCompileOptions`. The only entry
+  point that needs `zod`.
+- `hyperfly/http`: negotiation (`negotiate`, `encodeFor`, `respond`, `parseAccept`, `acceptHeader`), bodies
+  (`readBody`, `decodeResponse`), artifacts (`discovery`, `serveArtifact`, `fetchArtifact`, `loadArtifact`) and the
+  header, media-type and `DEFAULT_MAX_BODY_BYTES` constants.
 
 ## Runtime support
 
-ESM only: `hyperfly` for the codec, `hyperfly/zod` for Zod, `hyperfly/http` for HTTP helpers.
-
-| Runtime | Codec | Packed column decode | `hyperfly/http` | Verification / needs |
+| Runtime | Codec and `hyperfly/http` | Decodes packed string columns | Packs string columns on encode | Verified |
 |---|---|---|---|---|
-| Node 18 | Yes | Yes | Yes | Supported; Web globals included. |
-| Node 20 | Yes | Yes | Yes | Supported; Web globals included. |
-| Node 22 | Yes | Yes | Yes | Supported; Web globals included. |
-| Node 24 | Yes | Yes | Yes | Supported; Web globals included. |
-| Bun | Yes | Yes | Yes | Tested in CI. |
-| Deno | Yes | Yes | Yes | Supported; use npm imports. |
-| Cloudflare Workers | Yes | Yes | Yes | Supported; bundle ESM. |
-| Browsers | Yes | Yes | Yes | Supported; use a bundler or resolve npm imports. |
+| Node 18 | Yes | Yes | No | Supported |
+| Node 20 | Yes | Yes | From 20.16 | Supported |
+| Node 22 | Yes | Yes | From 22.3 | Supported |
+| Node 24 | Yes | Yes | Yes | Supported |
+| Bun | Yes | Yes | Yes | Tested in CI |
+| Deno 2 | Yes | Yes | Yes | Supported; use `npm:` imports |
+| Cloudflare Workers | Yes | Yes | Only where `node:zlib` resolves | Supported; bundle ESM |
+| Browsers | Yes | Yes | No | Supported; use a bundler |
 
-Node uses `node:zlib` when available through `process.getBuiltinModule`, with pure-JS bounded inflate otherwise.
-Browsers and edge runtimes can decode packed string columns without `node:zlib`; without a deflate hook they encode
-plain string columns. HTTP helpers use `fetch`, `Request`, `Response`, `Headers` and `ReadableStream` globals; Node
-18 includes them. CI runs the TypeScript tests and the TypeScript/Python HTTP interop on Bun; it does not run a Node
-or browser matrix.
+Every runtime decodes packed string columns: where `node:zlib` is unavailable, a bundled pure-JS inflater with the
+same output bounds takes over. Encoding packs only when `process.getBuiltinModule("node:zlib")` resolves; elsewhere
+the encoder writes plain string columns, which are valid and decode everywhere, just larger. To pack where it would
+not, pass a deflate hook and keep the default inflater:
+
+```ts
+import { deflateRawSync } from "node:zlib";
+import { defaultPackHooks } from "hyperfly";
+
+const pack = { ...defaultPackHooks(), deflate: (data: Uint8Array) => new Uint8Array(deflateRawSync(data)) };
+const packed = compile(EventResponse, { plan: "columnar", pack });
+```
+
+`pack` replaces the default hooks as a whole, so a hook set without `inflate` cannot decode packed columns, and
+`pack: false` disables both. HTTP helpers use the `fetch`, `Request`, `Response`, `Headers` and `ReadableStream`
+globals, which Node 18 and later provide. CI runs the TypeScript tests and the TypeScript/Python HTTP interop on Bun;
+it does not run a Node, Deno or browser matrix.
 
 ## What it costs on the wire
 
@@ -286,12 +418,12 @@ production traffic has been measured yet.
 
 - **Exact-schema compatibility.** Any change to the schema or plan is a new
   fingerprint. A mismatch fails before the body is parsed; it never misreads.
-- **Canonical output.** Encoding is canonical for a given implementation and version;
+- **Canonical output.** Encoding is canonical for a given implementation, version and set of pack hooks;
   re-encoding a decoded value reproduces the bytes that implementation emits.
-- **Bounded decoding.** Nesting, item counts and byte lengths are limited. A
-  per-message item budget bounds the sum of all array counts, and an amplification
-  policy caps how many rows a hostile byte can demand, even when a constant
-  column packs to zero bits.
+- **Bounded decoding.** Nesting, item counts and byte lengths are limited. Per-body
+  item and byte budgets bound the sum of all array counts and of all decoded string
+  and bytes lengths, and amplification bounds cap how many rows or bytes a hostile
+  byte can demand, even when a constant column packs to zero bits.
 - **One wire format.** [TypeScript](https://github.com/eliahilse/hyperfly/tree/main/packages/hyperfly),
   [Python](https://github.com/eliahilse/hyperfly/tree/main/python) and
   [Rust](https://github.com/eliahilse/hyperfly/tree/main/rust) are verified against
@@ -305,6 +437,7 @@ production traffic has been measured yet.
 | `compile(schema, options?)` | `hyperfly/zod`: Zod schema → codec; `plan`, `profile`, `limits`, `pack`, `validate`. |
 | `compileIR(ir, options?)` | `hyperfly`: canonical IR → codec; same options except `validate`. |
 | `train(ir, samples, options?)` | `hyperfly`: sampled responses → profile. Non-normative. |
+| `DEFAULT_LIMITS` · `defaultPackHooks()` | `hyperfly`: the default [limits](#limits) and deflate/inflate hooks. |
 | `CodecRegistry` | `hyperfly`: codecs by fingerprint; `add`, `get`, `remove`, `fingerprints`. |
 | `negotiate` · `encodeFor` · `respond` | `hyperfly/http`: select a representation, encode it, or answer a fetch request. |
 | `discovery` · `serveArtifact` | `hyperfly/http`: serve artifacts from a Request or pathname. |
