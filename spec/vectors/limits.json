@@ -7421,6 +7421,67 @@
         }
       },
       "error": "limit"
+    },
+    {
+      "name": "encode-col-first-string-limit-before-later-type",
+      "description": "The first participating string exceeds maxByteLength before the second row has the wrong type.",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxByteLength": 5
+      },
+      "value": [
+        {
+          "s": "abcdefgh"
+        },
+        {
+          "s": 1
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-row-first-string-limit-before-later-type",
+      "description": "Field a exceeds maxByteLength before field b has the wrong type.",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxByteLength": 5
+      },
+      "value": {
+        "a": "abcdefgh",
+        "b": 1
+      },
+      "error": "limit"
     }
   ],
   "decodeOnly": [

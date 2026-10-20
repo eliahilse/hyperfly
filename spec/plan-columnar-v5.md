@@ -35,6 +35,9 @@ always agree.
    c. The column payload over **participating** rows (present and not
       bitmap-null), in row order.
 
+An eligible fixed-length array of length 0 MUST still write its column
+payload headers as specified in §3, even though no rows participate.
+
 For each column, a decoder MUST read its presence bitmap and then its null
 bitmap, validating padding and rejecting null bits for absent rows with
 `bitmap`, before the enclosing-struct and leaf depth checks below; the
@@ -251,6 +254,11 @@ Two capabilities scope that obligation:
   A decoder rejects packed input as unsupported (§3) only if it lacks
   inflate. The fingerprint identifies the schema and plan, not the packing
   capability.
+  With deflate enabled, the encoder's item and byte budgets depend on the
+  final body length (wire-v0 §6), and therefore on the deflate ratio.
+  Encoders whose deflate output differs may refuse different values with
+  `limit`; decoders with the same limits and capabilities MUST agree on
+  every body.
   Every decoder MUST accept plain string columns; accepting deflate columns
   requires inflate, and a decoder without it MUST reject them as
   `unsupported` after the checks and byte-budget charge in wire-v0 §6.

@@ -143,6 +143,8 @@ field flag (§4.10), which uses the bitmap instead.
 
 Field order is declared order and is canonical.
 Field names MUST be non-empty strings and MUST be unique within a struct.
+An encoder MUST require a host object or map as a struct value; arrays and
+bytes values MUST NOT be accepted as structs.
 
 **Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
 a decimal array index (`0`, or a digit string with no leading zero whose value
@@ -305,7 +307,11 @@ completing each value's checks and charge before examining the next, so the
 first failing value determines the error.
 
 An encoder applies `maxDepth`, `maxItems` and `maxByteLength` as a decoder
-does. It applies the amplification bound to every array with, in place of
+does. It MUST report the first failure in wire order, the order in which a
+decoder would read the values: depth-first in declared order for row
+encoding; column by column in declared leaf order, with participating rows
+in row order within each column, for eligible columnar arrays. It applies
+the amplification bound to every array with, in place of
 remaining bytes, the number of bytes the array's own encoding occupies after
 its count (for a fixed-length array, all of its bytes), and the item and byte
 budgets with the final body length, counting values exactly as a decoder

@@ -1,5 +1,5 @@
 {
-  "description": "Golden vectors for hyperfly wire v0, plan row@1. Hex is body bytes only (no envelope). Every implementation must pass all three sections. Values of the form {\"$surrogate\": \"XXXX\"} denote a string containing that lone UTF-16 code unit; implementations whose strings cannot represent one skip the vector.",
+  "description": "Golden vectors for hyperfly wire v0, plan row@1. Hex is body bytes only (no envelope). Every implementation must pass all three sections. Values of the form {\"$surrogate\": \"XXXX\"} denote a string containing that lone UTF-16 code unit; implementations whose strings cannot represent one skip the vector. Values of the form {\"$bytes\": \"<hex>\"} denote a host bytes value, not an object/map, as in bytes.json.",
   "valid": [
     {
       "name": "bool-true",
@@ -641,6 +641,25 @@
         "value": "ok"
       },
       "value": "no",
+      "error": "type"
+    },
+    {
+      "name": "struct-bytes-not-object",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "bool"
+            },
+            "optional": true
+          }
+        ]
+      },
+      "value": {
+        "$bytes": "00"
+      },
       "error": "type"
     }
   ]
