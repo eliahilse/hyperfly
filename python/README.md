@@ -60,7 +60,7 @@ class Model(BaseModel):
 compile(Model)  # UnsupportedSchemaError: $.meta: type dict[str, int] has no v0 encoding
 ```
 
-## Columns
+## Columns and profiles
 
 ```python
 codec = compile(EventResponse, plan="columnar", validate=True)
@@ -70,6 +70,21 @@ The columnar plan lays an array of records out field by field. It turns timestam
 into deltas, exact-decimal numbers into integer mantissas, enums into indices and
 booleans into bitmaps, and deflates text columns together. Row and columnar codecs
 of the same model have different fingerprints, so a server can register both.
+
+```python
+from hyperfly import train
+from hyperfly.pydantic import to_ir
+
+samples = [r.model_dump(mode="json", by_alias=True) for r in recent_responses]
+profile = train(to_ir(EventResponse), samples)
+codec = compile(EventResponse, plan="columnar", profile=profile, validate=True)
+```
+
+A profile adds what only traffic can teach: the values that recur across
+*different* responses, which a compressor never sees because it only ever holds one.
+`train` returns `None` when the samples have nothing worth a profile. A new profile
+produces a new fingerprint, so register the previous codec next to the new one
+while clients move over.
 
 ## Serving it
 

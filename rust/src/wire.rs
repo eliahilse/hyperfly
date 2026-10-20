@@ -79,6 +79,7 @@ pub struct Limits {
     pub max_items: u64,
     pub max_byte_length: u64,
     pub max_amplification: u64,
+    pub max_total_items: u64,
 }
 
 impl Default for Limits {
@@ -87,8 +88,36 @@ impl Default for Limits {
             max_depth: 64,
             max_items: 1 << 24,
             max_byte_length: 1 << 28,
-            max_amplification: 4096,
+            max_amplification: 32,
+            max_total_items: 1 << 24,
         }
+    }
+}
+
+impl Limits {
+    pub(crate) fn item_budget(&self, body_length: usize) -> u64 {
+        let amplified =
+            (body_length as u128 + 1).saturating_mul(u128::from(self.max_amplification));
+        u128::from(self.max_total_items).min(amplified) as u64
+    }
+}
+
+pub(crate) struct ItemBudget {
+    pub total: u64,
+    cap: u64,
+}
+
+impl ItemBudget {
+    pub fn new(cap: u64) -> Self {
+        ItemBudget { total: 0, cap }
+    }
+
+    pub fn charge(&mut self, count: u64, path: &str) -> Result<()> {
+        if count > self.cap - self.total {
+            return err(ErrorCode::Limit, format!("{path}: item budget exceeded"));
+        }
+        self.total += count;
+        Ok(())
     }
 }
 
@@ -96,6 +125,7 @@ pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
     pub limits: Limits,
+    items: ItemBudget,
 }
 
 impl<'a> Reader<'a> {
@@ -104,7 +134,12 @@ impl<'a> Reader<'a> {
             buf,
             pos: 0,
             limits,
+            items: ItemBudget::new(limits.item_budget(buf.len())),
         }
+    }
+
+    pub fn charge_items(&mut self, count: usize, path: &str) -> Result<()> {
+        self.items.charge(count as u64, path)
     }
 
     pub fn u8(&mut self) -> Result<u8> {
