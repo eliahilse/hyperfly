@@ -4,7 +4,7 @@ import { indexProfile, validateProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
 import { encodeNode } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
-import { validateIR, type IRNode } from "./ir.js";
+import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
 import { Writer } from "./writer.js";
 
@@ -72,15 +72,7 @@ function compileArtifact(
 
 export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = {}): Codec<T> {
   const plan: PlanLayout = options.plan ?? "row";
-  let compiled: ReturnType<typeof compileArtifact>;
-  try {
-    compiled = compileArtifact(input, plan, options.profile);
-  } catch (e) {
-    // untrusted JSON can nest deeper than the host stack; that is invalid IR, not a crash
-    if (e instanceof RangeError) throw new HyperflyError("ir", "IR or profile nesting exceeds the call stack");
-    throw e;
-  }
-  const { ir, profile: frozenProfile, artifact } = compiled;
+  const { ir, profile: frozenProfile, artifact } = withinStack(() => compileArtifact(input, plan, options.profile));
   const profileIndex = indexProfile(frozenProfile);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);

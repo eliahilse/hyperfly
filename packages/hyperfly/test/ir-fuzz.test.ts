@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileIR, HyperflyError, type IRNode, type Profile } from "../src/index.js";
+import { compileIR, HyperflyError, train, validateProfile, type IRNode, type Profile } from "../src/index.js";
 
 /**
  * compileIR takes IR and profiles that may arrive as untyped JSON, so for ANY JSON
@@ -142,6 +142,8 @@ const PINNED_IR: unknown[] = [
   {},
   { kind: [] },
   { kind: null },
+  { kind: { toString: null } },
+  { kind: [{ toString: null }] },
   { kind: "array" },
   { kind: "nullable" },
   { kind: "literal" },
@@ -183,6 +185,7 @@ const PINNED_PROFILES: unknown[] = [
   { version: 2, shared: { columns: [{ leaf: 0, derived: null }] } },
   { version: 2, shared: { columns: [{ leaf: 0, derived: { source: 0, values: null } }] } },
   { version: 2 ** 60, shared: { columns: [] } },
+  { version: { toString: null }, shared: { columns: [] } },
   { version: 1, shared: { columns: [{ leaf: 2 ** 60, dict: ["a"] }] } },
   { version: 1, shared: { columns: [{ leaf: -0, dict: ["a"] }] }, hints: deep(200_000) },
 ];
@@ -196,6 +199,15 @@ describe("IR fuzzing", () => {
     }
     for (const profile of PINNED_PROFILES) {
       compilesOrRejects(() => compileIR(PROFILE_IR, { plan: "columnar", profile: profile as Profile }), profile);
+      compilesOrRejects(() => validateProfile(PROFILE_IR, profile as Profile), profile);
+    }
+  });
+
+  test("pinned shapes train and validate profiles or fail with code ir", () => {
+    const empty: Profile = { version: 1, shared: { columns: [] } };
+    for (const input of PINNED_IR) {
+      compilesOrRejects(() => train(input as IRNode, []), input);
+      compilesOrRejects(() => validateProfile(input as IRNode, empty), input);
     }
   });
 

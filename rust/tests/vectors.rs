@@ -183,7 +183,7 @@ fn compile(ir: &Json, plan: Plan) -> Codec {
 /// Loader failures are invalid IR; anything the loader accepts must also pass the crate.
 fn compile_ir_vector(v: &Json) -> Result<Codec, ErrorCode> {
     let node = node_of(&v["ir"]).map_err(|_| ErrorCode::Ir)?;
-    let compiled = match v.get("profile") {
+    let compiled = match v.get("profile").filter(|profile| !profile.is_null()) {
         None => Codec::compile(node, Plan::Row, Limits::default(), false),
         Some(profile) => Codec::compile_with_profile(
             node,
@@ -538,7 +538,12 @@ fn fingerprints() {
             "row" => Plan::Row,
             _ => Plan::Columnar,
         };
-        let profile = case.get("profile").map(profile_of).transpose().unwrap();
+        let profile = case
+            .get("profile")
+            .filter(|profile| !profile.is_null())
+            .map(profile_of)
+            .transpose()
+            .unwrap();
         let canonical = serialize_artifact(&node_of(&case["ir"]).unwrap(), plan, profile.as_ref());
         assert_eq!(
             canonical,

@@ -26,6 +26,24 @@ function fail(path: string, message: string): never {
   throw new HyperflyError("ir", `${path}: ${message}`);
 }
 
+/** Message text for an untrusted JSON value, without calling any method it may carry. */
+export function describeValue(v: unknown): string {
+  if (Array.isArray(v)) return "an array";
+  if (typeof v === "object" && v !== null) return "an object";
+  return String(v);
+}
+
+/** Runs fn, reporting a call-stack overflow on deeply nested untrusted input as invalid IR. */
+export function withinStack<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    // untrusted JSON can nest deeper than the host stack; that is invalid IR, not a crash
+    if (e instanceof RangeError) throw new HyperflyError("ir", "IR or profile nesting exceeds the call stack");
+    throw e;
+  }
+}
+
 function isObject(v: unknown): boolean {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -174,7 +192,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       return;
     }
     default:
-      fail(path, `unknown IR kind ${(node as { kind: string }).kind}`);
+      fail(path, `unknown IR kind ${describeValue((node as { kind: unknown }).kind)}`);
   }
 }
 
