@@ -329,6 +329,23 @@ describe("fetch adapter", () => {
     expect(errors[0]!.code).toBe("limit");
   });
 
+  test.each(["row", "columnar"] as const)("falls back to JSON on a %s encoder depth refusal", async (plan) => {
+    const shallow = compileIR<{ s: string[] }[]>({
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "s", type: { kind: "array", element: { kind: "string" } } }] },
+    }, { plan, limits: { maxDepth: 1 } });
+    const values = [{ s: ["a"] }];
+    const errors: EncodeError[] = [];
+    const response = respond(new Request(url, {
+      headers: { "Hyperfly-Accept": shallow.fingerprint },
+    }), values, new CodecRegistry([shallow as never]), {
+      onFallback: (error) => { errors.push(error); },
+    });
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual(values);
+    expect(errors.map((error) => error.code)).toEqual(["depth"]);
+  });
+
   test("rethrows encoder type errors without reporting a fallback", () => {
     const errors: EncodeError[] = [];
     const request = new Request(url, { headers: { "Hyperfly-Accept": codecA.fingerprint } });

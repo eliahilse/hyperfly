@@ -111,7 +111,7 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Negoti
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
     } catch (error) {
-      if (!(error instanceof EncodeError) || error.code !== "limit") throw error;
+      if (!(error instanceof EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
       options.onFallback?.(error);
       return {
         body: JSON.stringify(value),

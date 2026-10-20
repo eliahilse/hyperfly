@@ -1,8 +1,6 @@
-use hyperfly_core::ir::{
-    Derivation, GrammarCase, GrammarNum, GrammarToken, Profile, ProfileColumn,
-};
 use hyperfly_core::{
-    fingerprint_of, serialize_artifact, Codec, ErrorCode, Field, Limits, Literal, Node, Plan, Value,
+    fingerprint_of, serialize_artifact, Codec, Derivation, ErrorCode, Field, GrammarCase,
+    GrammarNum, GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn, Value,
 };
 use serde_json::Value as Json;
 
@@ -19,7 +17,9 @@ fn node_of(json: &Json) -> Result<Node, String> {
 
     fn flag(field: &Json, name: &str) -> Result<bool, String> {
         field.get(name).map_or(Ok(false), |value| {
-            value.as_bool().ok_or_else(|| format!("{name} flag must be a boolean"))
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{name} flag must be a boolean"))
         })
     }
 
@@ -385,6 +385,109 @@ fn packed_without_inflate_fails_closed() {
 }
 
 #[test]
+fn packed_string_column_before_truncated_int_column() {
+    let file = load("columnar.json");
+    let vector = &file["packedDecode"][0];
+    let mut ir = node_of(&vector["ir"]).unwrap();
+    let Node::Array { element, .. } = &mut ir else {
+        unreachable!();
+    };
+    let Node::Struct(fields) = element.as_mut() else {
+        unreachable!();
+    };
+    fields.push(Field {
+        name: "n".into(),
+        ty: Node::Int {
+            min: None,
+            max: None,
+        },
+        optional: false,
+        nullable: false,
+    });
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), true).unwrap();
+    let mut body = from_hex(vector["hex"].as_str().unwrap());
+    assert_eq!(body[1], 0x02);
+    body.extend_from_slice(&[0x00, 0x02, 0x04]);
+    let value = value_of(&serde_json::json!([{"s": "hi", "n": 1}, {"s": "yo", "n": 2}]));
+    assert!(deep_eq(&codec.decode_body(&body).unwrap(), &value));
+    *body.last_mut().unwrap() = 0x80;
+    assert_eq!(
+        codec.decode_body(&body).unwrap_err().code.as_str(),
+        "truncated"
+    );
+}
+
+#[test]
+fn packed_string_column_validates_each_utf8_slice() {
+    let file = load("columnar.json");
+    let codec = compile(&file["packedDecode"][0]["ir"], Plan::Columnar);
+    let valid = from_hex("0202000207010200fdffc3a9");
+    let value = value_of(&serde_json::json!([{"s": ""}, {"s": "é"}]));
+    assert!(deep_eq(&codec.decode_body(&valid).unwrap(), &value));
+    let invalid = from_hex("0202010107010200fdffc3a9");
+    let error = codec.decode_body(&invalid).unwrap_err();
+    assert_eq!(error.code.as_str(), "utf8");
+    assert_eq!(error.message, "$[].s[0]: invalid UTF-8");
+}
+
+#[test]
+fn columnar_enum_optional_nullable_round_trip() {
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(vec![Field {
+            name: "e".into(),
+            ty: Node::Enum(vec!["x".into(), "y".into(), "雪".into()]),
+            optional: true,
+            nullable: true,
+        }])),
+        length: None,
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    for rows in [
+        serde_json::json!([{}, {"e": null}, {"e": "雪"}, {"e": "x"}, {"e": "y"}, {"e": "雪"}]),
+        serde_json::json!([{}, {"e": null}]),
+        serde_json::json!([]),
+    ] {
+        let value = value_of(&rows);
+        let body = codec.encode_body(&value).unwrap();
+        assert!(deep_eq(&codec.decode_body(&body).unwrap(), &value));
+    }
+}
+
+#[test]
+fn row_array_of_columnar_arrays_enforces_one_bit_floor() {
+    let ir = Node::Array {
+        element: Box::new(Node::Array {
+            element: Box::new(Node::Struct(vec![Field {
+                name: "e".into(),
+                ty: Node::Enum(vec!["x".into()]),
+                optional: false,
+                nullable: false,
+            }])),
+            length: Some(2),
+        }),
+        length: None,
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let value = value_of(&serde_json::json!([
+        [{"e": "x"}, {"e": "x"}],
+        [{"e": "x"}, {"e": "x"}],
+        [{"e": "x"}, {"e": "x"}],
+    ]));
+    assert_eq!(
+        codec.encode_body(&value).unwrap_err().code.as_str(),
+        "limit"
+    );
+    assert_eq!(
+        codec.decode_body(&[0x03]).unwrap_err().code.as_str(),
+        "limit"
+    );
+    let empty = Value::Array(Vec::new());
+    let body = codec.encode_body(&empty).unwrap();
+    assert_eq!(body, [0x00]);
+    assert_eq!(codec.decode_body(&body).unwrap(), empty);
+}
+
+#[test]
 fn fingerprints() {
     let file = load("fingerprints.json");
     for case in file["cases"].as_array().unwrap() {
@@ -402,6 +505,21 @@ fn fingerprints() {
         );
         assert_eq!(
             to_hex(&fingerprint_of(&canonical)),
+            case["fingerprint"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        let codec = Codec::compile_with_profile(
+            node_of(&case["ir"]).unwrap(),
+            plan,
+            Limits::default(),
+            false,
+            profile,
+        )
+        .unwrap();
+        assert_eq!(codec.artifact(), canonical, "{}", case["name"]);
+        assert_eq!(
+            codec.fingerprint(),
             case["fingerprint"].as_str().unwrap(),
             "{}",
             case["name"]
