@@ -100,10 +100,30 @@ describe("loadArtifact", () => {
 
   test("rejects a plan version this build does not speak", () => {
     const text = codec.artifact.replace('"version":1', '"version":99');
-    const expected = toHex(fingerprintOf(text));
-    expect(() => loadArtifact(text, expected)).toThrow(FingerprintMismatchError);
-    expect(() => loadArtifact(text, expected)).toThrow(expect.objectContaining({ expected, actual: codec.fingerprint }));
-    expect(() => loadArtifact(text, codec.fingerprint)).toThrow(FingerprintMismatchError);
+    const versionError = expect.objectContaining({ code: "ir", message: expect.stringContaining("$.plan.version:") });
+    expect(() => loadArtifact(text, toHex(fingerprintOf(text)))).toThrow(versionError);
+    expect(() => loadArtifact(text, codec.fingerprint)).toThrow(versionError);
+  });
+
+  test.each([
+    null,
+    1,
+    { kind: "nullable" },
+    { kind: "struct" },
+    { kind: "struct", fields: [null] },
+    { kind: "enum" },
+    { kind: "enum", members: "ab" },
+    { kind: "enum", members: 123 },
+    { kind: "array", element: null },
+  ].map((ir) => ({ ir })))("codes a compile failure for IR $ir", ({ ir }) => {
+    const text = JSON.stringify({ wire: 1, plan: { layout: "row", version: 1 }, ir });
+    expect(() => loadArtifact(text, codec.fingerprint)).toThrow(HyperflyError);
+  });
+
+  test("rejects deep nesting before compiling", () => {
+    const depth = 40_000;
+    const text = `{"wire":1,"plan":{"layout":"row","version":1},"ir":${'{"kind":"array","element":'.repeat(depth)}{"kind":"bool"}${"}".repeat(depth)}}`;
+    expect(() => loadArtifact(text, codec.fingerprint)).toThrow(expect.objectContaining({ code: "ir", message: expect.stringContaining("nests deeper") }));
   });
 
   test("rejects renamed fields rather than trusting the offered fingerprint", () => {
@@ -221,6 +241,28 @@ describe("fetchArtifact", () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)) }))
       .rejects.toThrow(expect.objectContaining({ code: "ir" }));
     expect(body.locked).toBe(false);
+  });
+
+  test("forwards request headers", async () => {
+    const seen: string[] = [];
+    const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get("authorization") ?? "");
+      return routed(input, init);
+    }) as typeof fetch;
+    await fetchArtifact(base, codec.fingerprint, { fetch: fetchStub, headers: { Authorization: "Bearer t" } });
+    expect(seen).toEqual(["Bearer t"]);
+  });
+
+  test("propagates an abort during the body read", async () => {
+    const controller = new AbortController();
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        controller.abort(new Error("stop"));
+        throw new Error("stream aborted");
+      },
+    }, { highWaterMark: 0 });
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)), signal: controller.signal }))
+      .rejects.toThrow("stop");
   });
 
   test("rejects an empty body", async () => {

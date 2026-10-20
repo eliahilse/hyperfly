@@ -169,6 +169,18 @@ function checkedFingerprint(fingerprint: string): string {
   return fingerprint.toLowerCase();
 }
 
+const MAX_ARTIFACT_NESTING = 512;
+
+function checkNesting(value: unknown): void {
+  const stack: [unknown, number][] = [[value, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()!;
+    if (typeof node !== "object" || node === null) continue;
+    if (depth > MAX_ARTIFACT_NESTING) throw new HyperflyError("ir", `artifact nests deeper than ${MAX_ARTIFACT_NESTING}`);
+    for (const inner of Object.values(node)) stack.push([inner, depth + 1]);
+  }
+}
+
 function artifactRecord(
   value: unknown,
   path: string,
@@ -197,6 +209,7 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
     if (error instanceof SyntaxError) throw new HyperflyError("ir", `artifact is not JSON: ${error.message}`);
     throw error;
   }
+  checkNesting(parsed);
   const root = artifactRecord(parsed, "$", ["wire", "plan", "ir"], ["profile"]);
   if (root.wire !== 1) throw new HyperflyError("ir", "$.wire: must be 1");
   const plan = artifactRecord(root.plan, "$.plan", ["layout", "version"]);
@@ -211,21 +224,29 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
       && shared.columns.some((column) => column && (column.grammar || column.derived)) ? 2 : 1;
     profile = { version, shared: shared as SharedProfile };
   }
-  const codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits: options.limits, pack: options.pack });
-  const compiled = JSON.parse(codec.artifact) as { plan: { version: number } };
-  if (codec.fingerprint !== expected || compiled.plan.version !== plan.version) {
-    throw new FingerprintMismatchError(expected, codec.fingerprint);
+  let codec: Codec<T>;
+  try {
+    codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits: options.limits, pack: options.pack });
+  } catch (error) {
+    if (error instanceof HyperflyError) throw error;
+    throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const compiled = JSON.parse(codec.artifact) as { plan: { version: number } };
+  if (compiled.plan.version !== plan.version) {
+    throw new HyperflyError("ir", `$.plan.version: ${plan.layout} is version ${compiled.plan.version} in this build`);
+  }
+  if (codec.fingerprint !== expected) throw new FingerprintMismatchError(expected, codec.fingerprint);
   return codec;
 }
 
 export interface FetchArtifactOptions extends LoadArtifactOptions {
   fetch?: typeof fetch;
+  headers?: HeadersInit;
   maxBytes?: number;
   signal?: AbortSignal;
 }
 
-/** Fetch and verify an offered artifact; 404 is a miss, other HTTP failures have code "fingerprint". */
+/** Fetch and verify an offered artifact. 404 is a miss; another non-2xx status throws code "fingerprint"; network errors and aborts propagate. */
 export async function fetchArtifact<T = unknown>(
   base: string | URL,
   fingerprint: string,
@@ -235,6 +256,7 @@ export async function fetchArtifact<T = unknown>(
   const maxBytes = bodyLimit(options.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
   const response = await (options.fetch ?? globalThis.fetch)(new URL(WELL_KNOWN_PREFIX + fp, base), {
     method: "GET",
+    headers: options.headers,
     signal: options.signal,
   });
   if (!response.ok) {
@@ -244,6 +266,7 @@ export async function fetchArtifact<T = unknown>(
   }
   const result = await readLimited(response.body, maxBytes);
   if (!result.ok) {
+    if (options.signal?.aborted) throw options.signal.reason;
     if (result.status === 413) throw new HyperflyError("limit", `artifact exceeds maxBytes ${maxBytes}`);
     throw new HyperflyError("ir", "artifact body could not be read");
   }
