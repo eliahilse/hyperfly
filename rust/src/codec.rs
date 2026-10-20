@@ -1940,6 +1940,18 @@ fn dec_int_column(
     count: usize,
     path: &str,
 ) -> Result<Vec<i64>> {
+    dec_int_column_with(r, min, count, path, |value, path| {
+        decoded_int(min, max, value, path)
+    })
+}
+
+fn dec_int_column_with<T>(
+    r: &mut Reader,
+    min: Option<i64>,
+    count: usize,
+    path: &str,
+    decode: impl Fn(i128, &str) -> Result<T>,
+) -> Result<Vec<T>> {
     let mode = r.u8()?;
     if mode > 4 {
         return err(
@@ -1972,12 +1984,7 @@ fn dec_int_column(
     let mut out = Vec::with_capacity(count);
     if mode == 0x00 {
         for i in 0..count {
-            out.push(decoded_int(
-                min,
-                max,
-                from_form(read_uleb(r)?),
-                &format!("{path}[{i}]"),
-            )?);
+            out.push(decode(from_form(read_uleb(r)?), &format!("{path}[{i}]"))?);
         }
         return Ok(out);
     }
@@ -1987,7 +1994,7 @@ fn dec_int_column(
         let packed = unpack_bits(r, count, width, path)?;
         for (i, offset) in packed.iter().enumerate() {
             let value = checked_add_i128(base, *offset as i128, &format!("{path}[{i}]"))?;
-            out.push(decoded_int(min, max, value, &format!("{path}[{i}]"))?);
+            out.push(decode(value, &format!("{path}[{i}]"))?);
         }
         return Ok(out);
     }
@@ -1997,7 +2004,7 @@ fn dec_int_column(
         let width = r.u8()?;
         let packed = unpack_bits(r, count - 1, width, path)?;
         let mut running = first;
-        out.push(decoded_int(min, max, running, &format!("{path}[0]"))?);
+        out.push(decode(running, &format!("{path}[0]"))?);
         for (offset_index, offset) in packed.into_iter().enumerate() {
             let i = offset_index.checked_add(1).ok_or_else(|| Error {
                 code: ErrorCode::Range,
@@ -2005,7 +2012,7 @@ fn dec_int_column(
             })?;
             let delta = checked_add_i128(base, offset as i128, &format!("{path}[{i}]"))?;
             running = checked_add_i128(running, delta, &format!("{path}[{i}]"))?;
-            out.push(decoded_int(min, max, running, &format!("{path}[{i}]"))?);
+            out.push(decode(running, &format!("{path}[{i}]"))?);
         }
         return Ok(out);
     }
@@ -2055,20 +2062,20 @@ fn dec_int_column(
                 })?;
             let offset = checked_add_i128(*low as i128, shifted, &format!("{path}[{i}]"))?;
             let value = checked_add_i128(base, offset, &format!("{path}[{i}]"))?;
-            out.push(decoded_int(min, max, value, &format!("{path}[{i}]"))?);
+            out.push(decode(value, &format!("{path}[{i}]"))?);
         }
         return Ok(out);
     }
 
     let mut previous = from_form(read_uleb(r)?);
-    out.push(decoded_int(min, max, previous, &format!("{path}[0]"))?);
+    out.push(decode(previous, &format!("{path}[0]"))?);
     for i in 1..count {
         previous = checked_add_i128(
             previous,
             unzigzag(read_uleb(r)?) as i128,
             &format!("{path}[{i}]"),
         )?;
-        out.push(decoded_int(min, max, previous, &format!("{path}[{i}]"))?);
+        out.push(decode(previous, &format!("{path}[{i}]"))?);
     }
     Ok(out)
 }
@@ -2635,14 +2642,14 @@ fn read_string_literal<'a>(
     decode_utf8(r.take(len)?, path, index)
 }
 
-fn check_reconstructed_string<'a>(
+fn check_reconstructed_len(
     r: &mut Reader,
-    value: &'a str,
+    len: usize,
     limits: &Limits,
     path: &str,
     index: usize,
-) -> Result<&'a str> {
-    let len = u64::try_from(value.len()).map_err(|_| Error {
+) -> Result<()> {
+    let len = u64::try_from(len).map_err(|_| Error {
         code: ErrorCode::Limit,
         message: format!(
             "{path}[{index}]: reconstructed string length exceeds the wire size domain"
@@ -2654,8 +2661,7 @@ fn check_reconstructed_string<'a>(
             format!("{path}[{index}]: reconstructed string length exceeds limit"),
         );
     }
-    r.charge_bytes(len, &format!("{path}[{index}]"))?;
-    Ok(value)
+    r.charge_bytes(len, &format!("{path}[{index}]"))
 }
 
 fn read_escapes(r: &mut Reader, count: usize, path: &str) -> Result<(Vec<bool>, usize)> {
@@ -2763,7 +2769,8 @@ fn dec_string_column(
                 code: ErrorCode::Range,
                 message: format!("{path}[{i}]: dictionary code {code} out of range"),
             })?;
-            out.push(check_reconstructed_string(r, entry, limits, path, i)?);
+            check_reconstructed_len(r, entry.len(), limits, path, i)?;
+            out.push(entry);
         }
         return Ok(out);
     }
@@ -2798,14 +2805,31 @@ fn dec_string_column(
                     "{path}.lane[{lane_index}]: grammar bound exceeds the v0 integer domain"
                 ),
             })?;
-            lanes.push(dec_int_column(
-                r,
-                Some(0),
-                Some(maximum),
-                matched_count,
-                &format!("{path}.lane[{lane_index}]"),
-            )?);
+            lanes.push((
+                maximum,
+                dec_int_column_with(
+                    r,
+                    Some(0),
+                    matched_count,
+                    &format!("{path}.lane[{lane_index}]"),
+                    |value, _| Ok(value),
+                )?
+                .into_iter(),
+            ));
         }
+        let rendered_len = grammar.iter().try_fold(0usize, |len, token| {
+            let token_len = match token {
+                GrammarToken::Lit(literal) => literal.len(),
+                GrammarToken::Num(num) => usize::try_from(num.len).map_err(|_| Error {
+                    code: ErrorCode::Limit,
+                    message: format!("{path}: grammar token length exceeds the host size domain"),
+                })?,
+            };
+            len.checked_add(token_len).ok_or_else(|| Error {
+                code: ErrorCode::Limit,
+                message: format!("{path}: rendered grammar length exceeds the host size domain"),
+            })
+        })?;
         let mut matched = 0usize;
         for (i, is_escaped) in escaped.iter().copied().enumerate() {
             if is_escaped {
@@ -2813,20 +2837,26 @@ fn dec_string_column(
                 continue;
             }
             let mut values = Vec::with_capacity(lanes.len());
-            for lane in &lanes {
-                let value = *lane.get(matched).ok_or_else(|| Error {
+            for (lane_index, (maximum, lane)) in lanes.iter_mut().enumerate() {
+                let value = lane.next().ok_or_else(|| Error {
                     code: ErrorCode::Truncated,
                     message: format!(
                         "{path}[{i}]: grammar lane is shorter than the matched row count"
                     ),
                 })?;
+                let value = decoded_int(
+                    Some(0),
+                    Some(*maximum),
+                    value,
+                    &format!("{path}.lane[{lane_index}][{matched}]"),
+                )?;
                 values.push(u64::try_from(value).map_err(|_| Error {
                     code: ErrorCode::Range,
                     message: format!("{path}[{i}]: grammar lane value is negative"),
                 })?);
             }
-            let value = render_grammar(grammar, &values)?;
-            out.push(check_reconstructed_string(r, &value, limits, path, i)?);
+            check_reconstructed_len(r, rendered_len, limits, path, i)?;
+            out.push(&render_grammar(grammar, &values)?);
             matched += 1;
         }
         return Ok(out);
@@ -2875,7 +2905,8 @@ fn dec_string_column(
                 code: ErrorCode::Range,
                 message: format!("{path}[{i}]: derived dictionary code is outside the mapping"),
             })?;
-            out.push(check_reconstructed_string(r, value, limits, path, i)?);
+            check_reconstructed_len(r, value.len(), limits, path, i)?;
+            out.push(value);
         }
         return Ok(out);
     }
@@ -2906,6 +2937,12 @@ fn dec_string_column(
         })?);
     }
     r.charge_bytes(total, path)?;
+    if !pack {
+        return err(
+            ErrorCode::Unsupported,
+            format!("{path}: packed string column requires an inflate hook"),
+        );
+    }
     let blob_len = read_uleb(r)?;
     if blob_len > limits.max_byte_length {
         return err(
@@ -2918,12 +2955,6 @@ fn dec_string_column(
         message: format!("{path}: packed blob exceeds the host size domain"),
     })?;
     let blob = r.take(blob_len)?;
-    if !pack {
-        return err(
-            ErrorCode::Unsupported,
-            format!("{path}: packed string column requires an inflate hook"),
-        );
-    }
     let expected = usize::try_from(total).map_err(|_| Error {
         code: ErrorCode::Limit,
         message: format!("{path}: packed output exceeds the host size domain"),

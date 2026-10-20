@@ -267,8 +267,17 @@ fn limits_codec(vector: &Json) -> Codec {
         }
     }
     let profile = vector.get("profile").map(profile_of).transpose().unwrap();
-    Codec::compile_with_profile(node_of(&vector["ir"]).unwrap(), plan, limits, true, profile)
-        .unwrap()
+    let inflate = vector
+        .get("inflate")
+        .is_none_or(|value| value.as_bool().unwrap());
+    Codec::compile_with_profile(
+        node_of(&vector["ir"]).unwrap(),
+        plan,
+        limits,
+        inflate,
+        profile,
+    )
+    .unwrap()
 }
 
 #[test]

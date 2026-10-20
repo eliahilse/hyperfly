@@ -1,4 +1,7 @@
-use hyperfly_core::{Codec, ErrorCode, Field, Limits, Literal, Node, Plan, Value};
+use hyperfly_core::{
+    Codec, ErrorCode, Field, GrammarCase, GrammarNum, GrammarToken, Limits, Literal, Node, Plan,
+    Profile, ProfileColumn, Value,
+};
 
 fn field(name: &str, ty: Node) -> Field {
     Field {
@@ -55,6 +58,57 @@ fn enum_column_charges_members_in_row_order() {
         codec.decode_body(&[2, 0x03]).unwrap_err().code,
         ErrorCode::Range
     );
+}
+
+#[test]
+fn grammar_column_checks_values_after_structure_in_row_order() {
+    let profile = Profile {
+        version: 2,
+        columns: vec![ProfileColumn {
+            leaf: 0,
+            dict: None,
+            grammar: Some(vec![
+                GrammarToken::Lit("ord_".into()),
+                GrammarToken::Num(GrammarNum {
+                    base: 16,
+                    len: 1,
+                    case: GrammarCase::Lower,
+                }),
+            ]),
+            derived: None,
+        }],
+    };
+    let limits = Limits {
+        max_total_bytes: 4,
+        ..Limits::default()
+    };
+    let codec = Codec::compile_with_profile(
+        column(Node::Str),
+        Plan::Columnar,
+        limits,
+        false,
+        Some(profile),
+    )
+    .unwrap();
+    for lane in [
+        vec![0, 0, 16],
+        vec![1, 0, 32],
+        vec![2, 0, 5, 0, 2],
+        vec![3, 0, 32, 0],
+        vec![4, 0, 0, 5, 2, 16],
+    ] {
+        let mut body = vec![2, 3, 0];
+        body.extend(lane);
+        assert_eq!(codec.decode_body(&body).unwrap_err().code, ErrorCode::Limit);
+    }
+    for (body, code) in [
+        (&[2, 3, 0, 0, 16, 0][..], ErrorCode::Range),
+        (&[2, 3, 0, 0, 16][..], ErrorCode::Truncated),
+        (&[2, 3, 0, 2, 0, 5, 0, 0x80][..], ErrorCode::Bitmap),
+        (&[2, 3, 1, 1, 0, 16, 1, 0xff][..], ErrorCode::Utf8),
+    ] {
+        assert_eq!(codec.decode_body(body).unwrap_err().code, code);
+    }
 }
 
 #[test]

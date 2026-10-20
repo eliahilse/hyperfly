@@ -1,5 +1,5 @@
 {
-  "description": "Byte-budget vectors for wire-v0 section 6: the decoded bytes of every string and bytes value (including literals, enum members and dictionary, grammar and derived values) against min(maxTotalBytes, maxByteAmplification x (body length + 1)), just at and just past the bound, under the default limits unless a vector carries `limits` (merged over the defaults). Hex is body bytes only. `plan` selects row@1 or columnar@5; an optional `profile` has the same shape as the profiled vectors in columnar.json. Values of the form {\"$bytes\": \"<hex>\"} denote a bytes value. `valid` vectors round-trip; `invalidDecode` and `invalidEncode` fail with `error`. `packedDecode` vectors decode `hex` to `value` with packing enabled; encoders are not run because deflate output differs between libraries.",
+  "description": "Byte-budget vectors for wire-v0 section 6: the decoded bytes of every string and bytes value (including literals, enum members and dictionary, grammar and derived values) against min(maxTotalBytes, maxByteAmplification x (body length + 1)), just at and just past the bound, under the default limits unless a vector carries `limits` (merged over the defaults). Hex is body bytes only. `plan` selects row@1 or columnar@5; an optional `profile` has the same shape as the profiled vectors in columnar.json. Values of the form {\"$bytes\": \"<hex>\"} denote a bytes value. `valid` vectors round-trip; `invalidDecode` and `invalidEncode` fail with `error`. `packedDecode` vectors decode `hex` to `value` with packing enabled; encoders are not run because deflate output differs between libraries. Optional \"inflate\": false compiles decoders without inflate (pack = false); omitted means inflate is enabled.",
   "valid": [
     {
       "name": "byte-amplification-literal-at-bound",
@@ -346,6 +346,364 @@
       },
       "value": "abcdefghijklmnop",
       "hex": "00"
+    },
+    {
+      "name": "root-literal-byte-amplification-at-bound",
+      "description": "64 ASCII bytes equals 64 x (0 body bytes + 1) = 64 under default limits",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "hex": ""
+    },
+    {
+      "name": "root-literal-max-byte-length-exempt",
+      "description": "16 literal bytes exceed maxByteLength 4 but are exempt; 16 <= 64 x (0 + 1) = 64 budget bytes",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "abcdefghijklmnop"
+      },
+      "limits": {
+        "maxByteLength": 4
+      },
+      "value": "abcdefghijklmnop",
+      "hex": ""
+    },
+    {
+      "name": "col-grammar-byte-budget-at-bound",
+      "description": "2 matched rows x (4 literal + 4 numeric bytes) = 16 decoded bytes equals maxTotalBytes 16",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 16
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "ord_0001"
+        },
+        {
+          "s": "ord_0002"
+        }
+      ],
+      "hex": "020300000102"
+    },
+    {
+      "name": "col-derived-byte-budget-at-bound",
+      "description": "(2 + 2) source bytes + (5 + 5) derived bytes, each value counted once = 14 decoded bytes equals maxTotalBytes 14",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "source",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "derived",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 14
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "aa",
+                "bb"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "north",
+                  "south"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "source": "aa",
+          "derived": "north"
+        },
+        {
+          "source": "bb",
+          "derived": "south"
+        }
+      ],
+      "hex": "020102090400"
+    },
+    {
+      "name": "col-dict-escape-byte-budget-at-bound",
+      "description": "16 dictionary-hit bytes + 3 escaped bytes = 19 decoded bytes equals maxTotalBytes 19",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 19
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "xyz"
+        }
+      ],
+      "hex": "020101010378797a"
+    },
+    {
+      "name": "col-grammar-escape-byte-budget-at-bound",
+      "description": "2 x (4 + 4) matched bytes + 1 escaped byte = 17 decoded bytes equals maxTotalBytes 17",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 17
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "ord_0001"
+        },
+        {
+          "s": "ord_0002"
+        },
+        {
+          "s": "x"
+        }
+      ],
+      "hex": "030301040001020178"
+    },
+    {
+      "name": "col-derived-escape-byte-budget-at-bound",
+      "description": "(2 + 2 + 2) source bytes + (5 + 5) mapped bytes + 3 escaped bytes, each value counted once = 19 decoded bytes equals maxTotalBytes 19",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "source",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "derived",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 19
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "aa",
+                "bb"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "north",
+                  "south"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "source": "aa",
+          "derived": "north"
+        },
+        {
+          "source": "bb",
+          "derived": "south"
+        },
+        {
+          "source": "aa",
+          "derived": "xyz"
+        }
+      ],
+      "hex": "030102190401040378797a"
+    },
+    {
+      "name": "col-dict-mixed-byte-budget-at-bound",
+      "description": "16 + 2 + 16 + 3 bytes from two dictionary hits and two escapes = 37 decoded bytes equals maxTotalBytes 37",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 37
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "ab"
+        },
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "xyz"
+        }
+      ],
+      "hex": "040101050261620378797a"
     }
   ],
   "invalidDecode": [
@@ -665,6 +1023,453 @@
         "maxTotalBytes": 31
       },
       "hex": "02021010",
+      "error": "limit"
+    },
+    {
+      "name": "root-literal-byte-amplification-over-bound",
+      "description": "65 ASCII bytes exceeds 64 x (0 body bytes + 1) = 64 by 1 under default limits",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "hex": "",
+      "error": "limit"
+    },
+    {
+      "name": "col-enum-budget-before-later-range",
+      "description": "Row 0 charges 16 > maxTotalBytes 15 by 1 before row 1 index 3 is range-checked; indexes [0, 3] pack as 0x0c at width 2",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "e",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "abcdefghijklmnop",
+                  "q",
+                  "r"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 15
+      },
+      "hex": "020c",
+      "error": "limit"
+    },
+    {
+      "name": "col-dict-budget-before-later-utf8",
+      "description": "Row 0 dictionary hit charges 16 > maxTotalBytes 15 by 1 before row 1 escape 01ff is read; codes [1, 0] pack as 0x01 at width 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 15
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "0201010101ff",
+      "error": "limit"
+    },
+    {
+      "name": "col-grammar-byte-budget-over-bound",
+      "description": "2 matched rows x (4 literal + 4 numeric bytes) = 16 decoded bytes exceeds maxTotalBytes 15 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 15
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "020300000102",
+      "error": "limit"
+    },
+    {
+      "name": "col-derived-byte-budget-over-bound",
+      "description": "(2 + 2) source bytes + (5 + 5) derived bytes, each value counted once = 14 decoded bytes exceeds maxTotalBytes 13 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "source",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "derived",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 13
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "aa",
+                "bb"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "north",
+                  "south"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "hex": "020102090400",
+      "error": "limit"
+    },
+    {
+      "name": "col-dict-escape-byte-budget-over-bound",
+      "description": "16 dictionary-hit bytes + 3 escaped bytes = 19 decoded bytes exceeds maxTotalBytes 18 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 18
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "020101010378797a",
+      "error": "limit"
+    },
+    {
+      "name": "col-grammar-escape-byte-budget-over-bound",
+      "description": "2 x (4 + 4) matched bytes + 1 escaped byte = 17 decoded bytes exceeds maxTotalBytes 16 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 16
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "030301040001020178",
+      "error": "limit"
+    },
+    {
+      "name": "col-derived-escape-byte-budget-over-bound",
+      "description": "(2 + 2 + 2) source bytes + (5 + 5) mapped bytes + 3 escaped bytes, each value counted once = 19 decoded bytes exceeds maxTotalBytes 18 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "source",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "derived",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 18
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "aa",
+                "bb"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "north",
+                  "south"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "hex": "030102190401040378797a",
+      "error": "limit"
+    },
+    {
+      "name": "col-dict-mixed-byte-budget-over-bound",
+      "description": "16 + 2 + 16 + 3 bytes from two dictionary hits and two escapes = 37 decoded bytes exceeds maxTotalBytes 36 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 36
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "040101050261620378797a",
+      "error": "limit"
+    },
+    {
+      "name": "packed-without-inflate-over-bound",
+      "description": "Declared total 16 + 16 = 32 exceeds maxTotalBytes 31 by 1 before capability rejection",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "inflate": false,
+      "hex": "02021010",
+      "error": "limit"
+    },
+    {
+      "name": "packed-without-inflate-at-bound",
+      "description": "Declared total 16 + 16 = 32 equals maxTotalBytes 32; unsupported precedes the absent blob length",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 32
+      },
+      "inflate": false,
+      "hex": "02021010",
+      "error": "unsupported"
+    },
+    {
+      "name": "col-grammar-budget-before-later-range",
+      "description": "Row 0 reconstructs 4 + 4 = 8 bytes > maxTotalBytes 7 by 1 before row 1 lane value 65536 is range-checked against 16^4 = 65536",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 7
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "0203000001808004",
       "error": "limit"
     }
   ],
@@ -1015,6 +1820,350 @@
       },
       "value": "abcdefghijklmnop",
       "error": "limit"
+    },
+    {
+      "name": "encode-root-literal-byte-amplification-over-bound",
+      "description": "65 ASCII bytes exceeds 64 x (0 body bytes + 1) = 64 by 1 under default limits",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "error": "limit",
+      "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "encode-col-grammar-byte-budget-over-bound",
+      "description": "2 matched rows x (4 literal + 4 numeric bytes) = 16 decoded bytes exceeds maxTotalBytes 15 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 15
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "error": "limit",
+      "value": [
+        {
+          "s": "ord_0001"
+        },
+        {
+          "s": "ord_0002"
+        }
+      ]
+    },
+    {
+      "name": "encode-col-derived-byte-budget-over-bound",
+      "description": "(2 + 2) source bytes + (5 + 5) derived bytes, each value counted once = 14 decoded bytes exceeds maxTotalBytes 13 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "source",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "derived",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 13
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "aa",
+                "bb"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "north",
+                  "south"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "error": "limit",
+      "value": [
+        {
+          "source": "aa",
+          "derived": "north"
+        },
+        {
+          "source": "bb",
+          "derived": "south"
+        }
+      ]
+    },
+    {
+      "name": "encode-col-dict-escape-byte-budget-over-bound",
+      "description": "16 dictionary-hit bytes + 3 escaped bytes = 19 decoded bytes exceeds maxTotalBytes 18 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 18
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "error": "limit",
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "xyz"
+        }
+      ]
+    },
+    {
+      "name": "encode-col-grammar-escape-byte-budget-over-bound",
+      "description": "2 x (4 + 4) matched bytes + 1 escaped byte = 17 decoded bytes exceeds maxTotalBytes 16 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 16
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "grammar": [
+                {
+                  "lit": "ord_"
+                },
+                {
+                  "num": {
+                    "base": 16,
+                    "len": 4,
+                    "case": "lower"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "error": "limit",
+      "value": [
+        {
+          "s": "ord_0001"
+        },
+        {
+          "s": "ord_0002"
+        },
+        {
+          "s": "x"
+        }
+      ]
+    },
+    {
+      "name": "encode-col-derived-escape-byte-budget-over-bound",
+      "description": "(2 + 2 + 2) source bytes + (5 + 5) mapped bytes + 3 escaped bytes, each value counted once = 19 decoded bytes exceeds maxTotalBytes 18 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "source",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "derived",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 18
+      },
+      "profile": {
+        "version": 2,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "aa",
+                "bb"
+              ]
+            },
+            {
+              "leaf": 1,
+              "derived": {
+                "source": 0,
+                "values": [
+                  "north",
+                  "south"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "error": "limit",
+      "value": [
+        {
+          "source": "aa",
+          "derived": "north"
+        },
+        {
+          "source": "bb",
+          "derived": "south"
+        },
+        {
+          "source": "aa",
+          "derived": "xyz"
+        }
+      ]
+    },
+    {
+      "name": "encode-col-dict-mixed-byte-budget-over-bound",
+      "description": "16 + 2 + 16 + 3 bytes from two dictionary hits and two escapes = 37 decoded bytes exceeds maxTotalBytes 36 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 36
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "error": "limit",
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "ab"
+        },
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "xyz"
+        }
+      ]
     }
   ],
   "packedDecode": [

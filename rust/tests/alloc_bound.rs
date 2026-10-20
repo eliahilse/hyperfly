@@ -1,11 +1,16 @@
-use hyperfly_core::{Codec, Field, Limits, Node, Plan, Value};
+use hyperfly_core::{
+    Codec, ErrorCode, Field, GrammarCase, GrammarNum, GrammarToken, Limits, Node, Plan, Profile,
+    ProfileColumn, Value,
+};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 struct CountingAllocator;
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static ALLOCATION_TEST: Mutex<()> = Mutex::new(());
 
 fn track_alloc(size: usize) {
     let current = CURRENT.fetch_add(size, Ordering::SeqCst) + size;
@@ -72,6 +77,7 @@ fn string_row(s: String) -> Value {
 
 #[test]
 fn packed_inflate_bounds_allocation_and_preserves_validation() {
+    let _guard = ALLOCATION_TEST.lock().unwrap();
     let ir = Node::Array {
         element: Box::new(Node::Struct(vec![Field {
             name: "s".into(),
@@ -148,4 +154,46 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
             );
         }
     }
+}
+
+#[test]
+fn grammar_budget_fails_before_rendering() {
+    let _guard = ALLOCATION_TEST.lock().unwrap();
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(vec![Field {
+            name: "s".into(),
+            ty: Node::Str,
+            optional: false,
+            nullable: false,
+        }])),
+        length: None,
+    };
+    let profile = Profile {
+        version: 2,
+        columns: vec![ProfileColumn {
+            leaf: 0,
+            dict: None,
+            grammar: Some(vec![
+                GrammarToken::Lit("x".repeat(1 << 20)),
+                GrammarToken::Num(GrammarNum {
+                    base: 16,
+                    len: 1,
+                    case: GrammarCase::Lower,
+                }),
+            ]),
+            derived: None,
+        }],
+    };
+    let limits = Limits {
+        max_total_bytes: 0,
+        ..Limits::default()
+    };
+    let codec =
+        Codec::compile_with_profile(ir, Plan::Columnar, limits, false, Some(profile)).unwrap();
+    let baseline = CURRENT.load(Ordering::SeqCst);
+    PEAK.store(baseline, Ordering::SeqCst);
+    let result = codec.decode_body(&[1, 3, 0, 0, 0]);
+    let peak = PEAK.load(Ordering::SeqCst).saturating_sub(baseline);
+    assert_eq!(result.unwrap_err().code, ErrorCode::Limit);
+    assert!(peak < 512 * 1024, "decode allocated {peak} bytes");
 }
