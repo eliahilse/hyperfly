@@ -129,6 +129,9 @@ export function validateIR(node: IRNode, path = "$"): void {
         checkFieldName(f.name, path);
         if (seen.has(f.name)) fail(path, `duplicate field "${f.name}"`);
         seen.add(f.name);
+        for (const flag of ["optional", "nullable"] as const) {
+          if (f[flag] !== undefined && typeof f[flag] !== "boolean") fail(`${path}.${f.name}`, `${flag} flag must be a boolean`);
+        }
         if (f.nullable && f.type.kind === "nullable") {
           fail(`${path}.${f.name}`, "nullable flag on a nullable type is ambiguous");
         }

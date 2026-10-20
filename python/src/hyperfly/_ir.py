@@ -17,31 +17,6 @@ def _is_safe_int(v: Any) -> bool:
     return type(v) is int and INT_MIN <= v <= INT_MAX
 
 
-def _flag(f: dict[str, Any], name: str) -> bool:
-    """A struct field flag read with JavaScript truthiness, as the TS reference reads it."""
-    v = f.get(name)
-    if v is None or v is False or v == "":
-        return False
-    if type(v) in (int, float):
-        return v == v and v != 0
-    return True
-
-
-def normalize_flags(node: Any) -> None:
-    """Rewrite every present field flag to the boolean the TS reference reads from it."""
-    kind = node["kind"]
-    if kind == "nullable":
-        normalize_flags(node["inner"])
-    elif kind == "array":
-        normalize_flags(node["element"])
-    elif kind == "struct":
-        for f in node["fields"]:
-            for name in ("optional", "nullable"):
-                if name in f:
-                    f[name] = _flag(f, name)
-            normalize_flags(f["type"])
-
-
 def _has_lone_surrogate(s: str) -> bool:
     return any(0xD800 <= ord(ch) <= 0xDFFF for ch in s)
 
@@ -140,12 +115,15 @@ def validate_ir(node: Any, path: str = "$") -> None:
                 _fail(path, f'duplicate field "{name}"')
             seen.add(name)
             field_path = f"{path}.{name}"
+            for flag in ("optional", "nullable"):
+                if flag in f and type(f[flag]) is not bool:
+                    _fail(field_path, f"{flag} flag must be a boolean")
             field_type = f.get("type")
             if type(field_type) is not dict:
                 _fail(field_path, "field type must be an IR object")
-            if _flag(f, "nullable") and field_type.get("kind") == "nullable":
+            if f.get("nullable") and field_type.get("kind") == "nullable":
                 _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
-            if _flag(f, "nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
+            if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
                 _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
             validate_ir(field_type, field_path)
         return
@@ -204,9 +182,9 @@ def serialize_node(node: dict[str, Any]) -> str:
     fields = []
     for f in node["fields"]:
         text = f'{{"name":{_esc(f["name"])},"type":{serialize_node(f["type"])}'
-        if _flag(f, "optional"):
+        if f.get("optional"):
             text += ',"optional":true'
-        if _flag(f, "nullable"):
+        if f.get("nullable"):
             text += ',"nullable":true'
         fields.append(text + "}")
     return '{"kind":"struct","fields":[' + ",".join(fields) + "]}"
@@ -508,7 +486,7 @@ def has_payload(node: dict[str, Any]) -> bool:
     if kind == "literal":
         return False
     if kind == "struct":
-        return any(_flag(f, "optional") or _flag(f, "nullable") or has_payload(f["type"]) for f in node["fields"])
+        return any(f.get("optional") or f.get("nullable") or has_payload(f["type"]) for f in node["fields"])
     if kind == "array":
         length = node.get("length")
         return length is None or (length > 0 and has_payload(node["element"]))

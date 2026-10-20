@@ -139,7 +139,8 @@ and MUST be rejected at IR validation.
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
 value two wire encodings. Each field has `optional` and
-`nullable` flags. Layout:
+`nullable` flags. When present, each flag MUST be a JSON boolean; any other
+value is invalid IR. Layout:
 
 1. **Presence bitmap** over the optional fields, in field order. Bit set =
    present.

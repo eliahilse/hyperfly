@@ -17,6 +17,12 @@ fn node_of(json: &Json) -> Result<Node, String> {
             .ok_or_else(|| "IR string required (lone surrogates are unrepresentable)".to_owned())
     }
 
+    fn flag(field: &Json, name: &str) -> Result<bool, String> {
+        field.get(name).map_or(Ok(false), |value| {
+            value.as_bool().ok_or_else(|| format!("{name} flag must be a boolean"))
+        })
+    }
+
     fn integer(json: &Json) -> Result<i64, String> {
         json.as_i64()
             .ok_or_else(|| "IR integer required".to_owned())
@@ -70,8 +76,8 @@ fn node_of(json: &Json) -> Result<Node, String> {
                     Ok(Field {
                         name: string(required(f, "name")?)?,
                         ty: node_of(required(f, "type")?)?,
-                        optional: f.get("optional").and_then(Json::as_bool).unwrap_or(false),
-                        nullable: f.get("nullable").and_then(Json::as_bool).unwrap_or(false),
+                        optional: flag(f, "optional")?,
+                        nullable: flag(f, "nullable")?,
                     })
                 })
                 .collect::<Result<_, String>>()?,

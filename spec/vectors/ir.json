@@ -467,6 +467,70 @@
       "error": "ir"
     },
     {
+      "name": "field-optional-flag-number",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            },
+            "optional": 1
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-optional-flag-string",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            },
+            "optional": "true"
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-nullable-flag-null",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            },
+            "nullable": null
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
+      "name": "field-nullable-flag-zero",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            },
+            "nullable": 0
+          }
+        ]
+      },
+      "error": "ir"
+    },
+    {
       "name": "unknown-kind",
       "ir": {
         "kind": "unknown"
@@ -615,6 +679,22 @@
           "kind": "literal",
           "value": "x"
         }
+      }
+    },
+    {
+      "name": "field-flags-explicit-false",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "x",
+            "type": {
+              "kind": "bool"
+            },
+            "optional": false,
+            "nullable": false
+          }
+        ]
       }
     }
   ]
