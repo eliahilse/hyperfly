@@ -222,9 +222,12 @@ Implementations MUST enforce configurable limits with these v0 defaults:
   nodes enclosing it, and decoding a node deeper than `maxDepth` is rejected
   with `depth`,
 - `maxItems` 2^24 per array, applied to a declared length as to a count,
-- `maxByteLength` 2^28 per string/bytes value, and per declared inflated
-  total and blob of a deflate-packed string column (plan-columnar-v5 §3),
-  checked against the length prefix before any payload byte is read,
+- `maxByteLength` 2^28 per string/bytes value and per declared inflated
+  total of a deflate-packed string column (plan-columnar-v5 §3), checked
+  against the length prefix before any payload byte is read; for a decoder
+  with inflate also per blob of such a column, checked against the blob
+  length before any blob byte is read (a decoder without inflate rejects the
+  column as `unsupported` without reading the blob length, below),
 - `maxAmplification` 32: an array count above
   `maxAmplification × (remaining bytes + 1)` is rejected, where remaining
   bytes are the body bytes after the count or, for a fixed-length array,

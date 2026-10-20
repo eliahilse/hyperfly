@@ -3897,6 +3897,30 @@
       },
       "hex": "0101",
       "error": "depth"
+    },
+    {
+      "name": "col-struct-depth-with-no-participating-row",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "0100",
+      "error": "depth"
     }
   ],
   "invalidEncode": [

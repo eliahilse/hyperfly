@@ -38,9 +38,11 @@ always agree.
 
 For each column, a decoder MUST read its presence bitmap and then its null
 bitmap, validating padding and rejecting null bits for absent rows with
-`bitmap`, before checking depth. When `n > 0`, the depths of the enclosing
-structs are checked; when any row participates, the leaf's depth is checked
-as well. These depth checks MUST precede reading the column payload.
+`bitmap`, before the enclosing-struct and leaf depth checks below; the
+array node's own depth was checked on entry (wire-v0 §6). When `n > 0`,
+the depths of the enclosing structs are checked; when any row participates,
+the leaf's depth is checked as well. These depth checks MUST precede reading
+the column payload.
 
 The row count is bounded by `maxItems`, the `maxAmplification` policy and the
 item budget of wire-v0 §6 — deliberately not by the one-bit floor: a
