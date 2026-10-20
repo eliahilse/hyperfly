@@ -4,7 +4,7 @@ import { indexProfile, validateProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
 import { encodeNode } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
-import { validateIR, type IRNode } from "./ir.js";
+import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
 import { Writer } from "./writer.js";
 
@@ -36,31 +36,44 @@ export interface Codec<T = unknown> {
   decodeBody(bytes: Uint8Array): T;
 }
 
+/** Freezes a fresh clone in place, storing zero unsigned: an IR or profile -0 is the integer 0. */
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
-    for (const inner of Object.values(value)) deepFreeze(inner);
+    const record = value as Record<string, unknown>;
+    for (const [key, inner] of Object.entries(record)) {
+      if (Object.is(inner, -0)) record[key] = 0;
+      else deepFreeze(inner);
+    }
     Object.freeze(value);
   }
   return value;
 }
 
-export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
+function compileArtifact(
+  ir: IRNode,
+  plan: PlanLayout,
+  profile: Profile | undefined,
+): { ir: IRNode; profile: Profile | undefined; artifact: string } {
   validateIR(ir);
   // isolate from later mutation, caller-side or through codec.ir: the fingerprint is
   // fixed at compile time and the schema behind it must not drift
   ir = deepFreeze(structuredClone(ir));
-  const plan: PlanLayout = options.plan ?? "row";
-  const profile = options.profile;
-  if (profile) {
-    if (plan !== "columnar") {
-      throw new HyperflyError("ir", "profiles apply to the columnar plan only");
-    }
-    validateProfile(ir, profile);
+  if (profile === undefined || profile === null) {
+    return { ir, profile: undefined, artifact: serializeArtifact(ir, plan) };
   }
+  if (plan !== "columnar") {
+    throw new HyperflyError("ir", "profiles apply to the columnar plan only");
+  }
+  validateProfile(ir, profile);
   // the profile is fixed by the fingerprint exactly as the IR is
-  const frozenProfile = profile ? deepFreeze(structuredClone(profile)) : undefined;
+  const frozen = deepFreeze(structuredClone(profile));
+  return { ir, profile: frozen, artifact: serializeArtifact(ir, plan, frozen) };
+}
+
+export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = {}): Codec<T> {
+  const plan: PlanLayout = options.plan ?? "row";
+  const { ir, profile: frozenProfile, artifact } = withinStack(() => compileArtifact(input, plan, options.profile));
   const profileIndex = indexProfile(frozenProfile);
-  const artifact = serializeArtifact(ir, plan, frozenProfile);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);
   const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
