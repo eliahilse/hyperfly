@@ -105,14 +105,16 @@ A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it adve
 
 When the encoder refuses a value under its [limits](#limits) (an `EncodeError` with code `limit` or `depth`),
 `respond` and `encodeFor` send the same value as JSON with `Hyperfly-Offer` naming the codec, and call
-`onFallback(error)`. The client reads it like any other JSON response. Any other `EncodeError` (`type`, `required`,
+`onFallback(error, "encoder-limit")`. The client reads it like any other JSON response. Any other `EncodeError` (`type`, `required`,
 `range`, `validation`, ...) means the value does not match the schema; it is thrown, not answered as JSON. Pass
 `enabled: false` to `respond` or `negotiate` to answer JSON without consulting the registry, as an operator switch
-or to shed load.
+or to shed load. A JSON decision from `negotiate` carries a `reason` (`FallbackReason`): `disabled`, `accept-refused`
+(Accept opted out), `no-hyperfly-accept` (no Hyperfly-Accept header) or `no-match` (no fingerprint it lists is
+registered).
 
 ### Request bodies
 
-`readBody` returns `{ ok: true, value }` or `{ ok: false, response }`; forward the latter:
+`readBody` returns `{ ok: true, value }` or `{ ok: false, response, reason }`; forward the response:
 
 ```ts
 import { readBody, respond } from "hyperfly/http";
@@ -126,17 +128,23 @@ async function receive(request: Request) {
 
 The first applicable rule in negotiation v1 §4 wins:
 
-| Status | Request-body condition |
-|---|---|
-| 415 | Unsupported media type; absent Content-Type means JSON, and `+json` is accepted. |
-| 413 | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
-| 400 | Invalid binary envelope or `Hyperfly-Codec` disagrees with its fingerprint. |
-| 415 + Hyperfly-Offer | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
-| 400 | Binary decode fails (including limits), JSON is malformed UTF-8/JSON, or the body stream cannot be read. |
+| Status | `reason` | Request-body condition |
+|---|---|---|
+| 415 | `unsupported-media-type` | Unsupported media type; absent Content-Type means JSON, and `+json` is accepted. |
+| 413 | `too-large` | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
+| 400 | `unreadable` | The body stream cannot be read. |
+| 400 | `malformed-json` | A JSON body is malformed UTF-8 or JSON. |
+| 400 | `malformed-envelope` | Invalid binary envelope header. |
+| 400 | `codec-mismatch` | `Hyperfly-Codec` disagrees with the envelope fingerprint. |
+| 415 + Hyperfly-Offer | `unknown-codec` | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
+| 400 | `undecodable` | Binary decode fails, including limits. |
+
+The reasons (`RequestRefusal`) match the Python package's `RequestError.reason`.
 
 ## Node and Express
 
-`negotiate` takes Hyperfly-Accept and a registry, with Accept in its options; `encodeFor` returns body and headers:
+`negotiate` takes Hyperfly-Accept and a registry, with Accept as its `httpAccept` option; `encodeFor` returns body and
+headers:
 
 ```ts
 import { createServer } from "node:http";
@@ -154,7 +162,7 @@ createServer((req, res) => {
     return;
   }
   const decision = negotiate(header(req.headers["hyperfly-accept"]), registry, {
-    accept: header(req.headers.accept),
+    httpAccept: header(req.headers.accept),
   });
   const { body, headers } = encodeFor(decision, response, { onFallback: console.warn });
   res.writeHead(200, headers);
@@ -200,7 +208,7 @@ app.use((req, res, next) => {
 app.get("/events", (req, res) => send(res, respond(toFetchRequest(req), response, registry)));
 app.post("/events", async (req, res) => {
   const request = toFetchRequest(req);
-  const result = await readBody<typeof response>(request, registry);
+  const result = await readBody(request, registry);
   await send(res, result.ok ? respond(request, result.value, registry) : result.response);
 });
 app.listen(3000);
@@ -383,8 +391,10 @@ ESM only, three entry points:
 - `hyperfly/zod`: `compile` and `toIR` for Zod 4 schemas, with `InferOutput` and `ZodCompileOptions`. The only entry
   point that needs `zod`.
 - `hyperfly/http`: negotiation (`negotiate`, `encodeFor`, `respond`, `parseAccept`, `acceptHeader`), bodies
-  (`readBody`, `decodeResponse`), artifacts (`discovery`, `serveArtifact`, `fetchArtifact`, `loadArtifact`) and the
-  header, media-type and `DEFAULT_MAX_BODY_BYTES` constants.
+  (`readBody`, `decodeResponse`), artifacts (`discovery`, `serveArtifact`, `fetchArtifact`, `loadArtifact`), the
+  header, media-type and `DEFAULT_MAX_BODY_BYTES` constants, and the `NegotiateOptions`, `EncodeOptions`,
+  `RespondOptions`, `Negotiation`, `FallbackReason`, `ReadBodyResult`, `RequestRefusal`, `DecodedResponse` and
+  `ArtifactResponse` types.
 
 ## Runtime support
 
@@ -461,10 +471,10 @@ production traffic has been measured yet.
 | `compileIR(ir, options?)` | `hyperfly`: canonical IR → codec; same options except `validate`. |
 | `train(ir, samples, options?)` | `hyperfly`: sampled responses → profile. Non-normative. |
 | `DEFAULT_LIMITS` · `defaultPackHooks()` | `hyperfly`: the default [limits](#limits) and deflate/inflate hooks. |
-| `CodecRegistry` | `hyperfly`: codecs by fingerprint; `add`, `get`, `remove`, `fingerprints`. |
-| `negotiate` · `encodeFor` · `respond` | `hyperfly/http`: select a representation, encode it, or answer a fetch request. |
-| `discovery` · `serveArtifact` | `hyperfly/http`: serve artifacts from a Request or pathname. |
-| `readBody(request, registry, options?)` | `hyperfly/http`: bounded JSON/binary request decoding. |
+| `CodecRegistry<T>` | `hyperfly`: codecs by fingerprint, typed by payload; `add`, `get`, `remove`, `fingerprints`. |
+| `negotiate` · `encodeFor` · `respond` | `hyperfly/http`: select a representation, encode it, or answer a fetch request; options `NegotiateOptions`, `EncodeOptions`, `RespondOptions`. |
+| `discovery` · `serveArtifact` | `hyperfly/http`: serve artifacts from a Request, or as an `ArtifactResponse` from a pathname. |
+| `readBody(request, registry, options?)` | `hyperfly/http`: bounded JSON/binary request decoding; a refusal names its `reason`. |
 | `acceptHeader(fingerprints)` | `hyperfly/http`: build Hyperfly-Accept in preference order. |
 | `decodeResponse(contentType, bytes, registry)` | `hyperfly/http`: JSON/binary value or `unknown-codec`. |
 | `fetchArtifact(base, fingerprint, options?)` | `hyperfly/http`: fetch, compile and verify an artifact; 404 → `undefined`. |

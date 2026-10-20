@@ -47,17 +47,40 @@ export function parseAccept(header: string | null | undefined): string[] {
   return out;
 }
 
-export type Negotiation<T = unknown> =
-  | { kind: "hyperfly"; codec: Codec<T>; headers: Record<string, string> }
-  | { kind: "json"; headers: Record<string, string> };
+/** Why a response is JSON rather than binary. `encoder-limit` comes from `encodeFor`, the others from `negotiate`. */
+export type FallbackReason = "disabled" | "accept-refused" | "no-hyperfly-accept" | "no-match" | "encoder-limit";
 
+/** `negotiate` chose a codec: encode with it and send `headers`. */
+export interface HyperflyNegotiation<T = unknown> {
+  kind: "hyperfly";
+  codec: Codec<T>;
+  headers: Record<string, string>;
+}
+
+/** `negotiate` chose JSON; `reason` says why. */
+export interface JsonNegotiation {
+  kind: "json";
+  headers: Record<string, string>;
+  reason: Exclude<FallbackReason, "encoder-limit">;
+}
+
+/** The decision `negotiate` returns: binary with a codec, or JSON with a reason. */
+export type Negotiation<T = unknown> = HyperflyNegotiation<T> | JsonNegotiation;
+
+/** What `negotiate` reads besides Hyperfly-Accept. */
 export interface NegotiateOptions {
-  accept?: string | null;
-  onFallback?: (error: EncodeError) => void;
-  /** Named in Hyperfly-Offer when falling back, so a client can upgrade itself. */
+  /** The HTTP Accept header; a q=0 for binary forces JSON. Default: none (`respond` reads the request's). */
+  httpAccept?: string | null;
+  /** Named in Hyperfly-Offer when falling back, so a client can upgrade itself. Default: the registry's first fingerprint. */
   offer?: string;
-  /** An operator switch or a load shed: fall back without consulting the registry. */
+  /** An operator switch or a load shed: `false` falls back without consulting the registry. Default: `true`. */
   enabled?: boolean;
+}
+
+/** What `encodeFor` reads. */
+export interface EncodeOptions {
+  /** Called when the codec refuses a value under its limits and the value goes out as JSON. Default: none. */
+  onFallback?: (error: EncodeError, reason: "encoder-limit") => void;
 }
 
 /**
@@ -67,22 +90,23 @@ export interface NegotiateOptions {
  * Vary is always set, because the same URL yields either representation and a
  * shared cache would otherwise hand one peer's binary to a peer that cannot read it.
  */
-export function negotiate<T = unknown>(
+export function negotiate<T>(
   accept: string | null | undefined,
-  registry: CodecRegistry,
+  registry: CodecRegistry<T>,
   options: NegotiateOptions = {},
 ): Negotiation<T> {
   const vary = { Vary: VARY };
 
   if (options.enabled === false) {
-    return { kind: "json", headers: { ...vary, "Content-Type": "application/json" } };
+    return { kind: "json", headers: { ...vary, "Content-Type": "application/json" }, reason: "disabled" };
   }
 
-  const codec = rejectsHyperfly(options.accept) ? undefined : registry.select(parseAccept(accept));
+  const refused = rejectsHyperfly(options.httpAccept);
+  const codec = refused ? undefined : registry.select(parseAccept(accept));
   if (codec) {
     return {
       kind: "hyperfly",
-      codec: codec as unknown as Codec<T>,
+      codec,
       headers: {
         ...vary,
         "Content-Type": HYPERFLY_MEDIA_TYPE,
@@ -99,6 +123,7 @@ export function negotiate<T = unknown>(
       "Content-Type": "application/json",
       ...(offer ? { "Hyperfly-Offer": offer } : {}),
     },
+    reason: refused ? "accept-refused" : accept ? "no-match" : "no-hyperfly-accept",
   };
 }
 
@@ -119,13 +144,13 @@ function jsonBody(value: unknown): string {
 }
 
 /** Encode one value according to a negotiation decision. */
-export function encodeFor<T>(decision: Negotiation<T>, value: T, options: NegotiateOptions = {}): Encoded {
+export function encodeFor<T>(decision: Negotiation<T>, value: T, options: EncodeOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
     } catch (error) {
       if (!(error instanceof EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
-      options.onFallback?.(error);
+      options.onFallback?.(error, "encoder-limit");
       return {
         body: jsonBody(value),
         headers: {
@@ -139,7 +164,8 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Negoti
   return { body: jsonBody(value), headers: decision.headers };
 }
 
-export interface WellKnownResponse {
+/** A `.well-known/hyperfly/{fingerprint}` answer: status, artifact text (empty on a miss) and headers. */
+export interface ArtifactResponse {
   status: number;
   body: string;
   headers: Record<string, string>;
@@ -150,7 +176,7 @@ export interface WellKnownResponse {
  * content-addressed, so a hit is immutable and cacheable forever; a miss is a 404
  * and not an error — the client simply stays on JSON.
  */
-export function serveArtifact(pathname: string, registry: CodecRegistry): WellKnownResponse | undefined {
+export function serveArtifact(pathname: string, registry: CodecRegistry): ArtifactResponse | undefined {
   if (!pathname.startsWith(WELL_KNOWN_PREFIX)) return undefined;
   const fingerprint = pathname.slice(WELL_KNOWN_PREFIX.length).toLowerCase();
   if (!FINGERPRINT.test(fingerprint)) {
@@ -279,7 +305,7 @@ export async function fetchArtifact<T = unknown>(
   const result = await readLimited(response.body, maxBytes);
   if (!result.ok) {
     if (options.signal?.aborted) throw options.signal.reason;
-    if (result.status === 413) throw new HyperflyError("limit", `artifact exceeds maxBytes ${maxBytes}`);
+    if (result.reason === "too-large") throw new HyperflyError("limit", `artifact exceeds maxBytes ${maxBytes}`);
     throw new HyperflyError("ir", "artifact body could not be read");
   }
   let text: string;
@@ -357,6 +383,12 @@ function peekFingerprint(bytes: Uint8Array): string {
   return fingerprint;
 }
 
+/** A decoded response: the value and how it was sent, or the fingerprint of a codec the client does not hold. */
+export type DecodedResponse<T> =
+  | { kind: "json"; value: T }
+  | { kind: "hyperfly"; value: T }
+  | { kind: "unknown-codec"; fingerprint: string };
+
 /**
  * Decode a response body according to what the server said it sent. A codec the
  * client does not hold is not an error the client can recover from by guessing,
@@ -365,8 +397,8 @@ function peekFingerprint(bytes: Uint8Array): string {
 export function decodeResponse<T>(
   contentType: string | null | undefined,
   body: Uint8Array | string,
-  registry: CodecRegistry,
-): { kind: "json"; value: T } | { kind: "hyperfly"; value: T } | { kind: "unknown-codec"; fingerprint: string } {
+  registry: CodecRegistry<T>,
+): DecodedResponse<T> {
   if (mediaType(contentType) !== HYPERFLY_MEDIA_TYPE) {
     let text: string;
     try {
@@ -385,28 +417,31 @@ export function decodeResponse<T>(
   const fingerprint = peekFingerprint(bytes);
   const codec = registry.get(fingerprint);
   if (!codec) return { kind: "unknown-codec", fingerprint };
-  return { kind: "hyperfly", value: codec.decode(bytes) as T };
+  return { kind: "hyperfly", value: codec.decode(bytes) };
 }
 
-/**
- * Fetch-API glue. One function covers Hono, Cloudflare Workers, Bun.serve, Deno and
- * Next route handlers, because they all speak Request and Response.
- */
-export interface FetchHandlerOptions extends NegotiateOptions {
+/** What `respond` reads: negotiation and encoding options plus the response's own status and headers. */
+export interface RespondOptions extends NegotiateOptions, EncodeOptions {
+  /** The response status. Default: 200. */
   status?: number;
+  /** Extra response headers; Content-Type, Content-Length and the hyperfly headers are always the negotiated ones. Default: none. */
   headers?: Record<string, string>;
 }
 
-/** Answer one request with `value`, in binary when the client can read it. */
+/**
+ * Answer one request with `value`, in binary when the client can read it. Fetch-API
+ * glue: one function covers Hono, Cloudflare Workers, Bun.serve, Deno and Next route
+ * handlers, because they all speak Request and Response.
+ */
 export function respond<T>(
   request: Request,
   value: T,
-  registry: CodecRegistry,
-  options: FetchHandlerOptions = {},
+  registry: CodecRegistry<T>,
+  options: RespondOptions = {},
 ): Response {
-  const decision = negotiate<T>(request.headers.get(ACCEPT_HEADER), registry, {
+  const decision = negotiate(request.headers.get(ACCEPT_HEADER), registry, {
     ...options,
-    accept: options.accept === undefined ? request.headers.get("accept") : options.accept,
+    httpAccept: options.httpAccept === undefined ? request.headers.get("accept") : options.httpAccept,
   });
   const status = options.status ?? 200;
   const bodyless = request.method === "HEAD" || NULL_BODY_STATUSES.has(status);
@@ -443,13 +478,29 @@ export interface ReadBodyOptions {
   maxBytes?: number;
 }
 
+/** Why `readBody` refused a request body; the same strings as Python's `RequestError.reason`. */
+export type RequestRefusal =
+  | "unsupported-media-type"
+  | "too-large"
+  | "unreadable"
+  | "malformed-json"
+  | "malformed-envelope"
+  | "codec-mismatch"
+  | "unknown-codec"
+  | "undecodable";
+
+/** The decoded body, or the 400, 413 or 415 response to send back and why. */
+export type ReadBodyResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; response: Response; reason: RequestRefusal };
+
 /** Read a hyperfly or JSON request body (negotiation §4). */
 export async function readBody<T>(
   request: Request,
-  registry: CodecRegistry,
+  registry: CodecRegistry<T>,
   options: ReadBodyOptions = {},
-): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
-  return readBodyWithinLimit<T>(request, registry, bodyLimit(options.maxBytes));
+): Promise<ReadBodyResult<T>> {
+  return readBodyWithinLimit(request, registry, bodyLimit(options.maxBytes));
 }
 
 function bodyLimit(maxBytes: number | undefined): number {
@@ -460,52 +511,50 @@ function bodyLimit(maxBytes: number | undefined): number {
   return maxBytes;
 }
 
+function refuse(status: 400 | 413 | 415, reason: RequestRefusal, headers?: Record<string, string>): ReadBodyResult<never> {
+  return { ok: false, response: new Response(null, { status, headers }), reason };
+}
+
 async function readBodyWithinLimit<T>(
   request: Request,
-  registry: CodecRegistry,
+  registry: CodecRegistry<T>,
   maxBytes: number,
-): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
+): Promise<ReadBodyResult<T>> {
   const contentType = mediaType(request.headers.get("content-type"));
   const isHyperfly = contentType === HYPERFLY_MEDIA_TYPE;
   const isJson = contentType === "application/json"
     || /^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+\+json(?![\s\S])/.test(contentType);
-  if (!isHyperfly && !isJson) {
-    return { ok: false, response: new Response(null, { status: 415 }) };
-  }
+  if (!isHyperfly && !isJson) return refuse(415, "unsupported-media-type");
   const contentLength = trimOws(request.headers.get("content-length") ?? "");
-  if (/^[0-9]+$/.test(contentLength) && Number(contentLength) > maxBytes) {
-    return { ok: false, response: new Response(null, { status: 413 }) };
-  }
+  if (/^[0-9]+$/.test(contentLength) && Number(contentLength) > maxBytes) return refuse(413, "too-large");
   const result = await readLimited(request.body, maxBytes);
-  if (!result.ok) return { ok: false, response: new Response(null, { status: result.status }) };
+  if (!result.ok) return refuse(result.reason === "too-large" ? 413 : 400, result.reason);
   const bytes = result.bytes;
   if (!isHyperfly) {
     try {
       return { ok: true, value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as T };
     } catch {
-      return { ok: false, response: new Response(null, { status: 400 }) };
+      return refuse(400, "malformed-json");
     }
   }
+  let fingerprint: string;
   try {
-    const fingerprint = peekFingerprint(bytes);
-    const codecHeader = request.headers.get(CODEC_HEADER);
-    if (codecHeader !== null && trimOws(codecHeader) !== fingerprint) {
-      return { ok: false, response: new Response(null, { status: 400 }) };
-    }
-    const codec = registry.get(fingerprint);
-    if (!codec) {
-      const offer = registry.fingerprints[0];
-      return {
-        ok: false,
-        response: new Response(null, {
-          status: 415,
-          headers: offer ? { "Hyperfly-Offer": offer } : {},
-        }),
-      };
-    }
-    return { ok: true, value: codec.decode(bytes) as T };
+    fingerprint = peekFingerprint(bytes);
   } catch (error) {
-    if (error instanceof HyperflyError) return { ok: false, response: new Response(null, { status: 400 }) };
+    if (error instanceof HyperflyError) return refuse(400, "malformed-envelope");
+    throw error;
+  }
+  const codecHeader = request.headers.get(CODEC_HEADER);
+  if (codecHeader !== null && trimOws(codecHeader) !== fingerprint) return refuse(400, "codec-mismatch");
+  const codec = registry.get(fingerprint);
+  if (!codec) {
+    const offer = registry.fingerprints[0];
+    return refuse(415, "unknown-codec", offer ? { "Hyperfly-Offer": offer } : {});
+  }
+  try {
+    return { ok: true, value: codec.decode(bytes) };
+  } catch (error) {
+    if (error instanceof HyperflyError) return refuse(400, "undecodable");
     throw error;
   }
 }
@@ -513,7 +562,7 @@ async function readBodyWithinLimit<T>(
 async function readLimited(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
-): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: 400 | 413 }> {
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; reason: "too-large" | "unreadable" }> {
   const chunks: Uint8Array[] = [];
   let length = 0;
   if (stream !== null) {
@@ -521,13 +570,13 @@ async function readLimited(
     try {
       reader = stream.getReader();
     } catch {
-      return { ok: false, status: 400 };
+      return { ok: false, reason: "unreadable" };
     }
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (!(value instanceof Uint8Array)) return { ok: false, status: 400 };
+        if (!(value instanceof Uint8Array)) return { ok: false, reason: "unreadable" };
         length += value.byteLength;
         if (length > maxBytes) {
           try {
@@ -535,12 +584,12 @@ async function readLimited(
           } catch {
             // Cancellation is best effort.
           }
-          return { ok: false, status: 413 };
+          return { ok: false, reason: "too-large" };
         }
         if (value.byteLength > 0) chunks.push(new Uint8Array(value));
       }
     } catch {
-      return { ok: false, status: 400 };
+      return { ok: false, reason: "unreadable" };
     } finally {
       try {
         reader.releaseLock();
