@@ -34,6 +34,7 @@ function decodeInt(r: Reader, node: Extract<IRNode, { kind: "int" }>, path: stri
 }
 
 export function readBitmap(r: Reader, count: number, path: string): boolean[] {
+  r.need(Math.ceil(count / 8));
   const bits: boolean[] = new Array<boolean>(count);
   for (let base = 0; base < count; base += 8) {
     const byte = r.u8();
@@ -47,32 +48,27 @@ export function readBitmap(r: Reader, count: number, path: string): boolean[] {
 export type Inflate = (data: Uint8Array, maxOutputLength: number) => Uint8Array;
 
 /**
- * A declared count must be payable by the bytes still on the wire: every element that
- * carries any payload costs at least one bit, so a truncated body can never make a
- * decoder allocate for millions of rows it will never read. Elements with no payload
- * at all (literals, structs of literals) escape that floor, so they fall back to the
- * amplification policy of wire-v0 §6, exactly as columnar arrays do.
+ * Wire-v0 §6 per-array checks, after depth and the count: maxItems, then the
+ * one-bit floor or the amplification bound, then the body's item budget. A
+ * row-encoded array whose element is not zero-bit must be payable by the bits
+ * still on the wire, so a truncated body can never make a decoder allocate for
+ * rows it will never read. Zero-bit elements and columnar arrays legitimately
+ * cost almost nothing per row, so they are held to the amplification bound.
  */
-export function boundByInput(r: Reader, count: number, element: IRNode, path: string): void {
-  if (count === 0) return;
-  if (hasPayload(element)) {
-    const affordable = r.remaining() * 8;
-    if (count > affordable) {
-      throw new DecodeError("limit", `${path}: declared ${count} items but only ${r.remaining()} byte(s) remain`);
+export function enterArray(r: Reader, count: number, floor: boolean, path: string): void {
+  if (count > r.limits.maxItems) fail("limit", path, `array count ${count} exceeds limit ${r.limits.maxItems}`);
+  if (floor) {
+    if (count > r.remaining() * 8) {
+      fail("limit", path, `declared ${count} items but only ${r.remaining()} byte(s) remain`);
     }
-    return;
+  } else if (count > (r.remaining() + 1) * r.limits.maxAmplification) {
+    fail("limit", path, `${count} rows from ${r.remaining()} remaining byte(s) exceeds the amplification limit`);
   }
-  boundAmplification(r, count, path);
-}
-
-/** Wire-v0 §6: cap the rows one hostile byte can demand when input length cannot. */
-export function boundAmplification(r: Reader, count: number, path: string): void {
-  if (count > (r.remaining() + 1) * r.limits.maxAmplification) {
-    throw new DecodeError(
-      "limit",
-      `${path}: ${count} rows from ${r.remaining()} remaining byte(s) exceeds the amplification limit`,
-    );
+  const budget = r.budget;
+  if (count > budget.cap - budget.used) {
+    fail("limit", path, `${budget.used + count} items in this body exceed the item budget of ${budget.cap}`);
   }
+  budget.used += count;
 }
 
 export function decodeNode(
@@ -135,10 +131,7 @@ export function decodeNode(
         return decodeColumnarArray(r, node, path, depth, inflate, profile, column);
       }
       const count = node.length ?? readCount(r, r.limits.maxItems, "array count", path);
-      if (count > r.limits.maxItems) {
-        fail("limit", path, `array count ${count} exceeds limit ${r.limits.maxItems}`);
-      }
-      boundByInput(r, count, node.element, path);
+      enterArray(r, count, hasPayload(node.element), path);
       const out = new Array<unknown>(count);
       for (let i = 0; i < count; i++) out[i] = decodeNode(r, node.element, `${path}[${i}]`, depth + 1, columnar, inflate, profile, column);
       return out;
