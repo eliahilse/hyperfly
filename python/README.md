@@ -158,11 +158,16 @@ stays reachable through `__cause__`.
 | `UnsupportedSchemaError` | `unsupported` |
 | `HyperflyError` | `ir` |
 
-`json` is a malformed JSON body read by `decode_response` (the `json.JSONDecodeError`
-is its cause), and `validation` is a pydantic `ValidationError` from a codec compiled
-with `validate=True`, raised as `EncodeError` on the encode paths and `DecodeError`
-on the decode paths. `decode_request` turns a `DecodeError` into `RequestError` with
-status 400.
+`json` is a malformed JSON body read by `decode_response` or `decode_request`; its
+`__cause__` is the underlying error, a `json.JSONDecodeError`, `UnicodeDecodeError`
+or `RecursionError`. `validation` is a pydantic `ValidationError` from a codec
+compiled with `validate=True`, raised as `EncodeError` on the encode paths and
+`DecodeError` on the decode paths.
+
+`RequestError` is separate: it is not a `HyperflyError` and has no `code`. It is how
+`read_body` and `decode_request` refuse a request, carrying `status` (400, 413 or
+415), a stable `reason` and the response `headers`, and it wraps the `DecodeError`
+or stream error that caused it as `__cause__`.
 
 ## Conformance
 

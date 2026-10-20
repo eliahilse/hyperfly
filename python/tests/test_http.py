@@ -626,7 +626,7 @@ def test_hyperfly_content_type_essence(content_type):
     assert _request(CODEC_A.encode(VALUE), content_type=content_type) == ("hyperfly", VALUE)
 
 
-@pytest.mark.parametrize("body", [b"{", b'"\xff"', b"", b"NaN", b'{"v":Infinity}', b"[" * 100_000, b"1" * 10_000,
+@pytest.mark.parametrize("body", [b"{", b'"\xff"', b"", b"NaN", b'{"v":Infinity}', b"[" * 100_000, b"1" * 10_000 + b"x",
     b'"\xed\xa0\x80"'])
 def test_malformed_json_is_400(body):
     error = _refusal(body)
@@ -844,3 +844,80 @@ def test_failed_model_validation_in_a_request_is_400():
     error = _refusal(compile_ir(codec.ir).encode({"id": "abcd"}), content_type=HYPERFLY_MEDIA_TYPE, registry=registry)
     assert (error.status, error.reason) == (400, "undecodable")
     assert error.__cause__.code == "validation"
+
+
+class _ExplodingIterable:
+    def __iter__(self):
+        raise ConnectionResetError("client aborted")
+
+
+def _closed_reader():
+    import io
+
+    reader = io.BufferedReader(io.BytesIO(b"[1]"))
+    reader.close()
+    return reader
+
+
+@pytest.mark.parametrize(
+    "make,cause",
+    [
+        (_ExplodingIterable, ConnectionResetError),
+        (_closed_reader, ValueError),
+        (lambda: "[1]", TypeError),
+        (lambda: [1, 2, 3], TypeError),
+        (lambda: [b"[", "1]"], TypeError),
+        (lambda: iter([None]), TypeError),
+    ],
+)
+def test_unreadable_bodies_are_400(make, cause):
+    for call in (read_body, _request):
+        with pytest.raises(RequestError) as raised:
+            call(make())
+        assert (raised.value.status, raised.value.reason, raised.value.headers) == (400, "unreadable", {})
+        assert isinstance(raised.value.__cause__, cause)
+
+
+def test_chunks_are_copied_from_mutable_buffers():
+    buffer = bytearray(b"[1]")
+    data = read_body([buffer])
+    buffer[1:2] = b"2"
+    assert data == b"[1]"
+
+
+@pytest.mark.parametrize("digits", [4300, 4301, 10_000])
+@pytest.mark.parametrize("sign", ["", "-"])
+def test_json_integers_past_the_digit_limit_parse_like_json_parse(digits, sign):
+    token = sign + "1" * digits
+    expected = int(token) if digits <= 4300 else float(sign + "inf")
+    for decode in (
+        lambda body: decode_response("application/json", body, CodecRegistry())[1],
+        lambda body: _request(body.encode()).value,
+    ):
+        assert decode(token) == expected
+        assert decode(f'{{"n":[{token}]}}') == {"n": [expected]}
+
+
+def test_json_floats_and_big_exponents_parse_like_json_parse():
+    assert _request(b"[1e400, -1e400, 1e-400, 0.1]").value == [math.inf, -math.inf, 0.0, 0.1]
+    assert _request(b"1" + b"0" * 400 + b".5").value == math.inf
+    assert _request(b"0." + b"0" * 100_000 + b"1").value == 0.0
+
+
+def test_json_nesting_past_the_recursion_limit_is_400():
+    depth = 100_000
+    error = _refusal(b"[" * depth + b"]" * depth)
+    assert (error.status, error.reason) == (400, "malformed-json")
+    assert isinstance(error.__cause__.__cause__, RecursionError)
+
+
+@pytest.mark.parametrize("body", ["\ud800abc", "\ud83d\ude00" * 3, "\udfff" * 40])
+def test_string_hyperfly_responses_encode_like_text_encoder(body):
+    with pytest.raises(DecodeError) as raised:
+        decode_response(HYPERFLY_MEDIA_TYPE, body, CodecRegistry([CODEC_A]))
+    assert raised.value.code == "header"
+
+
+def test_string_hyperfly_response_replaces_lone_surrogates():
+    body = "hf\x01" + "\ud800" * 16
+    assert decode_response(HYPERFLY_MEDIA_TYPE, body, CodecRegistry([CODEC_A])) == ("unknown-codec", "efbfbd" * 5 + "ef")

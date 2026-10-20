@@ -307,13 +307,29 @@ def _envelope_fingerprint(data: bytes) -> str:
     return data[3:HEADER_SIZE].hex()
 
 
+def _json_int(token: str) -> int | float:
+    try:
+        return int(token)
+    except ValueError:
+        # past the interpreter's digit limit; JSON.parse yields a double, here infinite
+        return float(token)
+
+
+def _utf8(text: str) -> bytes:
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        # as TextEncoder does: pair surrogates, replace lone ones with U+FFFD
+        return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace").encode("utf-8")
+
+
 def _loads(body: bytes | str) -> Any:
     def reject_constant(value: str) -> Any:
         raise json.JSONDecodeError(f"invalid JSON constant {value}", text, 0)
 
     try:
         text = body.decode("utf-8-sig") if isinstance(body, bytes) else body
-        return json.loads(text, parse_constant=reject_constant)
+        return json.loads(text, parse_int=_json_int, parse_constant=reject_constant)
     except (ValueError, RecursionError) as error:
         raise DecodeError("json", f"malformed JSON body: {error}") from error
 
@@ -326,7 +342,7 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     """
     if _essence(content_type) != HYPERFLY_MEDIA_TYPE:
         return "json", _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
-    data = body.encode("utf-8") if isinstance(body, str) else bytes(body)
+    data = _utf8(body) if isinstance(body, str) else bytes(body)
     fingerprint = _envelope_fingerprint(data)
     codec = registry.get(fingerprint)
     if codec is None:
@@ -393,7 +409,10 @@ def read_body(
         return bytes(body)
     chunks: list[bytes] = []
     length = 0
-    iterator = iter(body)
+    try:
+        iterator = iter(body)
+    except Exception as error:
+        raise RequestError(400, "unreadable") from error
     while True:
         try:
             chunk = next(iterator)
@@ -401,8 +420,11 @@ def read_body(
             break
         except Exception as error:
             raise RequestError(400, "unreadable") from error
-        size = memoryview(chunk).nbytes
-        length += size
+        try:
+            view = memoryview(chunk)
+        except TypeError as error:
+            raise RequestError(400, "unreadable") from error
+        length += view.nbytes
         if length > max_bytes:
             close = getattr(iterator, "close", None)
             if callable(close):
@@ -411,8 +433,8 @@ def read_body(
                 except Exception:
                     pass
             raise RequestError(413, "too-large")
-        if size:
-            chunks.append(bytes(chunk))
+        if view.nbytes:
+            chunks.append(chunk if type(chunk) is bytes else view.tobytes())
     return b"".join(chunks)
 
 
