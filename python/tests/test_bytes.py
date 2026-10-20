@@ -835,6 +835,69 @@ def test_a_small_dictionary_early_overflow_takes_no_full_tally(spied):
     assert spied["tally runs"] == 1
 
 
+@pytest.mark.parametrize("k", [100, 200])
+@pytest.mark.parametrize("shape", ["byte codes", "two-byte codes"])
+@pytest.mark.parametrize("distinct", [True, False], ids=["distinct", "repeated"])
+def test_deferred_short_participation_follows_the_charge(k, shape, distinct, spied):
+    # default limits: each consumer's bound fits, so its total defers until the budget
+    # settles it, as it does for most of them
+    case, _limits = SHORT_MASKS[shape](k, distinct)
+    _decode_with(case)
+    assert spied["tally runs"] == 0
+    if distinct:
+        assert spied["tally"] == 0 and k // 2 < spied["runs"] <= k
+    else:
+        assert spied["tally"] == 1 and spied["runs"] == 0
+
+
+def _compact_readers(flags, two_byte=False):
+    # 1,024 rows of a grammar source, a dictionary column derived from it holding one
+    # code at every row (code 1, or 301 with two-byte codes), then a column derived from
+    # that per flag: "required", "optional" (present at every row) or "uniform" (required,
+    # values of one length). The rows select an empty value; one unused value of 3,000
+    # bytes takes each bound past the budget, and a dictionary of 257 or 302 sizes makes
+    # the rows short
+    names = [f"f{i}" for i in range(300)] + ["a"] if two_byte else ["a"] + [f"f{i}" for i in range(255)]
+    values = [""] * len(names)
+    values[0 if two_byte else -1] = "y" * 3000
+    columns = [{"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]}, {"leaf": 1, "dict": names, "derived": {"source": 0, "values": ["a", "a"]}}]
+    fields = [_field("root", "string"), _field("s", "string")]
+    body = "8008" + "0300020001" + "aa" * 128 + "020000" + "0400"
+    for i, flag in enumerate(flags):
+        fields.append(dict(_field(f"d{i}", "string"), optional=True) if flag == "optional" else _field(f"d{i}", "string"))
+        columns.append({"leaf": i + 2, "derived": {"source": 1, "values": [""] * len(names) if flag == "uniform" else values}})
+        body += ("ff" * 128 if flag == "optional" else "") + "0400"
+    return _array(*fields, _field("n", "int")), _profile(*columns), body + "ff"
+
+
+@pytest.mark.parametrize("k", [2, 3])
+@pytest.mark.parametrize("two_byte", [False, True], ids=["byte codes", "two-byte codes"])
+def test_required_short_readers_tally_once(k, two_byte, spied):
+    _decode_with(_compact_readers(["required"] * k, two_byte))
+    # every reader reads the source at every row: the first tallies it, as its charge,
+    # for the others
+    assert spied["runs"] == 0 and spied["tally"] == 0
+    assert spied["tally runs"] == 1
+
+
+@pytest.mark.parametrize(
+    "flags, runs, tallies",
+    [
+        (["required", "optional"], 2, 0),
+        (["required", "required", "optional"], 1, 1),
+        (["required", "optional", "optional"], 2, 1),
+        (["required", "uniform"], 1, 0),
+    ],
+    ids=["required and optional", "two required and optional", "required and two optional", "required and uniform"],
+)
+def test_mixed_short_readers(flags, runs, tallies, spied):
+    _decode_with(_compact_readers(flags))
+    # the required readers share one participation, the optional ones another; a reader
+    # with values of one length needs no tally
+    assert spied["runs"] == runs and spied["tally runs"] == tallies
+    assert spied["tally"] == 0
+
+
 @pytest.mark.parametrize("count", [70, 300])
 def test_two_byte_codes_recode_in_bulk(count):
     ir, profile, _body = TWO_BYTE_CHAIN
