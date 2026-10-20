@@ -273,6 +273,13 @@ describe("fetchArtifact", () => {
     expect(body.locked).toBe(false);
   });
 
+  test("rejects a locked response body as unreadable", async () => {
+    const response = new Response(codec.artifact);
+    response.body!.getReader();
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(response) }))
+      .rejects.toThrow(expect.objectContaining({ code: "ir", message: "artifact body could not be read" }));
+  });
+
   test("forwards request headers", async () => {
     const seen: string[] = [];
     const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {

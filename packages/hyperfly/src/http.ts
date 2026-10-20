@@ -17,6 +17,7 @@ export const DEFAULT_MAX_BODY_BYTES = 1 << 20;
 const MAX_ENTRIES = 32;
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 const VARY = "Hyperfly-Accept, Accept";
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 
 /** Client fingerprints in preference order, ignoring malformed entries and duplicates. */
 export function parseAccept(header: string | null | undefined): string[] {
@@ -106,6 +107,17 @@ export interface Encoded {
   headers: Record<string, string>;
 }
 
+function jsonBody(value: unknown): string {
+  let body: string | undefined;
+  try {
+    body = JSON.stringify(value);
+  } catch (cause) {
+    throw new EncodeError("json", `$: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+  }
+  if (body === undefined) throw new EncodeError("json", "$: value has no JSON representation");
+  return body;
+}
+
 /** Encode one value according to a negotiation decision. */
 export function encodeFor<T>(decision: Negotiation<T>, value: T, options: NegotiateOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
@@ -115,7 +127,7 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Negoti
       if (!(error instanceof EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
       options.onFallback?.(error);
       return {
-        body: JSON.stringify(value),
+        body: jsonBody(value),
         headers: {
           Vary: VARY,
           "Content-Type": "application/json",
@@ -124,7 +136,7 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Negoti
       };
     }
   }
-  return { body: JSON.stringify(value), headers: decision.headers };
+  return { body: jsonBody(value), headers: decision.headers };
 }
 
 export interface WellKnownResponse {
@@ -356,7 +368,12 @@ export function decodeResponse<T>(
   registry: CodecRegistry,
 ): { kind: "json"; value: T } | { kind: "hyperfly"; value: T } | { kind: "unknown-codec"; fingerprint: string } {
   if (mediaType(contentType) !== HYPERFLY_MEDIA_TYPE) {
-    const text = typeof body === "string" ? body : new TextDecoder().decode(body);
+    let text: string;
+    try {
+      text = typeof body === "string" ? body : new TextDecoder("utf-8", { fatal: true }).decode(body);
+    } catch (cause) {
+      throw new DecodeError("json", "$: body is not valid UTF-8", { cause });
+    }
     try {
       return { kind: "json", value: JSON.parse(text) as T };
     } catch (cause) {
@@ -391,7 +408,11 @@ export function respond<T>(
     ...options,
     accept: options.accept === undefined ? request.headers.get("accept") : options.accept,
   });
-  const { body, headers } = encodeFor(decision, value, options);
+  const status = options.status ?? 200;
+  const bodyless = request.method === "HEAD" || NULL_BODY_STATUSES.has(status);
+  const { body, headers } = bodyless && value === undefined
+    ? { body: null, headers: decision.headers }
+    : encodeFor(decision, value, options);
   const responseHeaders = new Headers(options.headers);
   for (const name of ["Content-Type", "Content-Length", "Hyperfly-Codec", "Hyperfly-Offer"]) {
     responseHeaders.delete(name);
@@ -403,10 +424,7 @@ export function respond<T>(
   }
   for (const [name, value] of Object.entries(headers)) responseHeaders.set(name, value);
   responseHeaders.set("Vary", [...vary.values()].join(", "));
-  return new Response(body as BodyInit, {
-    status: options.status ?? 200,
-    headers: responseHeaders,
-  });
+  return new Response(bodyless ? null : body as BodyInit, { status, headers: responseHeaders });
 }
 
 /**
@@ -414,9 +432,11 @@ export function respond<T>(
  * caller can chain it ahead of its own router in one line.
  */
 export function discovery(request: Request, registry: CodecRegistry): Response | undefined {
+  if (request.method !== "GET" && request.method !== "HEAD") return undefined;
   const served = serveArtifact(new URL(request.url).pathname, registry);
   if (!served) return undefined;
-  return new Response(served.body || null, { status: served.status, headers: served.headers });
+  const body = request.method === "HEAD" ? null : served.body || null;
+  return new Response(body, { status: served.status, headers: served.headers });
 }
 
 export interface ReadBodyOptions {
@@ -424,7 +444,7 @@ export interface ReadBodyOptions {
 }
 
 /** Read a hyperfly or JSON request body (negotiation §4). */
-export function readBody<T>(
+export async function readBody<T>(
   request: Request,
   registry: CodecRegistry,
   options: ReadBodyOptions = {},
@@ -497,7 +517,12 @@ async function readLimited(
   const chunks: Uint8Array[] = [];
   let length = 0;
   if (stream !== null) {
-    const reader = stream.getReader();
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
+    try {
+      reader = stream.getReader();
+    } catch {
+      return { ok: false, status: 400 };
+    }
     try {
       while (true) {
         const { done, value } = await reader.read();

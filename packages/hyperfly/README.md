@@ -95,6 +95,8 @@ export default {
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
+`respond` sends no body for HEAD requests and for status 204, 205 or 304, with the same headers otherwise; `discovery`
+answers GET and HEAD and returns `undefined` for other methods.
 A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it advertises a matching fingerprint.
 
 ### JSON fallback
@@ -128,7 +130,7 @@ The first applicable rule in negotiation v1 §4 wins:
 | 413 | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
 | 400 | Invalid binary envelope or `Hyperfly-Codec` disagrees with its fingerprint. |
 | 415 + Hyperfly-Offer | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
-| 400 | Binary decode fails (including limits), JSON is malformed UTF-8/JSON, or the stream fails. |
+| 400 | Binary decode fails (including limits), JSON is malformed UTF-8/JSON, or the body stream cannot be read. |
 
 ## Node and Express
 
@@ -365,7 +367,7 @@ try {
 | `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
 | `packed` | Invalid compressed stream or decompressed length mismatch. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
-| `json` | Malformed JSON in `decodeResponse` or in artifact text; the `SyntaxError` is `cause`. |
+| `json` | Malformed JSON or UTF-8 in `decodeResponse`, malformed artifact text, or a value the JSON fallback cannot encode; the underlying error is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
 | `options` | Invalid compile, artifact, `train` or HTTP options, such as an unknown limit or an invalid `maxBytes`. |
 
