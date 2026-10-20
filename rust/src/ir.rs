@@ -1,39 +1,65 @@
 use crate::wire::{err, ErrorCode, Result, INT_MAX, INT_MIN};
 use sha2::{Digest, Sha256};
 
+/// A schema constant that occupies no body bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
+    /// The null value.
     Null,
+    /// A fixed boolean.
     Bool(bool),
+    /// A fixed integer in the [`INT_MIN`] to [`INT_MAX`] domain.
     Int(i64),
+    /// A fixed UTF-8 string.
     Str(String),
 }
 
+/// A schema node; struct fields and enum members retain their declared order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
+    /// A boolean.
     Bool,
+    /// A JSON-safe integer with optional inclusive bounds.
     Int {
+        /// Inclusive lower bound; `None` permits values down to [`INT_MIN`].
         min: Option<i64>,
+        /// Inclusive upper bound; `None` permits values up to [`INT_MAX`].
         max: Option<i64>,
     },
+    /// A finite IEEE 754 binary64 number; encoding normalizes negative zero.
     Float64,
+    /// A length-prefixed UTF-8 string.
     Str,
+    /// Length-prefixed raw bytes.
     Bytes,
+    /// A constant value with no body payload.
     Literal(Literal),
+    /// Unique, nonempty string members indexed in declared order.
     Enum(Vec<String>),
+    /// Null or an inner value; nested nullable nodes and nullable null literals are invalid.
     Nullable(Box<Node>),
+    /// An ordered sequence of values of one type.
     Array {
+        /// The schema of each element.
         element: Box<Node>,
+        /// Exact element count, or `None` for a count carried in the body.
         length: Option<u64>,
     },
+    /// An object whose fields are encoded in declared order.
     Struct(Vec<Field>),
 }
 
+/// A named struct field with independent absence and null permissions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
+    /// Unique, nonempty name; `__proto__` and decimal array indices below `2^32 - 1` are invalid.
     pub name: String,
+    /// The schema used for a present, non-null value.
     pub ty: Node,
+    /// Whether the field may be absent; false makes it required.
     pub optional: bool,
+    /// Whether a present field may be null via the struct's null bitmap.
+    /// Cannot wrap a nullable node or a null literal.
     pub nullable: bool,
 }
 
@@ -176,6 +202,8 @@ fn esc(s: &str, out: &mut String) {
     out.push('"');
 }
 
+/// Appends canonical schema JSON to `out`, preserving declared field and member order.
+/// Does not validate `node`; use [`crate::Codec::compile`] to validate a schema.
 pub fn serialize_node(node: &Node, out: &mut String) {
     match node {
         Node::Bool => out.push_str(r#"{"kind":"bool"}"#),
@@ -249,9 +277,12 @@ pub fn serialize_node(node: &Node, out: &mut String) {
     }
 }
 
+/// The body layout included in the canonical artifact and fingerprint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
+    /// Row layout version 1.
     Row,
+    /// Columnar layout version 5 for eligible arrays of structs, with row fallback elsewhere.
     Columnar,
 }
 
@@ -271,15 +302,20 @@ impl Plan {
     }
 }
 
+/// Maximum entries per profile string dictionary: 16383 (14-bit nonzero codes).
 pub const MAX_DICT_ENTRIES: usize = 16383;
 
+/// Exact ASCII letter case used to match and render grammar digits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrammarCase {
+    /// Lowercase letters; required for base 10.
     Lower,
+    /// Uppercase letters for base 16 or 36.
     Upper,
 }
 
 impl GrammarCase {
+    /// Returns the canonical profile spelling, `"lower"` or `"upper"`.
     pub fn as_str(self) -> &'static str {
         match self {
             GrammarCase::Lower => "lower",
@@ -288,36 +324,55 @@ impl GrammarCase {
     }
 }
 
+/// An unsigned grammar number rendered with an exact, zero-padded digit width.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrammarNum {
+    /// Radix: 10, 16, or 36.
     pub base: u32,
+    /// Digit count, at least 1; maximum 15 for base 10, 13 for base 16, or 10 for base 36.
     pub len: u32,
+    /// Exact digit case; base 10 requires [`GrammarCase::Lower`].
     pub case: GrammarCase,
 }
 
+/// One token in a string grammar, matched in sequence without case folding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarToken {
+    /// A nonempty verbatim string; adjacent literal tokens are invalid.
     Lit(String),
+    /// A fixed-width numeric lane.
     Num(GrammarNum),
 }
 
+/// A string mapping indexed by another column's dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Derivation {
+    /// Earlier string column ordinal in the same eligible array; must have a profile dictionary.
     pub source: usize,
+    /// Derived strings at the source dictionary's indices; lengths must match, duplicates are allowed.
     pub values: Vec<String>,
 }
 
+/// Decode-critical knowledge for one string column; at least one coding option is required.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileColumn {
+    /// Zero-based leaf ordinal from a depth-first schema walk in declared order.
+    /// Each eligible array contributes its flattened leaves without further descent.
     pub leaf: usize,
+    /// Optional dictionary of 1 to [`MAX_DICT_ENTRIES`] unique strings, in code order.
     pub dict: Option<Vec<String>>,
+    /// Optional sequence of 1 to 8 tokens, including at least one numeric token.
     pub grammar: Option<Vec<GrammarToken>>,
+    /// Optional mapping from an earlier column's dictionary to this column's values.
     pub derived: Option<Derivation>,
 }
 
+/// A columnar profile whose column content is embedded in the canonical artifact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Profile {
+    /// Profile version: 1 permits dictionaries only; 2 also permits grammars and derivations.
     pub version: u32,
+    /// Nonempty column entries sorted by unique, ascending string leaf ordinal.
     pub columns: Vec<ProfileColumn>,
 }
 
@@ -380,6 +435,9 @@ pub fn serialize_shared(profile: &Profile, out: &mut String) {
     out.push_str("]}");
 }
 
+/// Returns canonical JSON for wire major 1, `plan`, `ir`, and optional shared profile content.
+/// Profile version is not serialized. Does not validate inputs; use
+/// [`crate::Codec::compile_with_profile`] to validate them.
 pub fn serialize_artifact(ir: &Node, plan: Plan, profile: Option<&Profile>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -675,6 +733,8 @@ pub fn validate_profile(ir: &Node, profile: &Profile) -> Result<()> {
     Ok(())
 }
 
+/// Returns the first 16 bytes of SHA-256 over `artifact`'s UTF-8 bytes.
+/// Does not parse or validate the text; derive it locally with [`serialize_artifact`].
 pub fn fingerprint_of(artifact: &str) -> [u8; 16] {
     let digest = Sha256::digest(artifact.as_bytes());
     let mut fp = [0u8; 16];
