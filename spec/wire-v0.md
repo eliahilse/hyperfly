@@ -311,7 +311,9 @@ first failing value determines the error.
 An encoder applies `maxDepth`, `maxItems` and `maxByteLength` as a decoder
 does. It MUST report the first failure in the traversal below. Entry checks
 precede structural preflight, which precedes value checks; completion checks
-come last. These stages are local to the node being visited, not separate
+come last. The one exception is the columnar per-column depth checks listed
+under entry checks: they run after the whole array's structural preflight
+and before that column's value checks. These stages are local to the node being visited, not separate
 passes over the whole body.
 
 1. **Entry checks.** A node's `depth` check comes first. A struct's host
