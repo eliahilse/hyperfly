@@ -1,7 +1,7 @@
 from copy import deepcopy
 from enum import Enum
 from math import ceil, floor
-from typing import Annotated, Generic, Literal, Optional, TypeVar
+from typing import Annotated, Generic, Literal, Optional, TypeVar, get_args, get_origin
 
 import pytest
 from annotated_types import Ge, GroupedMetadata, Gt, Interval, Le, Lt
@@ -10,6 +10,7 @@ from pydantic import (
     WrapValidator, confloat, conint, constr, create_model, field_validator, model_validator,
 )
 from pydantic_core import SchemaError, core_schema
+from pydantic.fields import FieldInfo
 
 from conftest import load
 from hyperfly import (
@@ -36,10 +37,7 @@ def _assert_integer_leaf_matches_model_output(model):
 
     schema = resolve(model.__pydantic_core_schema__)
     schema = resolve(schema["schema"]["fields"]["x"]["schema"])
-    defaults = []
     while schema["type"] in ("list", "nullable", "function-before", "chain", "default"):
-        if schema["type"] == "default" and not schema.get("validate_default", model.model_config.get("validate_default")):
-            defaults.append(schema.get("default"))
         if schema["type"] == "list":
             schema = schema["items_schema"]
         elif schema["type"] == "chain":
@@ -62,8 +60,6 @@ def _assert_integer_leaf_matches_model_output(model):
             expected["min"] = max(lower)
         if min(upper) != INT_MAX:
             expected["max"] = min(upper)
-        if any(type(value) is int and not max(lower) <= value <= min(upper) for value in defaults):
-            expected = {"kind": "int"}
     actual = to_ir(model)["fields"][0]["type"]
     while actual["kind"] in ("array", "nullable"):
         actual = actual["element"] if actual["kind"] == "array" else actual["inner"]
@@ -181,6 +177,41 @@ def test_simple_bound_shapes_keep_reference_artifacts(shape, bound, plan):
     assert codec.ir == reference.ir
     assert codec.artifact == reference.artifact
     assert codec.fingerprint == reference.fingerprint
+
+
+@pytest.mark.parametrize("shape", _SIMPLE_BOUND_SHAPES)
+@pytest.mark.parametrize("nullable", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_unvalidated_scalar_defaults_keep_reference_artifacts(shape, nullable, plan):
+    annotation, default, node = _simple_bound_case(shape, 10)
+    if "min" in node:
+        invalid = node["min"] - 1
+    else:
+        invalid = node["max"] + 1
+    if default is ...:
+        default = invalid
+    else:
+        default = FieldInfo.merge_field_infos(default, Field(default=invalid))
+    if nullable:
+        if get_origin(annotation) is Annotated:
+            base, *metadata = get_args(annotation)
+            annotation = Annotated[(Optional[base], *metadata)]
+        else:
+            annotation = Optional[annotation]
+    model = create_model("DefaultBound", x=(annotation, default))
+    field = {"name": "x", "type": node}
+    if nullable:
+        field["nullable"] = True
+    reference = compile_ir({"kind": "struct", "fields": [field]}, plan=plan)
+    codec = compile(model, plan=plan)
+    assert codec.ir == reference.ir
+    assert codec.artifact == reference.artifact
+    assert codec.fingerprint == reference.fingerprint
+    assert model().x == invalid
+    for encode in (codec.encode, codec.encode_body):
+        with pytest.raises(EncodeError) as error:
+            encode(model())
+        assert error.value.code == "range"
 
 
 class _Tag(str, Enum):
@@ -624,37 +655,94 @@ def test_validator_around_nested_model_container(mode, optional, plan):
     assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
 
 
-@pytest.mark.parametrize("default,field_validates,config_validates,minimum", [
-    (-90, None, False, None), (-90, False, True, None),
-    (-90, True, False, 10), (-90, None, True, 10),
-    (10, None, False, 10), (100, False, False, 10),
+@pytest.mark.parametrize("default,field_validates,config_validates", [
+    (-90, None, False), (-90, False, True),
+    (-90, True, False), (-90, None, True),
+    (10, None, False), (100, False, False),
 ])
 @pytest.mark.parametrize("grouped", [False, True])
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 def test_static_integer_defaults_respect_validate_default(default, field_validates, config_validates,
-                                                        minimum, grouped, plan):
+                                                        grouped, plan):
     annotation = Annotated[int, _FieldBounds()] if grouped else Annotated[int, Ge(10)]
     # Use the same lower bound for the plain and GroupedMetadata cases.
     if grouped:
         default = -90 if default < 10 else 5
-        minimum = 2 if minimum is not None else None
+    minimum = 2 if grouped else 10
     model = create_model("Defaults", __config__=ConfigDict(validate_default=config_validates), x=(
         annotation, Field(default=default, validate_default=field_validates),
     ))
-    expected = {"kind": "int"}
-    if minimum is not None:
-        expected["min"] = minimum
-        if grouped:
-            expected["max"] = 8
+    expected = {"kind": "int", "min": minimum}
+    if grouped:
+        expected["max"] = 8
     codec = compile(model, validate=False, plan=plan)
     assert codec.ir["fields"][0]["type"] == expected
-    if minimum is not None and default < minimum:
+    validates = config_validates if field_validates is None else field_validates
+    if validates and default < minimum:
         with pytest.raises(ValidationError):
             model()
     else:
         instance = model()
-        assert codec.decode(codec.encode(instance)) == instance.model_dump()
-        assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+        for encode, decode in ((codec.encode, codec.decode), (codec.encode_body, codec.decode_body)):
+            if default < minimum:
+                with pytest.raises(EncodeError) as error:
+                    encode(instance)
+                assert error.value.code == "range"
+            else:
+                assert decode(encode(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("shape", ["scalar", "optional", "list", "nested-list", "model"])
+@pytest.mark.parametrize("factory", [False, True])
+@pytest.mark.parametrize("field_validates,config_validates", [
+    (None, False), (False, True), (True, False), (None, True),
+])
+@pytest.mark.parametrize("outside", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_all_defaults_keep_declared_bounds(shape, factory, field_validates, config_validates, outside, plan):
+    annotation = Annotated[int, Ge(10)]
+    default = -90 if outside else 10
+    leaf = {"kind": "int", "min": 10}
+    expected = leaf
+    if shape == "optional":
+        annotation = Optional[annotation]
+    elif shape in ("list", "nested-list"):
+        for _ in range(2 if shape == "nested-list" else 1):
+            annotation = list[annotation]
+            default = [default]
+            expected = {"kind": "array", "element": expected}
+    elif shape == "model":
+        annotation = create_model("DefaultInner", x=(annotation, ...))
+        default = {"x": default}
+        expected = {"kind": "struct", "fields": [{"name": "x", "type": leaf}]}
+    calls = 0
+
+    def make_default():
+        nonlocal calls
+        calls += 1
+        return deepcopy(default)
+
+    field = Field(default_factory=make_default, validate_default=field_validates) if factory else Field(
+        default=default, validate_default=field_validates,
+    )
+    model = create_model("Defaults", __config__=ConfigDict(validate_default=config_validates), x=(annotation, field))
+    codec = compile(model, validate=False, plan=plan)
+    assert codec.ir["fields"][0]["type"] == expected
+    assert calls == 0
+    validates = config_validates if field_validates is None else field_validates
+    if validates and outside:
+        with pytest.raises(ValidationError):
+            model()
+        return
+    instance = model()
+    assert calls == int(factory)
+    for encode, decode in ((codec.encode, codec.decode), (codec.encode_body, codec.decode_body)):
+        if outside:
+            with pytest.raises(EncodeError) as error:
+                encode(instance)
+            assert error.value.code == "range"
+        else:
+            assert decode(encode(instance)) == {"x": default}
 
 
 @pytest.mark.parametrize("mode", ["after", "wrap", "before"])
@@ -693,7 +781,7 @@ def test_model_validators_keep_declared_field_bounds(mode, nested, plan):
             with pytest.raises(EncodeError) as error:
                 encode(instance)
             assert error.value.code == "range"
-    assert "outside field validation" in to_ir.__doc__
+    assert "bypass field validation" in to_ir.__doc__
 
 
 @pytest.mark.parametrize("plan", ["row", "columnar"])
@@ -713,6 +801,100 @@ def test_field_and_model_validators_using_the_same_function_remain_distinct(plan
     assert instance.x.x == -50
     assert codec.decode(codec.encode(instance)) == {"x": {"x": -50}}
     assert codec.decode_body(codec.encode_body(instance)) == {"x": {"x": -50}}
+
+
+@pytest.mark.parametrize("mode", ["after", "wrap"])
+@pytest.mark.parametrize("model_validator_present", [False, True])
+@pytest.mark.parametrize("shared_function", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_field_schema_hook_moving_model_ref_is_a_bounds_barrier(
+    mode, model_validator_present, shared_function, plan,
+):
+    def shift(value):
+        return value.model_copy(update={"x": value.x - 100})
+
+    def wrap(value, handler):
+        return shift(handler(value))
+
+    validator = shift if mode == "after" else wrap
+    validators = {"shift": model_validator(mode=mode)(validator)} if model_validator_present else {}
+    inner = create_model("Inner", x=(int, Field(ge=10)), __validators__=validators)
+
+    class Shift:
+        def __get_pydantic_core_schema__(self, source, handler):
+            schema = dict(handler.resolve_ref_schema(handler(source)))
+            ref = schema.pop("ref")
+            if mode == "after":
+                function = shift if shared_function else lambda value: shift(value)
+                return core_schema.no_info_after_validator_function(function, schema, ref=ref)
+            function = wrap if shared_function else lambda value, handler: wrap(value, handler)
+            return core_schema.no_info_wrap_validator_function(function, schema, ref=ref)
+
+    outer = create_model("Outer", a=(Annotated[inner, Shift()], ...))
+    assert to_ir(inner)["fields"][0]["type"] == {"kind": "int", "min": 10}
+    codec = compile(outer, validate=False, plan=plan)
+    assert codec.ir["fields"][0]["type"]["fields"][0]["type"] == {"kind": "int"}
+    instance = outer(a={"x": 10})
+    assert instance.a.x == (-190 if model_validator_present else -90)
+    assert codec.decode(codec.encode(instance)) == instance.model_dump()
+    assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_inherited_model_validator_stack_with_info_keeps_bounds(plan):
+    class Parent(BaseModel):
+        x: int = Field(ge=10)
+
+        @model_validator(mode="before")
+        @classmethod
+        def before(cls, value, info):
+            return value
+
+        @model_validator(mode="wrap")
+        @classmethod
+        def wrap(cls, value, handler, info):
+            return handler(value)
+
+        @model_validator(mode="after")
+        def after(self, info):
+            self.x -= 100
+            return self
+
+    class Child(Parent):
+        @model_validator(mode="wrap")
+        @classmethod
+        def outer_wrap(cls, value, handler):
+            return handler(value)
+
+    model = create_model("Outer", a=(Child, ...), b=(Child, ...))
+    codec = compile(model, validate=False, plan=plan)
+    for field in codec.ir["fields"]:
+        assert field["type"]["fields"][0]["type"] == {"kind": "int", "min": 10}
+    instance = model(a={"x": 10}, b={"x": 10})
+    assert instance.a.x == instance.b.x == -90
+    for encode in (codec.encode, codec.encode_body):
+        with pytest.raises(EncodeError) as error:
+            encode(instance)
+        assert error.value.code == "range"
+
+
+@pytest.mark.parametrize("convert", [to_ir, compile])
+@pytest.mark.parametrize("mutual", [False, True])
+def test_recursive_models_are_unsupported_with_field_path(convert, mutual):
+    class Recursive(BaseModel):
+        children: list["Recursive"]
+
+    class Other(BaseModel):
+        child: Recursive
+
+    # Python 3.10 can leave string arguments in container field annotations.
+    Recursive.model_fields["children"].annotation = list[Other if mutual else Recursive]
+    Recursive.model_rebuild(force=True)
+    with pytest.raises(UnsupportedSchemaError) as error:
+        convert(Recursive)
+    assert error.value.code == "unsupported"
+    assert error.value.path == ("$.children[].child" if mutual else "$.children[]")
+    assert "recursive model" in str(error.value)
 
 
 @pytest.mark.parametrize("plan", ["row", "columnar"])
@@ -832,10 +1014,9 @@ def test_integer_bounds_only_follow_output_schema(annotation, node):
     core_schema.lax_or_strict_schema(core_schema.int_schema(ge=10), core_schema.int_schema(le=0)),
     core_schema.json_or_python_schema(core_schema.int_schema(ge=10), core_schema.int_schema(le=0)),
     core_schema.union_schema([core_schema.int_schema(le=0), core_schema.int_schema(ge=10)]),
-    core_schema.with_default_schema(core_schema.int_schema(ge=10), default=-90),
-], ids=["lax-or-strict", "json-or-python", "union", "default"])
+], ids=["lax-or-strict", "json-or-python", "union"])
 @pytest.mark.parametrize("plan", ["row", "columnar"])
-def test_integer_schema_branches_and_defaults_are_unbounded(schema, plan):
+def test_integer_schema_branches_are_unbounded(schema, plan):
     class OutputSchema:
         def __get_pydantic_core_schema__(self, source, handler):
             return deepcopy(schema)
@@ -852,6 +1033,30 @@ def test_integer_schema_branches_and_defaults_are_unbounded(schema, plan):
         accepted += 1
         assert codec.decode(codec.encode(instance)) == instance.model_dump()
     assert accepted > 0
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_custom_schema_unvalidated_default_keeps_bounds(plan):
+    class OutputSchema:
+        def __get_pydantic_core_schema__(self, source, handler):
+            return core_schema.with_default_schema(core_schema.int_schema(ge=10), default=-90)
+
+    model = create_model("Constrained", x=(Annotated[int, OutputSchema()], ...))
+    codec = compile(model, validate=False, plan=plan)
+    assert codec.ir["fields"][0]["type"] == {"kind": "int", "min": 10}
+    for encode in (codec.encode, codec.encode_body):
+        with pytest.raises(EncodeError) as error:
+            encode(model())
+        assert error.value.code == "range"
+    for value in (-90, -3, 0, 10, 13):
+        payload = {"x": value}
+        if value < 10:
+            with pytest.raises(ValidationError):
+                model.model_validate(payload)
+        else:
+            instance = model.model_validate(payload)
+            assert codec.decode(codec.encode(instance)) == payload
+            assert codec.decode_body(codec.encode_body(instance)) == payload
 
 
 @pytest.mark.parametrize("convert", [to_ir, compile])

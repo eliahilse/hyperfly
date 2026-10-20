@@ -1,9 +1,9 @@
 """Pydantic schema conversion and optional validation for Hyperfly codecs.
 
 Field-level after/wrap/plain validators, decorated or Annotated at any container
-level, drop integer bounds beneath them. Model validators keep field bounds: values
-set outside field validation, e.g. by model validators, assignment or model_construct,
-are checked against the declared bounds and may raise ``range``.
+level, drop integer bounds beneath them. Values that bypass field validation through
+unvalidated defaults, model validators, assignment or model_construct keep declared
+bounds and may raise ``range``.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ class _BoundSchemas:
         self.models: dict[int, type[BaseModel]] = {}
         self.pending: set[int] = set()
         self.paths: dict[int, str] = {}
+        self.active_models: set[type[BaseModel]] = set()
 
     def mark(self, node: dict[str, Any], *children: dict[str, Any]) -> dict[str, Any]:
         if any(id(child) in self.pending for child in children):
@@ -116,10 +117,48 @@ def _clear_bounds(node: dict[str, Any]) -> None:
             _clear_bounds(field["type"])
 
 
+def _model_validator(schema: dict[str, Any], model: type[BaseModel]) -> bool:
+    function = schema["function"]["function"]
+    function = getattr(function, "__func__", function)
+    return any(
+        schema["type"] == f"function-{validator.info.mode}"
+        and function is getattr(validator.func, "__func__", validator.func)
+        for validator in model.__pydantic_decorators__.model_validators.values()
+    )
+
+
+def _unwrap_model_validators(
+    schema: dict[str, Any], own_schema: Any, model: type[BaseModel], definitions: dict[str, Any],
+) -> dict[str, Any]:
+    # Match the complete installed stack so an extra field wrapper using the
+    # same callable as a model validator still forms a field-level barrier.
+    seen: set[int] = set()
+    while True:
+        own_schema = _resolve_schema(own_schema, definitions)
+        schema = _resolve_schema(schema, definitions)
+        if id(schema) in seen or schema["type"] != own_schema["type"]:
+            raise _SchemaMismatch
+        seen.add(id(schema))
+        if schema["type"] == "model":
+            if (schema.get("cls") is not model or own_schema.get("cls") is not model
+                    or schema["schema"] != own_schema["schema"]):
+                raise _SchemaMismatch
+            return schema
+        if not schema["type"].startswith("function-") or not _model_validator(schema, model):
+            raise _SchemaMismatch
+        function = schema["function"]
+        own_function = own_schema["function"]
+        if (function["type"] != own_function["type"]
+                or getattr(function["function"], "__func__", function["function"]) is not
+                getattr(own_function["function"], "__func__", own_function["function"])):
+            raise _SchemaMismatch
+        schema = schema["schema"]
+        own_schema = own_schema["schema"]
+
+
 def _apply_bounds(
     node: dict[str, Any], schema: Any, definitions: dict[str, Any],
-    bounds: _BoundSchemas, path: str, validate_default: bool = False,
-    unchecked_defaults: tuple[Any, ...] = (),
+    bounds: _BoundSchemas, path: str,
 ) -> None:
     if id(node) not in bounds.pending:
         return
@@ -127,9 +166,6 @@ def _apply_bounds(
     # Only wrappers belonging to the model itself may change values outside
     # field validation. Field validators wrapping that model remain barriers.
     model = bounds.models.get(id(node))
-    own_model = _resolve_schema(bounds.schemas[model], definitions) if model is not None else None
-    inside_model = False
-    defaults = list(unchecked_defaults)
     seen: set[int] = set()
     while True:
         schema = _resolve_schema(schema, definitions)
@@ -137,15 +173,9 @@ def _apply_bounds(
             raise _SchemaMismatch
         seen.add(id(schema))
         kind = schema["type"]
-        if own_model is not None and (schema is own_model or (
-            own_model.get("ref") is not None and schema.get("ref") == own_model["ref"]
-        )):
-            inside_model = True
-        if kind in ("function-after", "function-wrap") and inside_model:
-            schema = schema["schema"]
+        if kind in ("function-after", "function-wrap", "function-plain") and model is not None:
+            schema = _unwrap_model_validators(schema, bounds.schemas[model], model, definitions)
         elif kind in ("default", "function-before"):
-            if kind == "default" and not schema.get("validate_default", validate_default):
-                defaults.append(schema.get("default"))
             schema = schema["schema"]
         elif kind == "chain":
             schema = schema["steps"][-1]
@@ -153,15 +183,15 @@ def _apply_bounds(
             break
     kind = node["kind"]
     if kind == "nullable" and schema["type"] == "nullable":
-        _apply_bounds(node["inner"], schema["schema"], definitions, bounds, path,
-                      validate_default, tuple(defaults))
+        _apply_bounds(node["inner"], schema["schema"], definitions, bounds, path)
     elif kind == "array" and schema["type"] == "list":
-        _apply_bounds(node["element"], schema["items_schema"], definitions, bounds, f"{path}[]", validate_default)
+        _apply_bounds(node["element"], schema["items_schema"], definitions, bounds, f"{path}[]")
     elif kind == "struct":
         if schema["type"] == "model":
-            validate_default = schema.get("config", {}).get("validate_default", False)
             schema = _resolve_schema(schema["schema"], definitions)
             while schema["type"] == "function-before":
+                if model is None or not _model_validator(schema, model):
+                    raise _SchemaMismatch
                 schema = _resolve_schema(schema["schema"], definitions)
         if schema["type"] != "model-fields" or model is None:
             raise _SchemaMismatch
@@ -174,17 +204,13 @@ def _apply_bounds(
                 if field_schema["type"] != "model-field":
                     raise _SchemaMismatch
                 _apply_bounds(field_node, field_schema["schema"], definitions, bounds,
-                              f"{path}.{name}", validate_default)
+                              f"{path}.{name}")
             except UnsupportedSchemaError:
                 raise
             except Exception:
                 _clear_bounds(field_node)
     elif kind == "int" and schema["type"] == "int":
         lo, hi = _int_bounds(schema, path)
-        if any(type(value) is int and (
-            (lo is not None and value < lo) or (hi is not None and value > hi)
-        ) for value in defaults):
-            return
         if lo is not None and lo != INT_MIN:
             node["min"] = lo
         if hi is not None and hi != INT_MAX:
@@ -271,6 +297,16 @@ def _node_of(annotation: Any, metadata: list[Any], path: str, bounds: _BoundSche
 
 
 def _struct_of(model: type[BaseModel], path: str, bounds: _BoundSchemas) -> dict[str, Any]:
+    if model in bounds.active_models:
+        _unsupported(path, "recursive model")
+    bounds.active_models.add(model)
+    try:
+        return _fields_of(model, path, bounds)
+    finally:
+        bounds.active_models.remove(model)
+
+
+def _fields_of(model: type[BaseModel], path: str, bounds: _BoundSchemas) -> dict[str, Any]:
     if model.model_config.get("extra") == "allow":
         _unsupported(path, "models with extra='allow' cannot be represented — the wire has no room for undeclared fields")
     fields = []
@@ -323,9 +359,9 @@ def to_ir(model: type[BaseModel]) -> dict[str, Any]:
     """Return the model's v0 struct schema; raise code ``unsupported`` with a field path.
 
     Field-level after/wrap/plain validators, decorated or Annotated at any container
-    level, drop integer bounds beneath them. Model validators keep field bounds: values
-    set outside field validation, e.g. by model validators, assignment or model_construct,
-    are checked against the declared bounds and may raise ``range``.
+    level, drop integer bounds beneath them. Values that bypass field validation through
+    unvalidated defaults, model validators, assignment or model_construct keep declared
+    bounds and may raise ``range``.
     """
     if not (isinstance(model, type) and issubclass(model, BaseModel)):
         _unsupported("$", "expected a pydantic BaseModel subclass")
@@ -370,9 +406,9 @@ class ModelCodec(Codec[Any]):
     value validation failures raise code ``validation``.
 
     Field-level after/wrap/plain validators, decorated or Annotated at any container
-    level, drop integer bounds beneath them. Model validators keep field bounds: values
-    set outside field validation, e.g. by model validators, assignment or model_construct,
-    are checked against the declared bounds and may raise ``range``.
+    level, drop integer bounds beneath them. Values that bypass field validation through
+    unvalidated defaults, model validators, assignment or model_construct keep declared
+    bounds and may raise ``range``.
     """
 
     def __init__(
