@@ -1,6 +1,6 @@
 import { columnarEligible, flattenLeaves } from "./columnar.js";
 import { HyperflyError } from "./errors.js";
-import { hasLoneSurrogate } from "./ir.js";
+import { hasLoneSurrogate, validateIR } from "./ir.js";
 import type { IRNode } from "./ir.js";
 
 export type GrammarCase = "lower" | "upper";
@@ -116,6 +116,7 @@ function own(value: Record<string, unknown>, key: string): boolean {
 }
 
 export function validateProfile(ir: IRNode, profile: Profile): void {
+  validateIR(ir);
   const fail = (message: string): never => {
     throw new HyperflyError("ir", `profile: ${message}`);
   };

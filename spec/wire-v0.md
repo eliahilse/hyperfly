@@ -75,6 +75,10 @@ All fixed-width values are **little-endian**. `float64` is IEEE 754 binary64.
 
 ## 4. Node encodings (plan `row` v1)
 
+An integer-valued field accepts any JSON number whose value is an integer in
+`[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
+fractional values and values beyond that range are invalid IR.
+
 ### 4.1 `bool`
 
 One byte: `0x00` false, `0x01` true. Decoders MUST reject other values.
@@ -135,6 +139,9 @@ trap `__proto__` assignment, so such names cannot round-trip or fingerprint
 identically everywhere. Field names, enum members, and string literals MUST
 also be well-formed Unicode: a lone surrogate has no portable representation
 and MUST be rejected at IR validation.
+
+**Closed objects.** IR and profile objects MUST NOT carry keys this
+specification does not define for their kind; such IR is invalid.
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
@@ -250,8 +257,8 @@ partial values.
 
 - Little-endian everywhere; no big-endian variant will exist.
 - The IR exclusions in §4.10 (portable field names, well-formed Unicode,
-  unambiguous null) are permanent: they exist so that every implementation
-  accepts exactly the same set of artifacts.
+  closed objects, unambiguous null) are permanent: they exist so that every
+  implementation accepts exactly the same set of artifacts.
 - The fingerprint identifies the full codec artifact. Future columnar, delta,
   dictionary, or profiled layouts are new `plan` values under the same
   serialization scheme; v0 reserves no in-band escape values for them.

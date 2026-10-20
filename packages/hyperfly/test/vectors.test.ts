@@ -15,11 +15,16 @@ function revive(value: unknown): unknown {
   return value;
 }
 
+function compileVector(v: { ir: unknown; profile?: unknown }): void {
+  const options = "profile" in v ? { plan: "columnar" as const, profile: revive(v.profile) as never, pack: false as const } : {};
+  compileIR(revive(v.ir) as IRNode, options);
+}
+
 describe("golden vectors: IR acceptance", () => {
   for (const v of ir.invalid) {
     test(v.name, () => {
       try {
-        compileIR(revive(v.ir) as IRNode);
+        compileVector(v);
       } catch (e) {
         expect((e as HyperflyError).code).toBe(v.error as ErrorCode);
         return;
@@ -28,7 +33,7 @@ describe("golden vectors: IR acceptance", () => {
     });
   }
   for (const v of ir.valid) {
-    test(v.name, () => expect(() => compileIR(revive(v.ir) as IRNode)).not.toThrow());
+    test(v.name, () => expect(() => compileVector(v)).not.toThrow());
   }
 });
 

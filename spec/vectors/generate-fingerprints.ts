@@ -96,8 +96,24 @@ for (const c of PROFILED) {
   out.push({ name: c.name, plan: "columnar", ir: c.ir, profile: c.profile, canonical, fingerprint: toHex(fingerprintOf(canonical)) } as never);
 }
 
-await Bun.write(
-  new URL("./fingerprints.json", import.meta.url).pathname,
-  JSON.stringify({ description: "IR → canonical artifact text → fingerprint (first 16 bytes of SHA-256, hex). Locks spec §5.", cases: out }, null, 2) + "\n",
-);
+// Zero is the integer 0 whatever its sign (spec §4). JSON.stringify writes -0 as 0, so
+// these IR texts are spliced in after serialization in place of a placeholder.
+const ZERO_TEXTS = [
+  { name: "literal-negative-zero", text: "-0" },
+  { name: "literal-negative-zero-float", text: "-0.0" },
+];
+const zeroCanonical = serializeArtifact({ kind: "literal", value: 0 }, "row");
+for (const { name, text } of ZERO_TEXTS) {
+  out.push({
+    name: `${name}@row`,
+    plan: "row",
+    ir: { kind: "literal", value: `<${text}>` },
+    canonical: zeroCanonical,
+    fingerprint: toHex(fingerprintOf(zeroCanonical)),
+  });
+}
+
+let json = JSON.stringify({ description: "IR → canonical artifact text → fingerprint (first 16 bytes of SHA-256, hex). Locks spec §5.", cases: out }, null, 2) + "\n";
+for (const { text } of ZERO_TEXTS) json = json.replace(`"<${text}>"`, text);
+await Bun.write(new URL("./fingerprints.json", import.meta.url).pathname, json);
 console.log("wrote fingerprints.json");

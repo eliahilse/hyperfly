@@ -62,8 +62,32 @@ function checkFieldName(name: string, path: string): void {
   }
 }
 
+const NODE_KEYS: Record<IRNode["kind"], readonly string[]> = {
+  bool: ["kind"],
+  int: ["kind", "min", "max"],
+  float64: ["kind"],
+  string: ["kind"],
+  bytes: ["kind"],
+  literal: ["kind", "value"],
+  enum: ["kind", "members"],
+  nullable: ["kind", "inner"],
+  array: ["kind", "element", "length"],
+  struct: ["kind", "fields"],
+};
+
+const FIELD_KEYS: readonly string[] = ["name", "type", "optional", "nullable"];
+
+function checkKeys(value: object, allowed: readonly string[], path: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) fail(path, `unknown key ${key}`);
+  }
+}
+
 export function validateIR(node: IRNode, path = "$"): void {
   if (!isObject(node)) fail(path, "IR node must be an object");
+  if (typeof node.kind === "string" && Object.prototype.hasOwnProperty.call(NODE_KEYS, node.kind)) {
+    checkKeys(node, NODE_KEYS[node.kind], path);
+  }
   switch (node.kind) {
     case "bool":
     case "float64":
@@ -84,11 +108,7 @@ export function validateIR(node: IRNode, path = "$"): void {
     }
     case "literal": {
       const v = node.value;
-      const ok =
-        v === null ||
-        typeof v === "string" ||
-        typeof v === "boolean" ||
-        (isSafeInt(v) && !Object.is(v, -0));
+      const ok = v === null || typeof v === "string" || typeof v === "boolean" || isSafeInt(v);
       if (!ok) fail(path, "literal must be string, boolean, null, or a safe integer");
       if (typeof v === "string") checkString(v, path, "literal string");
       return;
@@ -133,6 +153,7 @@ export function validateIR(node: IRNode, path = "$"): void {
       const seen = new Set<string>();
       for (const f of node.fields) {
         if (!isObject(f)) fail(path, "struct fields must be objects");
+        checkKeys(f, FIELD_KEYS, path);
         if (typeof f.name !== "string" || f.name.length === 0) fail(path, "field names must be non-empty strings");
         checkString(f.name, path, "field name");
         checkFieldName(f.name, path);

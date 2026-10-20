@@ -1,8 +1,9 @@
+import math
 import random
 
 import pytest
 
-from hyperfly import compile_ir
+from hyperfly import HyperflyError, compile_ir
 
 PRIMS = ["bool", "int", "bounded", "float64", "string", "bytes", "enum", "literal"]
 
@@ -91,3 +92,49 @@ def test_prose_columns_pack():
     plain = compile_ir(ir, plan="columnar", pack=False).encode_body(rows)
     assert len(packed) < len(plain) * 0.5
     assert compile_ir(ir, plan="columnar").decode_body(packed) == rows
+
+
+def test_negative_zero_matches_literal_zero():
+    codec = compile_ir({"kind": "literal", "value": 0})
+    assert codec.encode_body(-0.0) == codec.encode_body(0) == b""
+    with pytest.raises(HyperflyError) as err:
+        codec.encode_body(1.0)
+    assert err.value.code == "type"
+
+
+def test_integral_float_ir_compiles_to_integers():
+    floats = {"kind": "struct", "fields": [
+        {"name": "n", "type": {"kind": "int", "min": -0.0, "max": 9.0}},
+        {"name": "a", "type": {"kind": "array", "element": {"kind": "literal", "value": -0.0}, "length": 2.0}},
+    ]}
+    ints = {"kind": "struct", "fields": [
+        {"name": "n", "type": {"kind": "int", "min": 0, "max": 9}},
+        {"name": "a", "type": {"kind": "array", "element": {"kind": "literal", "value": 0}, "length": 2}},
+    ]}
+    codec = compile_ir(floats)
+    assert codec.ir == ints
+    assert type(codec.ir["fields"][1]["type"]["element"]["value"]) is int
+    assert codec.fingerprint == compile_ir(ints).fingerprint
+    assert codec.decode_body(codec.encode_body({"n": 3, "a": [0, -0.0]})) == {"n": 3, "a": [0, 0]}
+
+
+def test_float64_negative_zero_is_canonicalized_as_before():
+    codec = compile_ir({"kind": "float64"})
+    body = codec.encode_body(-0.0)
+    assert body == codec.encode_body(0.0) == bytes(8)
+    assert math.copysign(1.0, codec.decode_body(body)) == 1.0
+
+
+def test_integral_float_profile_compiles_to_integers():
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "s", "type": {"kind": "string"}}]}}
+    grammar = [{"lit": "id_"}, {"num": {"base": 16, "len": 4, "case": "lower"}}]
+    ints = {"version": 2, "shared": {"columns": [{"leaf": 0, "dict": ["a"], "grammar": grammar}]}}
+    floats = {"version": 2.0, "shared": {"columns": [{"leaf": -0.0, "dict": ["a"], "grammar": [
+        {"lit": "id_"}, {"num": {"base": 16.0, "len": 4.0, "case": "lower"}},
+    ]}]}}
+    codec = compile_ir(ir, plan="columnar", profile=floats)
+    assert codec.profile == ints
+    assert type(codec.profile["shared"]["columns"][0]["leaf"]) is int
+    assert codec.fingerprint == compile_ir(ir, plan="columnar", profile=ints).fingerprint
+    rows = [{"s": "a"}, {"s": "id_00ff"}]
+    assert codec.decode_body(codec.encode_body(rows)) == rows
