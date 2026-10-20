@@ -319,25 +319,29 @@ def _decode_int_value(node: dict[str, Any], raw: int, path: str) -> int:
 
 def _flatten_leaves(element: dict[str, Any]) -> list[tuple[tuple[str, ...], dict[str, Any]]] | None:
     out: list[tuple[tuple[str, ...], dict[str, Any]]] = []
-
-    def walk(node: dict[str, Any], segs: tuple[str, ...]) -> bool:
+    # a struct to open, or (None, segments, field) for a leaf to emit in its place
+    stack: list[tuple[dict[str, Any] | None, tuple[str, ...], Any]] = [(element, (), None)]
+    while stack:
+        node, segs, leaf = stack.pop()
+        if node is None:
+            out.append((segs, leaf))
+            continue
         fields = node.get("fields", [])
         if not fields:
-            return False
+            return None
+        pending: list[tuple[dict[str, Any] | None, tuple[str, ...], Any]] = []
         for f in fields:
             t = f["type"]
             if t["kind"] == "struct":
                 if f.get("optional") or f.get("nullable"):
-                    return False
-                if not walk(t, segs + (f["name"],)):
-                    return False
+                    return None
+                pending.append((t, segs + (f["name"],), None))
             elif t["kind"] in LEAF_KINDS:
-                out.append((segs + (f["name"],), f))
+                pending.append((None, segs + (f["name"],), f))
             else:
-                return False
-        return True
-
-    return out if walk(element, ()) else None
+                return None
+        stack.extend(reversed(pending))
+    return out
 
 
 def _columnar_eligible(node: dict[str, Any]) -> bool:
@@ -349,33 +353,37 @@ _Leaves = list[tuple[tuple[str, ...], dict[str, Any]]]
 
 def _index_arrays(node: dict[str, Any], columnar: bool, out: dict[int, tuple[_Leaves | None, bool]]) -> None:
     """Per array node: its columnar leaves (None when row-encoded) and whether its element is zero-bit."""
-    kind = node["kind"]
-    if kind == "array":
-        element = node["element"]
-        if id(node) not in out:
-            leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
-            out[id(node)] = (leaves, not has_payload(element))
-        _index_arrays(element, columnar, out)
-    elif kind == "nullable":
-        _index_arrays(node["inner"], columnar, out)
-    elif kind == "struct":
-        for f in node["fields"]:
-            _index_arrays(f["type"], columnar, out)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        kind = current["kind"]
+        if kind == "array":
+            element = current["element"]
+            if id(current) not in out:
+                leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
+                out[id(current)] = (leaves, not has_payload(element))
+            stack.append(element)
+        elif kind == "nullable":
+            stack.append(current["inner"])
+        elif kind == "struct":
+            stack.extend(reversed([f["type"] for f in current["fields"]]))
 
 
 def _column_fields(node: dict[str, Any], out: list[dict[str, Any]]) -> None:
     """The field of every columnar leaf under `node`, in ordinal order."""
-    kind = node["kind"]
-    if kind == "array":
-        if _columnar_eligible(node):
-            out.extend(f for _segs, f in _flatten_leaves(node["element"]) or ())
-        else:
-            _column_fields(node["element"], out)
-    elif kind == "nullable":
-        _column_fields(node["inner"], out)
-    elif kind == "struct":
-        for f in node["fields"]:
-            _column_fields(f["type"], out)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        kind = current["kind"]
+        if kind == "array":
+            if _columnar_eligible(current):
+                out.extend(f for _segs, f in _flatten_leaves(current["element"]) or ())
+            else:
+                stack.append(current["element"])
+        elif kind == "nullable":
+            stack.append(current["inner"])
+        elif kind == "struct":
+            stack.extend(reversed([f["type"] for f in current["fields"]]))
 
 
 _ABSENT: Any = object()
@@ -2757,22 +2765,25 @@ _Shape = tuple[list[str], list[Any]]
 def _shape(leaves: _Leaves, level: int, lo: int, hi: int) -> _Shape:
     """Key names and, per key, a leaf index or the nested struct's own shape, for the
     leaves in [lo, hi), which share their first `level` segments."""
-    names: list[str] = []
-    entries: list[Any] = []
-    index = lo
-    while index < hi:
-        segs = leaves[index][0]
-        names.append(segs[level])
-        if len(segs) == level + 1:
-            entries.append(index)
-            index += 1
-            continue
-        end = index + 1
-        while end < hi and len(leaves[end][0]) > level + 1 and leaves[end][0][level] == segs[level]:
-            end += 1
-        entries.append(_shape(leaves, level + 1, index, end))
-        index = end
-    return names, entries
+    shape: _Shape = ([], [])
+    stack = [(shape, level, lo, hi)]
+    while stack:
+        (names, entries), level, index, hi = stack.pop()
+        while index < hi:
+            segs = leaves[index][0]
+            names.append(segs[level])
+            if len(segs) == level + 1:
+                entries.append(index)
+                index += 1
+                continue
+            end = index + 1
+            while end < hi and len(leaves[end][0]) > level + 1 and leaves[end][0][level] == segs[level]:
+                end += 1
+            nested: _Shape = ([], [])
+            entries.append(nested)
+            stack.append((nested, level + 1, index, end))
+            index = end
+    return shape
 
 
 def _assemble(count: int, shape: _Shape, columns: list[_Column]) -> list[dict[str, Any]]:

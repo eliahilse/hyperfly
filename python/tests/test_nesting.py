@@ -119,12 +119,17 @@ def test_artifact_nested_513_deep_is_rejected(chain, entry, frames):
     {"kind": "enum", "members": ["a"]},
     {"kind": "struct", "fields": []},
     {"kind": "struct", "fields": [{"name": "a", "type": {"kind": "int", "min": 1.0}}]},
+    {"kind": "struct", "fields": [{"name": "a", "type": {"kind": "enum", "members": ["x"]}}]},
+    {"kind": "struct", "fields": [{"name": "a", "type": {"kind": "bool"}}, {"name": "b", "type": {"kind": "struct", "fields": []}}]},
 ])
 def test_nesting_counts_the_canonical_containers(leaf):
     ir = array_chain(DEEPEST - json_depth(leaf) + 1, leaf)
     assert json_depth(json.loads(compile_ir(ir).artifact)) == 512
-    with pytest.raises(HyperflyError, match="artifact nests deeper than 512"):
-        validate_ir({"kind": "array", "element": ir})
+    assert json_depth(json.loads(serialize_artifact(ir))) == 512
+    deeper = {"kind": "array", "element": ir}
+    for check in (validate_ir, serialize_node, serialize_artifact):
+        with pytest.raises(HyperflyError, match="artifact nests deeper than 512"):
+            check(deeper)
 
 
 def test_nesting_ignores_input_the_artifact_drops():
@@ -171,12 +176,36 @@ def outcome(frames, fn):
     return "ok"
 
 
-@pytest.mark.parametrize("plan", ["row", "columnar"])
-def test_compile_and_train_past_the_stack_are_ir_errors(plan):
-    ir = array_chain(DEEPEST)
-    outcomes = {outcome(frames, lambda: compile_ir(ir, plan=plan)) for frames in frame_sweep()}
-    outcomes |= {outcome(frames, lambda: train(ir, [[]])) for frames in frame_sweep()}
-    assert outcomes == {"ok", "ir"}
+def cap_cases():
+    profiled = array_chain(507, TWO_STRINGS)
+    profiled_value = nested_value(506, [{"a": "id_01", "b": "one"}])
+    cases = []
+    for chain in sorted(CHAINS):
+        ir = CHAINS[chain](DEEPEST)
+        cases += [
+            (f"{chain} compile row", lambda ir=ir: compile_ir(ir)),
+            (f"{chain} compile columnar", lambda ir=ir: compile_ir(ir, plan="columnar")),
+            (f"{chain} Codec", lambda ir=ir: Codec(ir, plan="columnar")),
+            (f"{chain} train", lambda ir=ir: train(ir, [[]])),
+        ]
+    return cases + [
+        ("profiled compile", lambda: compile_ir(profiled, plan="columnar", profile=DEEPEST_PROFILE)),
+        ("profiled validate_profile", lambda: validate_profile(profiled, DEEPEST_PROFILE)),
+        ("profiled train", lambda: train(profiled, [profiled_value, profiled_value])),
+    ]
+
+
+def test_compile_validate_profile_and_train_work_at_any_caller_depth():
+    for name, run in cap_cases():
+        expected = run()
+        for frames in frame_sweep():
+            result = at_depth(frames, run)
+            if name.endswith("train"):
+                assert result == expected, (name, frames)
+            elif name.endswith("validate_profile"):
+                assert result is None
+            else:
+                assert result.fingerprint == expected.fingerprint, (name, frames)
 
 
 def struct_rows(levels):
@@ -476,3 +505,144 @@ def test_ir_copies_keep_tuples_and_plain_dicts():
         assert x["type"] is y["type"]["element"]
         assert x["type"] is not shared
     assert codec.encode_body({"x": "b", "y": ["a"]}) == compile_ir(copy.deepcopy(ir)).encode_body({"x": "b", "y": ["a"]})
+
+
+def test_json_copy_refuses_cyclic_data():
+    from hyperfly._ir import json_copy
+
+    loop = []
+    loop.append({"x": loop})
+    with pytest.raises(ValueError, match="cannot copy cyclic data"):
+        json_copy(loop)
+    knot = {}
+    knot["self"] = (knot,)
+    with pytest.raises(ValueError, match="cannot copy cyclic data"):
+        json_copy(knot)
+    shared = [1]
+    assert json_copy({"a": shared, "b": (shared, shared)}) == {"a": [1], "b": ([1], [1])}
+
+
+def reference_walks(ir):
+    """The recursive column walks the iterative ones replaced, as references."""
+    def flatten(element):
+        out = []
+
+        def walk(node, segs):
+            fields = node.get("fields", [])
+            if not fields:
+                return False
+            for f in fields:
+                t = f["type"]
+                if t["kind"] == "struct":
+                    if f.get("optional") or f.get("nullable") or not walk(t, segs + (f["name"],)):
+                        return False
+                elif t["kind"] in ("bool", "int", "float64", "string", "bytes", "enum", "literal"):
+                    out.append((segs + (f["name"],), f))
+                else:
+                    return False
+            return True
+
+        return out if walk(element, ()) else None
+
+    def eligible(node):
+        return node["element"].get("kind") == "struct" and flatten(node["element"]) is not None
+
+    def payload(node):
+        kind = node["kind"]
+        if kind == "literal":
+            return False
+        if kind == "struct":
+            return any(f.get("optional") or f.get("nullable") or payload(f["type"]) for f in node["fields"])
+        if kind == "array":
+            length = node.get("length")
+            return length is None or (length > 0 and payload(node["element"]))
+        return True
+
+    def count(node):
+        kind = node["kind"]
+        if kind == "array":
+            if eligible(node):
+                return len(flatten(node["element"]))
+            return count(node["element"])
+        if kind == "nullable":
+            return count(node["inner"])
+        if kind == "struct":
+            return sum(count(f["type"]) for f in node["fields"])
+        return 0
+
+    refs, arrays, fields, payloads, counts = [], [], [], [], []
+    next_array = [0]
+
+    def walk(node):
+        kind = node["kind"]
+        counts.append(count(node))
+        payloads.append(payload(node))
+        if kind == "array":
+            arrays.append(flatten(node["element"]) if node["element"].get("kind") == "struct" else None)
+            if eligible(node):
+                leaves = flatten(node["element"])
+                refs.extend((f["type"]["kind"], next_array[0]) for _segs, f in leaves)
+                fields.extend(f for _segs, f in leaves)
+                next_array[0] += 1
+                return
+            walk(node["element"])
+        elif kind == "nullable":
+            walk(node["inner"])
+        elif kind == "struct":
+            for f in node["fields"]:
+                walk(f["type"])
+
+    walk(ir)
+    return refs, arrays, fields, payloads, counts
+
+
+def iterative_walks(ir):
+    from hyperfly._codec import _column_fields, _flatten_leaves, _index_arrays
+    from hyperfly._ir import _enumerate_column_refs, column_count, has_payload
+
+    counts, payloads, arrays = [], [], []
+    index = {}
+    _index_arrays(ir, True, index)
+    stack = [ir]
+    while stack:
+        node = stack.pop()
+        counts.append(column_count(node))
+        payloads.append(has_payload(node))
+        kind = node["kind"]
+        if kind == "array":
+            arrays.append(index[id(node)][0])
+            if node["element"].get("kind") == "struct" and _flatten_leaves(node["element"]) is not None:
+                continue
+            stack.append(node["element"])
+        elif kind == "nullable":
+            stack.append(node["inner"])
+        elif kind == "struct":
+            stack.extend(reversed([f["type"] for f in node["fields"]]))
+    fields = []
+    _column_fields(ir, fields)
+    return _enumerate_column_refs(ir), arrays, fields, payloads, counts
+
+
+def test_iterative_column_walks_match_the_recursive_ones():
+    from hyperfly._codec import _shape
+
+    zero_bit = {"kind": "struct", "fields": [
+        {"name": "k", "type": {"kind": "literal", "value": 1}},
+        {"name": "f", "type": {"kind": "array", "element": {"kind": "bool"}, "length": 0}},
+        {"name": "g", "type": {"kind": "array", "element": {"kind": "literal", "value": None}, "length": 3}},
+    ]}
+    nested = {"kind": "array", "element": {"kind": "struct", "fields": [
+        {"name": "a", "type": {"kind": "struct", "fields": [
+            {"name": "b", "type": {"kind": "int"}},
+            {"name": "c", "type": {"kind": "struct", "fields": [{"name": "d", "type": {"kind": "string"}}]}},
+        ]}},
+        {"name": "e", "type": {"kind": "string"}},
+        {"name": "z", "type": zero_bit},
+    ]}}
+    irs = fixture_irs() + [MIXED, zero_bit, nested, {"kind": "array", "element": zero_bit}, array_chain(DEEPEST),
+                           struct_chain(DEEPEST), array_chain(DEEPEST - 6, nested)]
+    for ir in irs:
+        assert iterative_walks(ir) == reference_walks(ir)
+    eligible = {"kind": "array", "element": {**nested["element"], "fields": nested["element"]["fields"][:2]}}
+    leaves = reference_walks(eligible)[1][0]
+    assert _shape(leaves, 0, 0, len(leaves)) == (["a", "e"], [(["b", "c"], [0, (["d"], [1])]), 2])

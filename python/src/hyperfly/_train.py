@@ -34,40 +34,43 @@ def _collect(
     batches: dict[int, list[list[str]]],
     arrays: list[tuple[int, dict[int, list[str | None]]]],
 ) -> None:
-    if value is None:
-        return
-    kind = node["kind"]
-    if kind == "array":
-        if not isinstance(value, list):
-            return
-        if _columnar_eligible(node):
-            leaves = _flatten_leaves(node["element"])
-            if leaves is None:
-                return
-            columns: dict[int, list[str | None]] = {}
-            for i, (segs, field) in enumerate(leaves):
-                if field["type"]["kind"] != "string":
+    stack = [(node, value, base)]
+    while stack:
+        node, value, base = stack.pop()
+        if value is None:
+            continue
+        kind = node["kind"]
+        if kind == "array":
+            if not isinstance(value, list):
+                continue
+            if _columnar_eligible(node):
+                leaves = _flatten_leaves(node["element"])
+                if leaves is None:
                     continue
-                aligned = []
-                for row in value:
-                    candidate = _leaf_value(row, segs)
-                    aligned.append(
-                        candidate if isinstance(candidate, str) and not _has_lone_surrogate(candidate) else None
-                    )
-                columns[base + i] = aligned
-                batches.setdefault(base + i, []).append([entry for entry in aligned if entry is not None])
-            arrays.append((refs[base][1] if base < len(refs) else -1, columns))
-            return
-        for item in value:
-            _collect(node["element"], item, base, refs, batches, arrays)
-    elif kind == "nullable":
-        _collect(node["inner"], value, base, refs, batches, arrays)
-    elif kind == "struct" and isinstance(value, dict):
-        field_column = base
-        for field in node["fields"]:
-            field_base = field_column
-            field_column += column_count(field["type"])
-            _collect(field["type"], value.get(field["name"]), field_base, refs, batches, arrays)
+                columns: dict[int, list[str | None]] = {}
+                for i, (segs, field) in enumerate(leaves):
+                    if field["type"]["kind"] != "string":
+                        continue
+                    aligned = []
+                    for row in value:
+                        candidate = _leaf_value(row, segs)
+                        aligned.append(
+                            candidate if isinstance(candidate, str) and not _has_lone_surrogate(candidate) else None
+                        )
+                    columns[base + i] = aligned
+                    batches.setdefault(base + i, []).append([entry for entry in aligned if entry is not None])
+                arrays.append((refs[base][1] if base < len(refs) else -1, columns))
+                continue
+            stack.extend((node["element"], item, base) for item in reversed(value))
+        elif kind == "nullable":
+            stack.append((node["inner"], value, base))
+        elif kind == "struct" and isinstance(value, dict):
+            pending = []
+            field_column = base
+            for field in node["fields"]:
+                pending.append((field["type"], value.get(field["name"]), field_column))
+                field_column += column_count(field["type"])
+            stack.extend(reversed(pending))
 
 
 def _string_wire_length(value: str) -> int:
