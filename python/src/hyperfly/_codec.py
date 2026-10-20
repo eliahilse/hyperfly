@@ -968,15 +968,22 @@ def _encode_string_column(
         out.append(0)
         return
     encoded = []
+    room = budget.byte_cap - budget.bytes - budget.owed
     for i, value in enumerate(values):
         data = _utf8(value, f"{path}[{i}]")
-        if len(data) > ctx.max_byte_length:
+        length = len(data)
+        if length > ctx.max_byte_length:
             _efail(
                 "limit",
                 f"{path}[{i}]",
-                f"string of {len(data)} bytes exceeds the codec limit",
+                f"string of {length} bytes exceeds the codec limit",
             )
-        budget.charge_bytes(len(data), f"{path}[{i}]", EncodeError)
+        if length > room:
+            budget.charge_bytes(length, f"{path}[{i}]", EncodeError)
+            room = budget.byte_cap - budget.bytes - budget.owed
+        else:
+            budget.bytes += length
+            room -= length
         encoded.append(data)
     plain_cost = sum(uleb_len(len(b)) + len(b) for b in encoded)
 
@@ -1083,6 +1090,7 @@ def _encode_enum_column(
     out: bytearray, node: dict[str, Any], values: list[Any], path: str, budget: Budget
 ) -> None:
     indices = []
+    room = budget.byte_cap - budget.bytes - budget.owed
     for i, value in enumerate(values):
         if type(value) is not str:
             value = getattr(value, "value", value)
@@ -1090,7 +1098,13 @@ def _encode_enum_column(
             indices.append(node["members"].index(value))
         except (ValueError, TypeError):
             _efail("type", f"{path}[{i}]", f"{value!r} is not an enum member")
-        budget.charge_bytes(_text_bytes(value), f"{path}[{i}]", EncodeError)
+        length = _text_bytes(value)
+        if length > room:
+            budget.charge_bytes(length, f"{path}[{i}]", EncodeError)
+            room = budget.byte_cap - budget.bytes - budget.owed
+        else:
+            budget.bytes += length
+            room -= length
     _pack_bits(out, indices, _bit_width(len(node["members"]) - 1))
 
 
