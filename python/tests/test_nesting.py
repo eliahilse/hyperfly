@@ -41,11 +41,54 @@ def struct_chain(levels):
 
 
 def json_depth(value):
-    if isinstance(value, dict):
-        return 1 + max(map(json_depth, value.values()), default=0)
-    if isinstance(value, list):
-        return 1 + max(map(json_depth, value), default=0)
-    return 0
+    """Container nesting of JSON-shaped data, without recursion: before Python 3.12 a
+    C call such as map() counts against the recursion limit too."""
+    deepest = 0
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            item = item.values()
+        elif not isinstance(item, (list, tuple)):
+            continue
+        deepest = max(deepest, depth)
+        stack.extend((inner, depth + 1) for inner in item)
+    return deepest
+
+
+def text_depth(text):
+    """Container nesting of JSON text, read without json.loads, whose C parser counts
+    against the recursion limit before Python 3.12."""
+    deepest = depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif char in "]}":
+            depth -= 1
+    return deepest
+
+
+def round_trips(codec, value, frames=0):
+    """Encode then decode `value`. Values recurse about one frame per level from Python
+    3.12 and two before it, so there a deep value may fail with depth instead."""
+    body = at_depth(frames, lambda: codec.encode(value))
+    try:
+        decoded = at_depth(frames, lambda: codec.decode(body))
+    except HyperflyError as error:
+        assert sys.version_info < (3, 12) and error.code == "depth", error
+        return
+    assert decoded == value
 
 
 def deep_hints(levels):
@@ -75,7 +118,7 @@ def test_chains_nest_exactly(chain):
     assert json_depth(CHAINS[chain](DEEPEST + 1)) == DEEPEST + 1
     ir = CHAINS[chain](DEEPEST)
     assert json_depth(ir) == DEEPEST
-    assert json_depth(json.loads(serialize_artifact(ir))) == 512
+    assert text_depth(serialize_artifact(ir)) == 512
 
 
 def ir_entry_points(ir):
@@ -124,8 +167,8 @@ def test_artifact_nested_513_deep_is_rejected(chain, entry, frames):
 ])
 def test_nesting_counts_the_canonical_containers(leaf):
     ir = array_chain(DEEPEST - json_depth(leaf) + 1, leaf)
-    assert json_depth(json.loads(compile_ir(ir).artifact)) == 512
-    assert json_depth(json.loads(serialize_artifact(ir))) == 512
+    assert text_depth(compile_ir(ir).artifact) == 512
+    assert text_depth(serialize_artifact(ir)) == 512
     deeper = {"kind": "array", "element": ir}
     for check in (validate_ir, serialize_node, serialize_artifact):
         with pytest.raises(HyperflyError, match="artifact nests deeper than 512"):
@@ -250,8 +293,7 @@ def test_deep_values_encode_under_a_raised_max_depth(plan):
     value = 7
     for _ in range(500):
         value = [value]
-    body = at_depth(100, lambda: codec.encode_body(value))
-    assert at_depth(100, lambda: codec.decode_body(body)) == value
+    round_trips(codec, value, frames=100)
 
 
 def test_deep_values_past_the_stack_are_coded_errors():
@@ -285,9 +327,9 @@ def test_profiles_at_their_deepest_canonical_shape_work_with_ir_at_the_cap():
     validate_profile(ir, DEEPEST_PROFILE)
     limits = dataclasses.replace(Limits(), max_depth=512)
     codec = compile_ir(ir, plan="columnar", profile=DEEPEST_PROFILE, limits=limits, pack=False)
-    assert json_depth(json.loads(codec.artifact)) == 512
+    assert text_depth(codec.artifact) == 512
     assert codec.artifact == serialize_artifact(ir, "columnar", DEEPEST_PROFILE)
-    assert codec.decode(codec.encode(value)) == value
+    round_trips(codec, value)
     assert train(ir, [value, value]) is not None
     deeper = {"kind": "array", "element": ir}
     for check in (
