@@ -118,8 +118,8 @@ fn row_value(i: i64) -> Value {
     ])
 }
 
-fn columnar_ir() -> Node {
-    array(Node::Struct(vec![
+fn columnar_ir(eligible: bool) -> Node {
+    let mut fields = vec![
         field("id", int()),
         nullable(field("price", Node::Float64)),
         optional(field("flag", Node::Bool)),
@@ -139,11 +139,18 @@ fn columnar_ir() -> Node {
                 ),
             ]),
         ),
-        field("tags", array(Node::Str)),
-    ]))
+        optional(field("blob", Node::Bytes)),
+        field("lit", Node::Literal(Literal::Int(7))),
+        field("delta", int()),
+        nullable(field("reading", Node::Float64)),
+    ];
+    if !eligible {
+        fields.push(field("tags", array(Node::Str)));
+    }
+    array(Node::Struct(fields))
 }
 
-fn columnar_value(rows: i64) -> Value {
+fn columnar_value(rows: i64, eligible: bool) -> Value {
     Value::Array(
         (0..rows)
             .map(|i| {
@@ -172,7 +179,25 @@ fn columnar_value(rows: i64) -> Value {
                     "meta",
                     obj(vec![("region", s("eu")), ("weight", Value::Int(i * 7))]),
                 ));
-                entries.push(("tags", Value::Array(vec![s("t"); (i % 3) as usize])));
+                if i % 4 != 3 {
+                    entries.push(("blob", Value::Bytes(vec![i as u8; (i % 5) as usize])));
+                }
+                entries.push(("lit", Value::Int(7)));
+                entries.push((
+                    "delta",
+                    Value::Int(if i % 9 == 4 { 1 << 40 } else { i % 6 }),
+                ));
+                entries.push((
+                    "reading",
+                    if i % 5 == 0 {
+                        Value::Null
+                    } else {
+                        Value::Float((i as f64).sin() * 1e3)
+                    },
+                ));
+                if !eligible {
+                    entries.push(("tags", Value::Array(vec![s("t"); (i % 3) as usize])));
+                }
                 obj(entries)
             })
             .collect(),
@@ -293,12 +318,22 @@ fn cases() -> &'static [Case] {
                 ])],
             ),
             case(
-                Codec::compile(columnar_ir(), Plan::Columnar, Limits::default(), true).unwrap(),
-                vec![columnar_value(1), columnar_value(9), columnar_value(40)],
+                Codec::compile(columnar_ir(true), Plan::Columnar, Limits::default(), true).unwrap(),
+                vec![
+                    columnar_value(1, true),
+                    columnar_value(9, true),
+                    columnar_value(40, true),
+                ],
             ),
             case(
-                Codec::compile(columnar_ir(), Plan::Columnar, Limits::default(), false).unwrap(),
-                vec![columnar_value(12)],
+                Codec::compile(columnar_ir(true), Plan::Columnar, Limits::default(), false)
+                    .unwrap(),
+                vec![columnar_value(12, true)],
+            ),
+            case(
+                Codec::compile(columnar_ir(false), Plan::Columnar, Limits::default(), true)
+                    .unwrap(),
+                vec![columnar_value(9, false)],
             ),
             case(
                 Codec::compile_with_profile(
@@ -399,4 +434,16 @@ fn seeds_round_trip() {
             assert_eq!(&c.codec.encode_body(&value).unwrap(), seed);
         }
     }
+}
+
+#[test]
+fn columnar_case_uses_the_columnar_layout() {
+    let value = columnar_value(9, true);
+    let body = |plan| {
+        Codec::compile(columnar_ir(true), plan, Limits::default(), true)
+            .unwrap()
+            .encode_body(&value)
+            .unwrap()
+    };
+    assert_ne!(body(Plan::Columnar), body(Plan::Row));
 }
