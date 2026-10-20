@@ -51,6 +51,8 @@ enum LeafValues {
     Float(Vec<f64>),
     Bool(Vec<bool>),
     Str(Vec<String>),
+    Bytes(Vec<Vec<u8>>),
+    Repeated(Value, usize),
     Values(Vec<Value>),
 }
 
@@ -69,6 +71,10 @@ impl LeafValues {
             LeafValues::Str(values) => values
                 .get_mut(index)
                 .map(|value| Value::Str(std::mem::take(value))),
+            LeafValues::Bytes(values) => values
+                .get_mut(index)
+                .map(|value| Value::Bytes(std::mem::take(value))),
+            LeafValues::Repeated(value, count) => (index < *count).then(|| value.clone()),
             LeafValues::Values(values) => values
                 .get_mut(index)
                 .map(|value| std::mem::replace(value, Value::Null)),
@@ -1382,6 +1388,38 @@ impl Codec {
                 )?),
                 Node::Enum(members) => {
                     LeafValues::Str(dec_enum_column(r, members, slots.len(), &field_path)?)
+                }
+                Node::Literal(_) => match slots.first() {
+                    Some(row) => LeafValues::Repeated(
+                        self.dec(
+                            r,
+                            &f.ty,
+                            &format!("{path}[{row}]"),
+                            depth.saturating_add(2),
+                            ordinal_base + leaf_index,
+                        )?,
+                        slots.len(),
+                    ),
+                    None => LeafValues::Values(Vec::new()),
+                },
+                Node::Bytes => {
+                    let mut out = Vec::with_capacity(slots.len());
+                    for row in &slots {
+                        let row_path = format!("{path}[{row}]");
+                        match self.dec(
+                            r,
+                            &f.ty,
+                            &row_path,
+                            depth.saturating_add(2),
+                            ordinal_base + leaf_index,
+                        )? {
+                            Value::Bytes(bytes) => out.push(bytes),
+                            _ => {
+                                return err(ErrorCode::Type, format!("{row_path}: expected bytes"))
+                            }
+                        }
+                    }
+                    LeafValues::Bytes(out)
                 }
                 t => {
                     let mut out = Vec::with_capacity(slots.len());
