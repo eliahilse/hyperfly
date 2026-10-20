@@ -20,7 +20,7 @@ from typing import Any, Callable, Iterable, Literal, NamedTuple, cast
 from weakref import WeakKeyDictionary
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
-from ._wire import INT_MAX, DecodeError, EncodeError, HyperflyError
+from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError
 from .registry import CodecRegistry
 
 HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly"
@@ -438,36 +438,86 @@ def _loads(body: bytes | str) -> Any:
         raise DecodeError("json", f"malformed JSON body: {error}") from error
 
 
-def _json_bytes(value: Any, registry: CodecRegistry) -> Any:
+def _convert_json(value: Any, registry: CodecRegistry) -> Any:
     fingerprints = registry.fingerprints
     codec = registry.get(fingerprints[0]) if fingerprints else None
     if codec is None:
         return value
     root = [value]
-    stack: list[tuple[dict[str, Any], Any, str | int]] = [(codec._ir, root, 0)]
+    stack: list[tuple[dict[str, Any], Any, str | int, str]] = [(codec._ir, root, 0, "$")]
     while stack:
-        node, parent, key = stack.pop()
+        node, parent, key, path = stack.pop()
         item = parent[key]
         kind = node["kind"]
-        if kind == "bytes":
+        if kind == "bool":
+            if type(item) is not bool:
+                raise DecodeError("json", f"{path}: expected boolean")
+        elif kind == "int" or (kind == "literal" and type(node["value"]) in (int, float)):
+            if (type(item) not in (int, float) or not INT_MIN <= item <= INT_MAX
+                    or (type(item) is float and not item.is_integer())):
+                raise DecodeError("json", f"{path}: expected integral number in the safe integer domain")
+            integer = int(item)
+            if kind == "literal":
+                if integer != node["value"]:
+                    raise DecodeError("json", f"{path}: literal mismatch")
+            else:
+                lo, hi = node.get("min"), node.get("max")
+                if (lo is not None and integer < lo) or (hi is not None and integer > hi):
+                    raise DecodeError("json", f"{path}: integer outside declared bounds")
+            parent[key] = integer
+        elif kind == "float64":
+            if type(item) not in (int, float):
+                raise DecodeError("json", f"{path}: expected number")
             try:
-                if not isinstance(item, str):
-                    raise ValueError("expected a base64 string")
+                number = float(item)
+            except OverflowError as error:
+                raise DecodeError("json", f"{path}: expected finite float64") from error
+            if not math.isfinite(number):
+                raise DecodeError("json", f"{path}: expected finite float64")
+            parent[key] = number
+        elif kind in ("string", "enum"):
+            if type(item) is not str:
+                raise DecodeError("json", f"{path}: expected string")
+            if kind == "enum" and item not in node["members"]:
+                raise DecodeError("json", f"{path}: unknown enum member")
+        elif kind == "literal":
+            literal = node["value"]
+            if type(item) is not type(literal) or item != literal:
+                raise DecodeError("json", f"{path}: literal mismatch")
+        elif kind == "bytes":
+            if not isinstance(item, str):
+                raise DecodeError("json", f"{path}: expected a base64 string")
+            try:
                 decoded = base64.b64decode(item, validate=True)
                 if base64.b64encode(decoded).decode("ascii") != item:
                     raise ValueError("expected canonical padded base64")
             except (ValueError, binascii.Error) as error:
-                raise DecodeError("json", f"malformed JSON bytes: {error}") from error
+                raise DecodeError("json", f"{path}: expected canonical padded base64") from error
             parent[key] = decoded
-        elif kind == "nullable" and item is not None:
-            stack.append((node["inner"], parent, key))
-        elif kind == "array" and isinstance(item, list):
-            stack.extend((node["element"], item, index) for index in range(len(item)))
-        elif kind == "struct" and isinstance(item, dict):
-            for field in node["fields"]:
+        elif kind == "nullable":
+            if item is not None:
+                stack.append((node["inner"], parent, key, path))
+        elif kind == "array":
+            if not isinstance(item, list):
+                raise DecodeError("json", f"{path}: expected array")
+            if "length" in node and len(item) != node["length"]:
+                raise DecodeError("json", f"{path}: array length does not match declared length")
+            stack.extend((node["element"], item, index, f"{path}[{index}]") for index in reversed(range(len(item))))
+        elif kind == "struct":
+            if not isinstance(item, dict):
+                raise DecodeError("json", f"{path}: expected object")
+            converted: dict[str, Any] = {}
+            parent[key] = converted
+            for field in reversed(node["fields"]):
                 name = field["name"]
-                if name in item and not (field.get("nullable") and item[name] is None):
-                    stack.append((field["type"], item, name))
+                field_path = f"{path}.{name}"
+                if name not in item:
+                    if not field.get("optional"):
+                        raise DecodeError("json", f"{field_path}: missing required field")
+                    continue
+                converted[name] = item[name]
+                if not (field.get("nullable") and item[name] is None):
+                    stack.append((field["type"], converted, name, field_path))
     return root[0]
 
 
@@ -475,16 +525,17 @@ def decode_response(content_type: str | None, body: bytes | str, registry: Codec
     """Returns (kind, value) where kind is 'json', 'hyperfly', or 'unknown-codec'.
 
     A codec the client does not hold is not something it can recover from by guessing,
-    so it is reported rather than attempted. Malformed JSON raises code ``json``;
-    malformed binary raises the codec's decode errors.
-    JSON uses the first registered codec's bytes positions to restore canonical
-    padded base64 strings to bytes; invalid bytes values also raise ``json``.
-    Other JSON values stay plain, even for a validating model codec. An empty
-    registry leaves parsed JSON unchanged.
+    so it is reported rather than attempted. Invalid UTF-8 or malformed JSON raises
+    code ``json``; malformed binary raises the codec's decode errors.
+    JSON is converted and checked against the first registered codec's schema:
+    canonical padded base64 becomes bytes, integral numbers become ints, and
+    unknown struct keys are dropped. Conversion failures raise ``json`` with the
+    failing path. Results stay plain even for a validating model codec; an empty
+    registry leaves parsed JSON unchanged. Conversion walks the schema iteratively.
     """
     if _essence(content_type) != HYPERFLY_MEDIA_TYPE:
         value = _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
-        return "json", _json_bytes(value, registry)
+        return "json", _convert_json(value, registry)
     data = _utf8(body) if isinstance(body, str) else bytes(body)
     fingerprint = _envelope_fingerprint(data)
     codec = registry.get(fingerprint)
@@ -544,8 +595,10 @@ def read_body(
     """Read a request body, refusing it with 413 as soon as it passes max_bytes.
 
     Bytes are counted as chunks arrive, so no chunk past the one that crosses the
-    bound is pulled; Content-Length only rejects early. A chunk source that fails is
-    a 400. Invalid max_bytes raises code ``options``.
+    bound is pulled. Content-Length rejects before reading only when its ASCII
+    digits, trimmed of SP/HTAB, exceed the bound; leading zeros are harmless and
+    every other spelling is ignored. A chunk source that fails is a 400. Invalid
+    max_bytes raises code ``options``.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     if content_length is not None and _exceeds(content_length, max_bytes):
@@ -626,10 +679,13 @@ def decode_request(
     a Hyperfly-Codec header that contradicts it, 415 with Hyperfly-Offer for an
     unknown fingerprint, 400 for a body that fails to decode. Invalid max_bytes
     raises HyperflyError with code ``options``.
-    JSON uses the first registered codec to restore bytes from canonical padded
-    base64; invalid bytes values raise 400 with reason malformed-json. Other JSON
-    values stay plain, even for a validating model codec. An empty registry leaves
-    parsed JSON unchanged.
+    JSON is converted and checked iteratively against the first registered codec's
+    schema: canonical padded base64 becomes bytes, integral numbers become ints,
+    and unknown struct keys are dropped. Conversion failures raise 400 with reason
+    malformed-json and a path-bearing DecodeError cause. Results stay plain even
+    for a validating model codec; an empty registry leaves parsed JSON unchanged.
+    A valid Content-Length above max_bytes rejects before reading; other values
+    are ignored after trimming SP/HTAB and checking for ASCII digits.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     essence = _essence(content_type)
@@ -639,7 +695,7 @@ def decode_request(
     data = read_body(body, max_bytes=max_bytes, content_length=content_length)
     if not hyperfly:
         try:
-            return DecodedRequest("json", _json_bytes(_loads(data), registry))
+            return DecodedRequest("json", _convert_json(_loads(data), registry))
         except DecodeError as error:
             raise RequestError(400, "malformed-json") from error
     try:

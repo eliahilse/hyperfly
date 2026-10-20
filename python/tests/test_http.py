@@ -701,7 +701,7 @@ def test_json_uses_the_first_registry_codec_for_bytes_positions():
     assert _decode_json_pair(b'"not base64"', CodecRegistry()) == [("json", "not base64")] * 2
 
 
-def test_json_bytes_walk_preserves_nonmatching_shapes_and_other_values():
+def test_json_conversion_checks_shapes_and_required_fields():
     ir = {"kind": "struct", "fields": [
         {"name": "missing", "type": {"kind": "bytes"}},
         {"name": "optional", "type": {"kind": "bytes"}, "optional": True},
@@ -713,9 +713,14 @@ def test_json_bytes_walk_preserves_nonmatching_shapes_and_other_values():
     ]}
     registry = CodecRegistry([compile_ir(ir)])
     for value in [42, [], None, {"nullable": None, "array": "bad shape", "child": ["AA=="], "text": 12, "extra": "AA==", "wrapped": None}]:
-        assert _decode_json_pair(json.dumps(value).encode(), registry) == [("json", value)] * 2
-    body = b'{"optional":"AA==","nullable":"/w==","array":["AAE="],"child":{"data":""},"text":"AA==","wrapped":"AA=="}'
-    expected = {"optional": b"\x00", "nullable": b"\xff", "array": [b"\x00\x01"], "child": {"data": b""}, "text": "AA==", "wrapped": b"\x00"}
+        body = json.dumps(value).encode()
+        with pytest.raises(DecodeError) as raised:
+            decode_response("application/json", body, registry)
+        assert raised.value.code == "json"
+        error = _refusal(body, registry=registry)
+        assert (error.status, error.reason, error.__cause__.code) == (400, "malformed-json", "json")
+    body = b'{"missing":"","optional":"AA==","nullable":"/w==","array":["AAE="],"child":{"data":""},"text":"AA==","wrapped":"AA==","extra":"ignored"}'
+    expected = {"missing": b"", "optional": b"\x00", "nullable": b"\xff", "array": [b"\x00\x01"], "child": {"data": b""}, "text": "AA==", "wrapped": b"\x00"}
     assert _decode_json_pair(body, registry) == [("json", expected)] * 2
 
 
@@ -744,9 +749,14 @@ def test_json_bytes_walk_does_not_copy_deep_schema_from_extra_frames():
     def decode(frames):
         if frames:
             return decode(frames - 1)
-        return _decode_json_pair(b"0", registry)
+        return _decode_json_pair(b"[" * 490 + b'"AA=="' + b"]" * 490, registry)
 
-    assert decode(20) == [("json", 0)] * 2
+    for kind, value in decode(20):
+        assert kind == "json"
+        for _ in range(490):
+            assert isinstance(value, list) and len(value) == 1
+            value = value[0]
+        assert value == b"\x00"
 
 
 @pytest.mark.parametrize("validate", [False, True])
@@ -1152,8 +1162,8 @@ def test_malformed_json_is_400(body):
 
 
 def test_json_body_ignores_the_codec_header():
-    assert _request(b"[1]", codec_header="nope") == ("json", [1])
-    assert _request("﻿[1]".encode()) == ("json", [1])
+    assert _request(b'{"id":"abc"}', codec_header="nope") == ("json", VALUE)
+    assert _request('﻿{"id":"abc"}'.encode()) == ("json", VALUE)
 
 
 @pytest.mark.parametrize("header", [None, CODEC_A.fingerprint, f" \t{CODEC_A.fingerprint}\t "])
@@ -1305,14 +1315,14 @@ def test_empty_chunks_within_a_zero_byte_limit():
 
 def test_zero_and_large_limits():
     assert _refusal(b"0", max_bytes=0).status == 413
-    assert _request(b"0", max_bytes=2**53 - 1) == ("json", 0)
+    assert _request(b"0", max_bytes=2**53 - 1, registry=CodecRegistry()) == ("json", 0)
     assert read_body(b"", max_bytes=0) == b""
 
 
 def test_exactly_max_bytes_across_chunks_counts_utf8_bytes():
     data = '"é"'.encode()
     chunks = Chunks([data[:2], memoryview(data[2:]), bytearray()])
-    assert _request(chunks, max_bytes=len(data)) == ("json", "é")
+    assert _request(chunks, max_bytes=len(data), registry=CodecRegistry()) == ("json", "é")
     assert _refusal(Chunks([data[:2], data[2:]]), max_bytes=len(data) - 1).status == 413
 
 
@@ -1326,9 +1336,11 @@ def test_oversized_content_length_is_413_without_reading(content_length):
     assert chunks.pulls == 0
 
 
-@pytest.mark.parametrize("content_length", ["-1", "1.5", "1x", "", "٢", "0x10", "1", "0" * 100 + "1"])
+@pytest.mark.parametrize("content_length", ["-1", "1.5", "1x", "", "٢", "0x10", "1", "0" * 100 + "1",
+    "+2", "2 2", " \t \t ", "\n2", "2\r", "\v2", "2\f", "\u00a02\u00a0", "\u20032"])
 def test_other_content_lengths_are_ignored(content_length):
-    assert _request(Chunks([b"0"]), max_bytes=1, content_length=content_length) == ("json", 0)
+    assert _request(Chunks([b"0"]), max_bytes=1, content_length=content_length, registry=CodecRegistry()) == ("json", 0)
+    assert _refusal(Chunks([b"10"]), max_bytes=1, content_length=content_length).status == 413
 
 
 def test_content_length_cannot_raise_the_cap():
@@ -1421,16 +1433,16 @@ def test_json_integers_past_the_digit_limit_parse_like_json_parse(digits, sign):
     expected = int(token) if digits <= 4300 else float(sign + "inf")
     for decode in (
         lambda body: decode_response("application/json", body, CodecRegistry())[1],
-        lambda body: _request(body.encode()).value,
+        lambda body: _request(body.encode(), registry=CodecRegistry()).value,
     ):
         assert decode(token) == expected
         assert decode(f'{{"n":[{token}]}}') == {"n": [expected]}
 
 
 def test_json_floats_and_big_exponents_parse_like_json_parse():
-    assert _request(b"[1e400, -1e400, 1e-400, 0.1]").value == [math.inf, -math.inf, 0.0, 0.1]
-    assert _request(b"1" + b"0" * 400 + b".5").value == math.inf
-    assert _request(b"0." + b"0" * 100_000 + b"1").value == 0.0
+    assert _request(b"[1e400, -1e400, 1e-400, 0.1]", registry=CodecRegistry()).value == [math.inf, -math.inf, 0.0, 0.1]
+    assert _request(b"1" + b"0" * 400 + b".5", registry=CodecRegistry()).value == math.inf
+    assert _request(b"0." + b"0" * 100_000 + b"1", registry=CodecRegistry()).value == 0.0
 
 
 def test_json_nesting_past_the_recursion_limit_is_400(monkeypatch):
@@ -1474,7 +1486,7 @@ def test_a_producer_may_reuse_and_resize_its_buffer():
         yield chunk
 
     assert read_body(stream()) == b"[1]"
-    assert _request(stream()) == ("json", [1])
+    assert _request(stream(), registry=CodecRegistry()) == ("json", [1])
 
 
 def test_a_producer_may_mutate_its_buffer_between_yields():

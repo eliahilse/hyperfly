@@ -24,15 +24,23 @@ def revive(value):
     return value
 
 
-def same_value(actual, expected):
+def same_value(actual, expected, ir=None):
+    while ir is not None and ir["kind"] == "nullable":
+        ir = ir["inner"]
     if isinstance(actual, bool) or isinstance(expected, bool):
         return type(actual) is type(expected) and actual == expected
     if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
         return float(actual) == float(expected)
     if isinstance(actual, dict) and isinstance(expected, dict):
-        return actual.keys() == expected.keys() and all(same_value(actual[key], expected[key]) for key in actual)
+        fields = {field["name"]: field["type"] for field in ir["fields"]} if ir and ir["kind"] == "struct" else None
+        keys = actual.keys() if fields is None else actual.keys() & fields.keys()
+        expected_keys = expected.keys() if fields is None else expected.keys() & fields.keys()
+        return keys == expected_keys and all(
+            same_value(actual[key], expected[key], fields[key] if fields is not None else None) for key in keys
+        )
     if isinstance(actual, list) and isinstance(expected, list):
-        return len(actual) == len(expected) and all(same_value(a, b) for a, b in zip(actual, expected))
+        element = ir["element"] if ir and ir["kind"] == "array" else None
+        return len(actual) == len(expected) and all(same_value(a, b, element) for a, b in zip(actual, expected))
     return type(actual) is type(expected) and actual == expected
 
 
@@ -50,7 +58,7 @@ def test_json_fallback_valid(row, direction):
     if direction == "encode":
         body, headers = encode_for(negotiate(None, registry), value)
         assert headers["Content-Type"] == "application/json"
-        assert same_value(json.loads(body), json.loads(row["json"]))
+        assert same_value(json.loads(body), json.loads(row["json"]), row["ir"])
     else:
         kind, actual = decode_json(direction, row["json"].encode("utf-8"), registry)
         assert kind == "json"
@@ -73,9 +81,15 @@ def test_json_fallback_invalid(row, direction):
 @pytest.mark.parametrize("row", VECTORS["responses"], ids=lambda row: row["name"])
 def test_response_vectors(row):
     registry = CodecRegistry([compile_ir(row["ir"])]) if "ir" in row else CodecRegistry()
-    with pytest.raises(DecodeError) as raised:
-        decode_response(row["contentType"], bytes.fromhex(row["hex"]), registry)
-    assert raised.value.code == row["error"]
+    expected = row["expected"]
+    if "error" in expected:
+        with pytest.raises(DecodeError) as raised:
+            decode_response(row["contentType"], bytes.fromhex(row["hex"]), registry)
+        assert raised.value.code == expected["error"]
+    else:
+        kind, value = decode_response(row["contentType"], bytes.fromhex(row["hex"]), registry)
+        assert kind == expected["kind"]
+        assert same_value(value, revive(expected["value"]))
 
 
 @pytest.mark.parametrize("row", VECTORS["requests"], ids=lambda row: row["name"])
