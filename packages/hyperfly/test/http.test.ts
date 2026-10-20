@@ -367,6 +367,21 @@ describe("fetch adapter", () => {
     expect(errors[0]!.code).toBe("limit");
   });
 
+  test("falls back to JSON on an encoder byte budget refusal", async () => {
+    const dense = compileIR<string[]>({ kind: "array", element: { kind: "literal", value: "x".repeat(64) } });
+    const values = Array.from({ length: 3 }, () => "x".repeat(64));
+    const errors: EncodeError[] = [];
+    const response = respond(new Request(url, {
+      headers: { "Hyperfly-Accept": dense.fingerprint },
+    }), values, new CodecRegistry([dense as never]), {
+      onFallback: (error) => { errors.push(error); },
+    });
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual(values);
+    expect(errors.map((error) => error.code)).toEqual(["limit"]);
+    expect(errors[0]!.message).toContain("byte budget");
+  });
+
   test.each(["row", "columnar"] as const)("falls back to JSON on a %s encoder depth refusal", async (plan) => {
     const shallow = compileIR<{ s: string[] }[]>({
       kind: "array",
@@ -576,15 +591,17 @@ describe("request body limits", () => {
   const registry = new CodecRegistry([codecA as never]);
   const url = "https://example.test/v1/thing";
 
-  test.each([NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-    "rejects invalid maxBytes %s synchronously without reading",
+  test.each([NaN, Infinity, -Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, "1024", true])(
+    "rejects invalid maxBytes %p synchronously without reading",
     (maxBytes) => {
       let pulled = false;
       const body = new ReadableStream<Uint8Array>({
         pull() { pulled = true; },
       }, { highWaterMark: 0 });
       const request = new Request(url, { method: "POST", body });
-      expect(() => readBody(request, registry, { maxBytes })).toThrow(RangeError);
+      const run = () => readBody(request, registry, { maxBytes: maxBytes as never });
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options" }));
       expect(pulled).toBe(false);
       expect(request.bodyUsed).toBe(false);
     },

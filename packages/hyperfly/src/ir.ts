@@ -213,3 +213,43 @@ export function hasPayload(node: IRNode): boolean {
       return true;
   }
 }
+
+/** UTF-8 byte length of a string without lone surrogates, computed without encoding it. */
+export function utf8Length(s: string): number {
+  let n = s.length;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) continue;
+    if (c < 0x800) n += 1;
+    else if (c >= 0xd800 && c <= 0xdbff) {
+      n += 2;
+      i++;
+    } else n += 2;
+  }
+  return n;
+}
+
+const lengthCache = new WeakMap<object, readonly number[]>();
+
+/** UTF-8 byte lengths of a frozen schema or profile string list, computed once per list. */
+export function utf8Lengths(strings: readonly string[]): readonly number[] {
+  let lengths = lengthCache.get(strings);
+  if (!lengths) {
+    lengths = strings.map(utf8Length);
+    lengthCache.set(strings, lengths);
+  }
+  return lengths;
+}
+
+const literalCache = new WeakMap<object, number>();
+
+/** Decoded bytes a literal node charges to the byte budget: its UTF-8 length, or 0 when not a string. */
+export function literalBytes(node: Extract<IRNode, { kind: "literal" }>): number {
+  if (typeof node.value !== "string") return 0;
+  let n = literalCache.get(node);
+  if (n === undefined) {
+    n = utf8Length(node.value);
+    literalCache.set(node, n);
+  }
+  return n;
+}

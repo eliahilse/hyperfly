@@ -232,7 +232,7 @@ def test_byte_amplification_is_measured_on_the_final_body():
         with pytest.raises(HyperflyError) as err:
             run()
         assert err.value.code == "limit"
-    huge = compile_ir({"kind": "string"}, limits=Limits(max_total_bytes=2**80, max_byte_amplification=2**80))
+    huge = compile_ir({"kind": "string"}, limits=Limits(max_total_bytes=2**53 - 1, max_byte_amplification=2**53 - 1))
     assert huge.decode_body(huge.encode_body("ab")) == "ab"
 
 

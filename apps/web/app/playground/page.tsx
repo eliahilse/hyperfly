@@ -26,6 +26,7 @@ export default function PlaygroundPage() {
         </span>
         <nav className="nav-links">
           <Link href="/">home</Link>
+          <Link href="/docs">docs</Link>
           <a href={GITHUB} target="_blank" rel="noopener noreferrer">
             github
           </a>
@@ -52,6 +53,7 @@ export default function PlaygroundPage() {
         <span className="footer-brand">hyperfly</span>
         <div className="footer-links">
           <Link href="/">home</Link>
+          <Link href="/docs">docs</Link>
           <a href={GITHUB} target="_blank" rel="noopener noreferrer">
             source
           </a>

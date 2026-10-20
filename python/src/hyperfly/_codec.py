@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import itertools
 import math
 import struct
@@ -8,6 +9,7 @@ import sys
 import zlib
 from array import array
 from bisect import bisect_right
+from collections.abc import Mapping
 from functools import partial
 from itertools import accumulate, chain, compress, islice, repeat
 from operator import add, and_, lshift, not_, sub, truediv
@@ -2272,6 +2274,50 @@ class Codec:
         return self.decode_body(data[HEADER_SIZE:])
 
 
+_LIMIT_FIELDS = tuple(field.name for field in dataclasses.fields(Limits))
+
+
+def checked_options(plan: Any, limits: Any, pack: Any) -> tuple[str, Limits, Any]:
+    """Reads each compile option once and returns a checked copy; anything malformed
+    raises code "options" before the IR is read."""
+    try:
+        return _checked_options(plan, limits, pack)
+    except MemoryError:
+        raise
+    except Exception as error:
+        if type(error) is HyperflyError and type(error.code) is str and error.code == "options":
+            raise
+        raise HyperflyError("options", "options: could not read compile options") from error
+
+
+def _checked_options(plan: Any, limits: Any, pack: Any) -> tuple[str, Limits, Any]:
+    checked_limits = DEFAULT_LIMITS
+    if limits is not None:
+        if not isinstance(limits, Limits):
+            raise HyperflyError("options", "limits: must be a Limits instance")
+        values = {}
+        for name in _LIMIT_FIELDS:
+            value = getattr(limits, name)
+            number = int.__index__(value) if isinstance(value, int) and not isinstance(value, bool) else -1
+            if not 0 <= number <= INT_MAX:
+                raise HyperflyError("options", f"limits.{name}: must be a non-negative safe integer")
+            values[name] = number
+        checked_limits = Limits(**values)
+    if not isinstance(plan, str) or str.__str__(plan) not in ("row", "columnar"):
+        raise HyperflyError("options", "plan: must be row or columnar")
+    checked_plan = str.__str__(plan)
+    checked_pack = pack
+    if pack is not None and pack is not False:
+        if not isinstance(pack, Mapping):
+            raise HyperflyError("options", "pack: must be False or a mapping")
+        hooks = {"deflate": pack.get("deflate"), "inflate": pack.get("inflate")}
+        for key, hook in hooks.items():
+            if hook is not None and not callable(hook):
+                raise HyperflyError("options", f"pack.{key}: must be callable")
+        checked_pack = hooks
+    return checked_plan, checked_limits, checked_pack
+
+
 def compile_ir(
     ir: Any,
     *,
@@ -2280,8 +2326,9 @@ def compile_ir(
     pack=None,
     profile: Any = None,
 ) -> Codec:
+    plan, limits, pack = checked_options(plan, limits, pack)
     try:
-        return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)
+        return Codec(ir, plan, limits, pack, profile)
     except RecursionError:
         # TS has no schema depth limit. Python's recursive validation, copying,
         # serialization and profile column walk share an interpreter limit;

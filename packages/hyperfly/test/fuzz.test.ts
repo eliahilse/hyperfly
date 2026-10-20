@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileIR, HyperflyError, train, type Codec, type IRNode } from "../src/index.js";
+import { compileIR, DEFAULT_LIMITS, HyperflyError, train, type Codec, type IRNode } from "../src/index.js";
 
 /**
  * The decoder is the one component that eats bytes from the network, so the property
@@ -120,6 +120,18 @@ function mutateJSON(value: object, rng: () => number): unknown {
 const SLOW_DECODE_MS = 100;
 let slowest = 0;
 
+/** Decoded bytes of every string and bytes value, the quantity the wire-v0 §6 byte budget bounds. */
+function decodedBytes(value: unknown): number {
+  if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+  if (value instanceof Uint8Array) return value.length;
+  if (value && typeof value === "object") {
+    let n = 0;
+    for (const inner of Object.values(value)) n += decodedBytes(inner);
+    return n;
+  }
+  return 0;
+}
+
 function timeDecode(codec: Pick<Codec, "decodeBody">, bytes: Uint8Array): number {
   const start = performance.now();
   try {
@@ -150,6 +162,11 @@ function timedDecode(codec: Pick<Codec, "decodeBody">, bytes: Uint8Array, contex
     throw new Error(`${context}: one decode took ${elapsed.toFixed(1)} ms ${Buffer.from(bytes).toString("hex")}`);
   }
   if ("error" in outcome) throw outcome.error;
+  const cap = Math.min(DEFAULT_LIMITS.maxTotalBytes, DEFAULT_LIMITS.maxByteAmplification * (bytes.length + 1));
+  const decoded = decodedBytes(outcome.value);
+  if (decoded > cap) {
+    throw new Error(`${context}: ${decoded} decoded bytes exceed the byte budget of ${cap} ${Buffer.from(bytes).toString("hex")}`);
+  }
   return outcome.value;
 }
 
@@ -289,6 +306,44 @@ function columnBudgetBody(n: number, nb: number): Uint8Array {
   return new Uint8Array([n, 0x02, 0x0e, 0x00, nb]);
 }
 
+const WIDE = { kind: "literal", value: "w".repeat(64) } as const;
+
+/** Literals, enum members and dictionary hits cost a bit or nothing on the wire: only the byte budget bounds them. */
+const BYTE_BUDGET: IRNode = {
+  kind: "struct",
+  fields: [
+    { name: "l", type: { kind: "array", element: WIDE } },
+    {
+      name: "rows",
+      type: {
+        kind: "array",
+        element: {
+          kind: "struct",
+          fields: [
+            { name: "e", type: { kind: "enum", members: ["a".repeat(16), "b".repeat(16)] } },
+            { name: "k", type: WIDE },
+            { name: "s", type: { kind: "string" } },
+          ],
+        },
+      },
+    },
+  ],
+};
+
+const BYTE_BUDGET_PROFILE = {
+  version: 1 as const,
+  shared: { columns: [{ leaf: 2, dict: ["x".repeat(16), "y".repeat(16)] }] },
+};
+
+const BYTE_BUDGET_VALUE = {
+  l: [WIDE.value, WIDE.value],
+  rows: [
+    { e: "b".repeat(16), k: WIDE.value, s: "q" },
+    { e: "a".repeat(16), k: WIDE.value, s: "x".repeat(16) },
+    { e: "b".repeat(16), k: WIDE.value, s: "q" },
+  ],
+};
+
 interface Target {
   name: string;
   codec: Codec;
@@ -325,6 +380,10 @@ function targets(): Target[] {
     bodies: [budgetBody([0, 93, 64], 32), budgetBody([100, 31, 0], 30)],
     iterations: 500,
   });
+  for (const plan of ["row", "columnar"] as const) {
+    const codec = compileIR(BYTE_BUDGET, { plan, ...(plan === "columnar" ? { profile: BYTE_BUDGET_PROFILE } : {}) });
+    out.push({ name: `${plan} byte budget`, codec, bodies: [codec.encodeBody(BYTE_BUDGET_VALUE)], iterations: 1000 });
+  }
   out.push({
     name: "column budget",
     codec: compileIR(COLUMN_BUDGET, { plan: "columnar", limits: { maxTotalItems: 150 } }),
