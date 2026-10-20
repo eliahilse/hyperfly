@@ -1017,7 +1017,12 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
         _bound_by_input(r, length, zero_bit, path)
         r.items.charge(length, path, DecodeError)
-        return [_decode_node(r, node["element"], f"{path}[{i}]", depth + 1, ctx, column) for i in range(length)]
+        element = node["element"]
+        if element["kind"] == "literal":
+            if length and depth + 1 > ctx.max_depth:
+                _dfail("depth", f"{path}[0]", f"nesting deeper than {ctx.max_depth}")
+            return [element["value"]] * length
+        return [_decode_node(r, element, f"{path}[{i}]", depth + 1, ctx, column) for i in range(length)]
     if kind == "struct":
         optional = [f for f in node["fields"] if f.get("optional")]
         nullable = [f for f in node["fields"] if f.get("nullable")]

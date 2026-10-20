@@ -116,3 +116,11 @@ def test_width_zero_delta_frame_checks_every_value():
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(bytes.fromhex("070300060000020200"))
     assert err.value.code == "range"
+
+
+def test_literal_elements_respect_max_depth():
+    codec = compile_ir({"kind": "array", "element": {"kind": "literal", "value": "x"}}, limits=Limits(max_depth=0))
+    assert codec.decode_body(b"\x00") == []
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(b"\x01")
+    assert err.value.code == "depth"
