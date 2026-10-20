@@ -65,6 +65,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+      - name: Explain a refused release PR
+        if: failure() && steps.changesets.outcome == 'failure'
+        run: |
+          hint='If the step above failed with "GitHub Actions is not permitted to create or approve pull requests", enable Settings > Actions > General > Workflow permissions > "Allow GitHub Actions to create and approve pull requests", then re-run this job.'
+          echo "::error title=Release PR not opened::$hint"
+          printf '### Release PR not opened\n\n%s\n' "$hint" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run CI on the release PR
         if: steps.changesets.outputs.pr-number != ''
         run: gh workflow run ci.yml --ref changeset-release/main
