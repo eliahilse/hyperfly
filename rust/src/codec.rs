@@ -280,11 +280,20 @@ fn int_form(min: Option<i64>, value: i64) -> Result<u64> {
     }
 }
 
+fn int_of(value: &Value) -> Option<i64> {
+    match value {
+        Value::Int(i) => Some(*i),
+        Value::Float(f) if f.is_finite() && f.fract() == 0.0 && f.abs() <= INT_MAX as f64 => {
+            Some(*f as i64)
+        }
+        _ => None,
+    }
+}
+
 fn check_int(min: Option<i64>, max: Option<i64>, value: &Value, path: &str) -> Result<i64> {
-    let Value::Int(v) = value else {
+    let Some(v) = int_of(value) else {
         return err(ErrorCode::Type, format!("{path}: expected a safe integer"));
     };
-    let v = *v;
     if !(INT_MIN..=INT_MAX).contains(&v) {
         return err(
             ErrorCode::Type,
@@ -753,8 +762,7 @@ impl Codec {
                 let matches = match (lit, value) {
                     (Literal::Null, Value::Null) => true,
                     (Literal::Bool(a), Value::Bool(b)) => a == b,
-                    (Literal::Int(a), Value::Int(b)) => a == b,
-                    (Literal::Int(0), Value::Float(f)) => *f == 0.0,
+                    (Literal::Int(a), _) => int_of(value) == Some(*a),
                     (Literal::Str(a), Value::Str(b)) => a == b,
                     _ => false,
                 };
