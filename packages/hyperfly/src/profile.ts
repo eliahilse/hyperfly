@@ -145,11 +145,16 @@ function snapshotProfile(profile: Profile): Profile {
       }
       copy = Array.from({ length }, (_, i) => visit(value[i], depth + 1));
     } else {
-      const record: Record<string, unknown> = Object.create(null);
+      const record: Record<string, unknown> = {};
       for (const key of Reflect.ownKeys(value)) {
         if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
         if (typeof key !== "string") throw new HyperflyError("ir", "profile: JSON keys must be strings");
-        record[key] = visit((value as Record<string, unknown>)[key], depth + 1);
+        Object.defineProperty(record, key, {
+          value: visit((value as Record<string, unknown>)[key], depth + 1),
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
       copy = record;
     }

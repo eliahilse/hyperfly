@@ -208,6 +208,15 @@ describe("compile options", () => {
     }
   });
 
+  test("applies and checks non-enumerable limits", () => {
+    const ir: IRNode = { kind: "array", element: { kind: "bool" } };
+    const limits = Object.defineProperty({}, "maxItems", { value: 1 });
+    expect(() => compileIR(ir, { limits }).encodeBody([true, false])).toThrow(expect.objectContaining({ code: "limit" }));
+    const run = () => compileIR(ir, { limits: Object.defineProperty({}, "maxItems", { value: -1 }) });
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "options" }));
+  });
+
   test("snapshots pack hook getters", () => {
     let reads = 0;
     const codec = compileIR(STRUCT, { pack: {
@@ -233,7 +242,7 @@ describe("compile options", () => {
     }
   });
 
-  test("undefined limits preserve defaults and inherited limits are ignored", () => {
+  test("undefined limits preserve defaults, inherited limits are ignored and hidden ones checked", () => {
     const limits = Object.fromEntries(Object.keys(DEFAULT_LIMITS).map((key) => [key, undefined]));
     const codec = compileIR(STRUCT, { limits });
     const value = { a: 1, b: "hello" };
@@ -241,7 +250,7 @@ describe("compile options", () => {
     const inherited = Object.create(Object.prototype) as object;
     expect(compileIR(STRUCT, { limits: inherited }).encode(value)).toEqual(codec.encode(value));
     const hidden = Object.defineProperty({}, "unknown", { value: -1 });
-    expect(compileIR(STRUCT, { limits: hidden }).encode(value)).toEqual(codec.encode(value));
+    expect(() => compileIR(STRUCT, { limits: hidden })).toThrow(expect.objectContaining({ code: "options" }));
     let ir: IRNode = { kind: "bool" };
     let nested: unknown = true;
     for (let i = 0; i <= DEFAULT_LIMITS.maxDepth; i++) {
@@ -329,6 +338,7 @@ describe("profile JSON data", () => {
     expect(Object.isFrozen(codec.profile?.hints)).toBe(true);
     expect(codec.profile?.hints).not.toBe(hints);
     expect(Object.isFrozen(hints)).toBe(false);
+    expect(Object.getPrototypeOf(codec.profile?.hints)).toBe(Object.prototype);
   });
 });
 

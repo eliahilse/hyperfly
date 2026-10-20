@@ -1,4 +1,4 @@
-import { compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
+import { checkedOptions, compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
 import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
@@ -223,9 +223,10 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
       && shared.columns.some((column) => column && (column.grammar || column.derived)) ? 2 : 1;
     profile = { version, shared: shared as SharedProfile };
   }
+  const { limits, pack } = checkedOptions(options);
   let codec: Codec<T>;
   try {
-    codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits: options.limits, pack: options.pack });
+    codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits, pack });
   } catch (error) {
     if (error instanceof HyperflyError) throw error;
     throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);

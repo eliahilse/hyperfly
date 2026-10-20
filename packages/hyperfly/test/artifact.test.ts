@@ -43,6 +43,19 @@ describe("loadArtifact", () => {
     expect(derived.shared.columns.some((column) => column.derived)).toBe(true);
   });
 
+  test("reports throwing option getters as options errors", () => {
+    const codec = compileIR(ROWS);
+    const cause = new TypeError("cannot read option");
+    for (const options of [
+      { get limits(): never { throw cause; } },
+      { get pack(): never { throw cause; } },
+    ]) {
+      const run = () => loadArtifact(codec.artifact, codec.fingerprint, options);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options", cause }));
+    }
+  });
+
   test.each(cases)("rebuilds $name with identical bytes", ({ codec, sample }) => {
     const loaded = loadArtifact(codec.artifact, codec.fingerprint);
     expect(loaded.fingerprint).toBe(codec.fingerprint);

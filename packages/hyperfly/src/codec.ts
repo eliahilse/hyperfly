@@ -84,7 +84,6 @@ export function checkedOptions(options: CompileOptions & { validate?: boolean })
       const allowed = new Set(Object.keys(DEFAULT_LIMITS));
       const snapshot: Partial<DecodeLimits> = {};
       for (const key of Reflect.ownKeys(limits)) {
-        if (!Object.prototype.propertyIsEnumerable.call(limits, key)) continue;
         if (typeof key !== "string" || !allowed.has(key)) {
           throw new HyperflyError("options", `limits.${String(key)}: unknown limit`);
         }
