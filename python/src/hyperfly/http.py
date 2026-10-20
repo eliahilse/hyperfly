@@ -17,7 +17,8 @@ import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Literal, NamedTuple, cast
+from types import UnionType
+from typing import Annotated, Any, Callable, Literal, NamedTuple, Union, cast, get_args, get_origin
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError
@@ -243,6 +244,23 @@ def _serialize_model_bytes(value: Any, handler: Callable[[Any], Any]) -> Any:
     return _base64(value) if isinstance(value, (bytes, bytearray)) else handler(value)
 
 
+def _declared_json_schema(annotation: Any) -> dict[str, Any]:
+    while get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    origin = get_origin(annotation)
+    if annotation is bytes:
+        return {"type": "bytes"}
+    if origin in (Union, UnionType):
+        args = get_args(annotation)
+        inner = [item for item in args if item is not type(None)]
+        if len(args) == 2 and len(inner) == 1:
+            return {"type": "nullable", "schema": _declared_json_schema(inner[0])}
+    if origin is list:
+        args = get_args(annotation)
+        return {"type": "list", "items_schema": _declared_json_schema(args[0] if args else None)}
+    return getattr(annotation, "__pydantic_core_schema__", {"type": "any"})
+
+
 def _build_model_json(cls: type[Any]) -> _ModelJSON:
     from pydantic_core import SchemaSerializer
 
@@ -260,8 +278,11 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
     children: dict[int, list[int]] = {}
     references: dict[str, dict[str, Any]] = {}
     active: set[int] = set()
+    plain: dict[int, dict[str, Any]] = {}
 
-    def visit(node: dict[str, Any]) -> dict[str, Any]:
+    def visit(node: dict[str, Any], annotation: Any = None) -> dict[str, Any]:
+        while get_origin(annotation) is Annotated:
+            annotation = get_args(annotation)[0]
         identity = id(node)
         if identity in copies:
             return copies[identity]
@@ -270,13 +291,20 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
         originals[identity] = node
         children[identity] = []
         kind = node["type"]
-        if node.get("serialization", {}).get("type") in ("function-plain", "function-wrap"):
+        serialization = node.get("serialization", {})
+        # PlainValidator can supply an identity wrap serializer around its
+        # original schema. User serializers have no such schema entry.
+        plain_inner = (
+            serialization.get("schema")
+            if kind == "function-plain" and serialization.get("type") == "function-wrap" else None
+        )
+        if serialization.get("type") in ("function-plain", "function-wrap") and plain_inner is None:
             # Custom serializers own their whole output. Keep their original
             # subtree and config, including bytes passed through a wrap handler.
             return copied
 
-        def child(item: dict[str, Any]) -> dict[str, Any]:
-            result = visit(item)
+        def child(item: dict[str, Any], declared: Any = annotation) -> dict[str, Any]:
+            result = visit(item, declared)
             children[identity].append(id(item))
             return result
 
@@ -293,17 +321,35 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
                 active.add(identity)
         elif kind == "definition-ref":
             copied["schema_ref"] = child(definitions[node["schema_ref"]])["ref"]
-        elif kind in ("definitions", "model", "nullable", "default", "function-before"):
-            copied["schema"] = child(node["schema"])
+        elif kind == "function-plain":
+            inner = child(plain_inner if plain_inner is not None else _declared_json_schema(annotation))
+            plain[identity] = {
+                "type": "function-wrap", "function": lambda value, handler: handler(value),
+                "schema": inner, "when_used": "json",
+            }
+        elif kind in ("definitions", "model", "nullable", "default", "function-before", "function-after", "function-wrap"):
+            declared = annotation
+            if kind == "definitions":
+                definitions.update((item["ref"], item) for item in node["definitions"])
             if kind == "model":
+                declared = node["cls"]
+                if node.get("root_model"):
+                    declared = declared.model_fields["root"].annotation
                 copied["cls"] = _JSONModel
+            elif kind == "nullable" and get_origin(annotation) in (Union, UnionType):
+                declared = next(item for item in get_args(annotation) if item is not type(None))
+            copied["schema"] = child(node["schema"], declared)
         elif kind == "model-fields":
+            fields = getattr(annotation, "model_fields", {})
             copied["fields"] = {
-                name: item if item.get("serialization_exclude") else {**item, "schema": child(item["schema"])}
+                name: item if item.get("serialization_exclude") else {
+                    **item, "schema": child(item["schema"], fields[name].annotation if name in fields else None),
+                }
                 for name, item in node["fields"].items()
             }
         elif kind == "list":
-            copied["items_schema"] = child(node["items_schema"])
+            args = get_args(annotation) if get_origin(annotation) is list else ()
+            copied["items_schema"] = child(node["items_schema"], args[0] if args else None)
         elif kind in ("tuple", "tuple-positional", "tuple-variable"):
             items = node.get("items_schema", [])
             copied["items_schema"] = child(items) if isinstance(items, dict) else [child(item) for item in items]
@@ -323,6 +369,9 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
             break
     if id(schema) not in active:
         return _ModelJSON(None)
+    for identity, serialization in plain.items():
+        if identity in active:
+            copies[identity]["serialization"] = serialization
 
     def guard(original: dict[str, Any], copied: dict[str, Any]) -> None:
         kind = original["type"]
