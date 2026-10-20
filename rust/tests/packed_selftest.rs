@@ -1,4 +1,4 @@
-use hyperfly_core::{Codec, Field, Limits, Node, Plan, Value};
+use hyperfly_core::{Codec, CompileOptions, Field, Limits, Node, Plan, Value};
 
 #[test]
 fn packed_column_roundtrips_through_own_encoder() {
@@ -16,7 +16,7 @@ fn packed_column_roundtrips_through_own_encoder() {
         optional: false,
         nullable: false,
     }]);
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), true).unwrap();
+    let codec = Codec::compile(ir, CompileOptions::new().with_plan(Plan::Columnar)).unwrap();
     let rows: Vec<Value> = (0..40)
         .map(|i| {
             Value::Object(vec![(
@@ -52,11 +52,16 @@ fn amplification_limit_bounds_zero_byte_columns() {
         }])),
         length: None,
     };
-    let limits = Limits {
-        max_amplification: 4,
-        ..Limits::default()
-    };
-    let codec = Codec::compile(ir, Plan::Columnar, limits, false).unwrap();
+    let mut limits = Limits::default();
+    limits.max_amplification = 4;
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_limits(limits)
+            .with_pack(false),
+    )
+    .unwrap();
     let row = || Value::Object(vec![("tag".into(), Value::Str("fixed".into()))]);
 
     let accepted = Value::Array((0..4).map(|_| row()).collect());
@@ -65,10 +70,13 @@ fn amplification_limit_bounds_zero_byte_columns() {
 
     let rejected = Value::Array((0..5).map(|_| row()).collect());
     assert_eq!(
-        codec.encode_body(&rejected).unwrap_err().code.as_str(),
+        codec.encode_body(&rejected).unwrap_err().code().as_str(),
         "limit"
     );
-    assert_eq!(codec.decode_body(&[5]).unwrap_err().code.as_str(), "limit");
+    assert_eq!(
+        codec.decode_body(&[5]).unwrap_err().code().as_str(),
+        "limit"
+    );
 }
 
 #[test]
@@ -87,99 +95,84 @@ fn reconstructed_profile_strings_obey_byte_limit() {
         optional: false,
         nullable: false,
     };
-    let limits = Limits {
-        max_byte_length: 3,
-        ..Limits::default()
-    };
+    let mut limits = Limits::default();
+    limits.max_byte_length = 3;
 
-    let dict = Profile {
-        version: 1,
-        columns: vec![ProfileColumn {
-            leaf: 0,
-            dict: Some(vec!["long".into()]),
-            grammar: None,
-            derived: None,
-        }],
-    };
-    let codec = Codec::compile_with_profile(
+    let dict = Profile::new(
+        1,
+        vec![ProfileColumn::new(0).with_dict(vec!["long".into()])],
+    );
+    let codec = Codec::compile(
         string_array(vec![string_field("s")]),
-        Plan::Columnar,
-        limits,
-        false,
-        Some(dict),
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_limits(limits.clone())
+            .with_pack(false)
+            .with_profile(dict),
     )
     .unwrap();
     assert_eq!(
-        codec.decode_body(&[1, 1, 1, 1]).unwrap_err().code.as_str(),
+        codec
+            .decode_body(&[1, 1, 1, 1])
+            .unwrap_err()
+            .code()
+            .as_str(),
         "limit"
     );
 
-    let grammar = Profile {
-        version: 2,
-        columns: vec![ProfileColumn {
-            leaf: 0,
-            dict: None,
-            grammar: Some(vec![
-                GrammarToken::Lit("xxxx".into()),
-                GrammarToken::Num(GrammarNum {
-                    base: 10,
-                    len: 1,
-                    case: GrammarCase::Lower,
-                }),
-            ]),
-            derived: None,
-        }],
-    };
-    let codec = Codec::compile_with_profile(
+    let grammar = Profile::new(
+        2,
+        vec![ProfileColumn::new(0).with_grammar(vec![
+            GrammarToken::Lit("xxxx".into()),
+            GrammarToken::Num(GrammarNum {
+                base: 10,
+                len: 1,
+                case: GrammarCase::Lower,
+            }),
+        ])],
+    );
+    let codec = Codec::compile(
         string_array(vec![string_field("s")]),
-        Plan::Columnar,
-        limits,
-        false,
-        Some(grammar),
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_limits(limits.clone())
+            .with_pack(false)
+            .with_profile(grammar),
     )
     .unwrap();
     assert_eq!(
         codec
             .decode_body(&[1, 3, 0, 0, 0])
             .unwrap_err()
-            .code
+            .code()
             .as_str(),
         "limit"
     );
 
-    let derived = Profile {
-        version: 2,
-        columns: vec![
-            ProfileColumn {
-                leaf: 0,
-                dict: Some(vec!["u".into()]),
-                grammar: None,
-                derived: None,
-            },
-            ProfileColumn {
-                leaf: 1,
-                dict: None,
-                grammar: None,
-                derived: Some(Derivation {
-                    source: 0,
-                    values: vec!["long".into()],
-                }),
-            },
+    let derived = Profile::new(
+        2,
+        vec![
+            ProfileColumn::new(0).with_dict(vec!["u".into()]),
+            ProfileColumn::new(1).with_derived(Derivation {
+                source: 0,
+                values: vec!["long".into()],
+            }),
         ],
-    };
-    let codec = Codec::compile_with_profile(
+    );
+    let codec = Codec::compile(
         string_array(vec![string_field("source"), string_field("target")]),
-        Plan::Columnar,
-        limits,
-        false,
-        Some(derived),
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_limits(limits)
+            .with_pack(false)
+            .with_profile(derived),
     )
     .unwrap();
     assert_eq!(
         codec
             .decode_body(&[1, 0, 1, b'u', 4, 0])
             .unwrap_err()
-            .code
+            .code()
             .as_str(),
         "limit"
     );
@@ -213,26 +206,21 @@ fn aliased_array_nodes_get_distinct_ordinals() {
             nullable: false,
         },
     ]);
-    let profile = Profile {
-        version: 1,
-        columns: vec![
-            ProfileColumn {
-                leaf: 0,
-                dict: Some(vec!["red".into(), "green".into()]),
-                grammar: None,
-                derived: None,
-            },
-            ProfileColumn {
-                leaf: 1,
-                dict: Some(vec!["green".into(), "red".into()]),
-                grammar: None,
-                derived: None,
-            },
+    let profile = Profile::new(
+        1,
+        vec![
+            ProfileColumn::new(0).with_dict(vec!["red".into(), "green".into()]),
+            ProfileColumn::new(1).with_dict(vec!["green".into(), "red".into()]),
         ],
-    };
-    let codec =
-        Codec::compile_with_profile(ir, Plan::Columnar, Limits::default(), false, Some(profile))
-            .unwrap();
+    );
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_pack(false)
+            .with_profile(profile),
+    )
+    .unwrap();
     let row = |s: &str| {
         Value::Array(vec![Value::Object(vec![(
             "s".into(),
