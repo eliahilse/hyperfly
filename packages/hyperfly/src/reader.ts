@@ -5,33 +5,48 @@ export interface DecodeLimits {
   maxItems: number;
   maxByteLength: number;
   /**
-   * Width-zero columns legitimately encode any number of rows in a handful of
-   * bytes, so input length cannot bound a columnar row count. This caps the
-   * work a byte of hostile input can demand instead: a count above
-   * maxAmplification * (remaining bytes + 1) is rejected. Local decode
+   * Width-zero columns and arrays of literals legitimately encode any number of
+   * rows in a handful of bytes, so input length cannot bound such a count. This
+   * caps the work a byte of hostile input can demand instead: a count above
+   * maxAmplification * (remaining bytes + 1) is rejected, and the item budget
+   * of one body is capped at maxAmplification * (body length + 1). Local decode
    * policy, like every other limit — raise it for routes that really ship
    * millions of constant rows.
    */
   maxAmplification: number;
+  /** Sum of every array count in one body, nested and sibling arrays alike (wire-v0 §6). */
+  maxTotalItems: number;
 }
 
 export const DEFAULT_LIMITS: Readonly<DecodeLimits> = Object.freeze({
   maxDepth: 64,
   maxItems: 2 ** 24,
   maxByteLength: 2 ** 28,
-  maxAmplification: 4096,
+  maxAmplification: 32,
+  maxTotalItems: 2 ** 24,
 });
+
+/** Items charged so far against one body's cap; a sub-reader over the same body shares it. */
+export interface ItemBudget {
+  used: number;
+  readonly cap: number;
+}
 
 export class Reader {
   private readonly buf: Uint8Array;
   private readonly view: DataView;
   private offset = 0;
   readonly limits: DecodeLimits;
+  readonly budget: ItemBudget;
 
-  constructor(buf: Uint8Array, limits: DecodeLimits) {
+  constructor(buf: Uint8Array, limits: DecodeLimits, budget?: ItemBudget) {
     this.buf = buf;
     this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     this.limits = limits;
+    this.budget = budget ?? {
+      used: 0,
+      cap: Math.min(limits.maxTotalItems, limits.maxAmplification * (buf.length + 1)),
+    };
   }
 
   u8(): number {
@@ -72,6 +87,13 @@ export class Reader {
     const hi = this.view.getUint32(this.offset - offsetBack + 4, true);
     const lo = this.view.getUint32(this.offset - offsetBack, true);
     return hi === 0x80000000 && lo === 0;
+  }
+
+  /** Fails as truncated, before anything is allocated, when fewer than n bytes remain. */
+  need(n: number): void {
+    if (n > this.buf.length - this.offset) {
+      throw new DecodeError("truncated", "unexpected end of input");
+    }
   }
 
   remaining(): number {

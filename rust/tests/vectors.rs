@@ -23,14 +23,29 @@ fn node_of(json: &Json) -> Result<Node, String> {
         })
     }
 
-    fn integer(json: &Json) -> Result<i64, String> {
-        json.as_i64()
-            .ok_or_else(|| "IR integer required".to_owned())
+    fn known(json: &Json, allowed: &[&str]) -> Result<(), String> {
+        match json.as_object() {
+            Some(object) => match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+                Some(key) => Err(format!("unknown IR key {key}")),
+                None => Ok(()),
+            },
+            None => Err("IR objects required".to_owned()),
+        }
     }
 
     let kind = required(json, "kind")?
         .as_str()
         .ok_or_else(|| "IR kind must be a string".to_owned())?;
+    let allowed: &[&str] = match kind {
+        "int" => &["kind", "min", "max"],
+        "literal" => &["kind", "value"],
+        "enum" => &["kind", "members"],
+        "nullable" => &["kind", "inner"],
+        "array" => &["kind", "element", "length"],
+        "struct" => &["kind", "fields"],
+        _ => &["kind"],
+    };
+    known(json, allowed)?;
     Ok(match kind {
         "bool" => Node::Bool,
         "float64" => Node::Float64,
@@ -61,8 +76,7 @@ fn node_of(json: &Json) -> Result<Node, String> {
             length: json
                 .get("length")
                 .map(|value| {
-                    value
-                        .as_u64()
+                    natural(value)
                         .ok_or_else(|| "array length must be a non-negative integer".to_owned())
                 })
                 .transpose()?,
@@ -73,6 +87,7 @@ fn node_of(json: &Json) -> Result<Node, String> {
                 .ok_or_else(|| "struct fields must be an array".to_owned())?
                 .iter()
                 .map(|f| {
+                    known(f, &["name", "type", "optional", "nullable"])?;
                     Ok(Field {
                         name: string(required(f, "name")?)?,
                         ty: node_of(required(f, "type")?)?,
@@ -84,6 +99,24 @@ fn node_of(json: &Json) -> Result<Node, String> {
         ),
         other => return Err(format!("unknown IR kind {other}")),
     })
+}
+
+/// An integral JSON number within ±(2^53−1), whether it parsed as an integer or a float.
+fn integral(json: &Json) -> Option<i64> {
+    const SAFE: f64 = 9_007_199_254_740_991.0;
+    json.as_i64().or_else(|| {
+        json.as_f64()
+            .filter(|f| f.fract() == 0.0 && f.abs() <= SAFE)
+            .map(|f| f as i64)
+    })
+}
+
+fn integer(json: &Json) -> Result<i64, String> {
+    integral(json).ok_or_else(|| "IR integer required".to_owned())
+}
+
+fn natural(json: &Json) -> Option<u64> {
+    integral(json).and_then(|value| u64::try_from(value).ok())
 }
 
 fn value_of(json: &Json) -> Value {
@@ -147,26 +180,36 @@ fn compile(ir: &Json, plan: Plan) -> Codec {
     Codec::compile(node_of(ir).unwrap(), plan, Limits::default(), true).unwrap()
 }
 
+/// Loader failures are invalid IR; anything the loader accepts must also pass the crate.
+fn compile_ir_vector(v: &Json) -> Result<Codec, ErrorCode> {
+    let node = node_of(&v["ir"]).map_err(|_| ErrorCode::Ir)?;
+    let compiled = match v.get("profile") {
+        None => Codec::compile(node, Plan::Row, Limits::default(), false),
+        Some(profile) => {
+            let profile = match profile {
+                Json::Null => None,
+                profile => Some(profile_of(profile).map_err(|_| ErrorCode::Ir)?),
+            };
+            Codec::compile_with_profile(node, Plan::Columnar, Limits::default(), false, profile)
+        }
+    };
+    compiled.map_err(|error| error.code)
+}
+
 #[test]
 fn ir_vectors() {
     let file = load("ir.json");
     for v in file["invalid"].as_array().unwrap() {
         let name = v["name"].as_str().unwrap();
-        let code = match node_of(&v["ir"]) {
-            Err(_) => ErrorCode::Ir,
-            Ok(node) => match Codec::compile(node, Plan::Row, Limits::default(), false) {
-                Ok(_) => panic!("{name}: expected IR compilation failure"),
-                Err(error) => error.code,
-            },
+        let Err(code) = compile_ir_vector(v) else {
+            panic!("{name}: expected IR compilation failure");
         };
         assert_eq!(code, ErrorCode::Ir, "{name}");
         assert_eq!(code.as_str(), v["error"].as_str().unwrap(), "{name}");
     }
     for v in file["valid"].as_array().unwrap() {
         let name = v["name"].as_str().unwrap();
-        let node = node_of(&v["ir"]).unwrap_or_else(|e| panic!("{name}: {e}"));
-        Codec::compile(node, Plan::Row, Limits::default(), false)
-            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        compile_ir_vector(v).unwrap_or_else(|code| panic!("{name}: {}", code.as_str()));
     }
 }
 
@@ -260,18 +303,48 @@ fn limits_codec(vector: &Json) -> Codec {
                 "maxByteLength" => limits.max_byte_length = value,
                 "maxAmplification" => limits.max_amplification = value,
                 "maxTotalItems" => limits.max_total_items = value,
+                "maxTotalBytes" => limits.max_total_bytes = value,
+                "maxByteAmplification" => limits.max_byte_amplification = value,
                 other => panic!("unknown limit {other}"),
             }
         }
     }
-    Codec::compile(node_of(&vector["ir"]).unwrap(), plan, limits, true).unwrap()
+    let profile = vector.get("profile").map(profile_of).transpose().unwrap();
+    let inflate = vector
+        .get("inflate")
+        .is_none_or(|value| value.as_bool().unwrap());
+    Codec::compile_with_profile(
+        node_of(&vector["ir"]).unwrap(),
+        plan,
+        limits,
+        inflate,
+        profile,
+    )
+    .unwrap()
 }
 
 #[test]
 fn limits_vectors() {
-    let file = load("limits.json");
-    for section in ["valid", "invalidDecode", "invalidEncode", "decodeOnly"] {
-        for vector in file[section].as_array().unwrap() {
+    run_limit_vectors(&load("limits.json"));
+}
+
+#[test]
+fn byte_budget_vectors() {
+    run_limit_vectors(&load("bytes.json"));
+}
+
+fn run_limit_vectors(file: &Json) {
+    for section in [
+        "valid",
+        "invalidDecode",
+        "invalidEncode",
+        "decodeOnly",
+        "packedDecode",
+    ] {
+        let Some(vectors) = file.get(section) else {
+            continue;
+        };
+        for vector in vectors.as_array().unwrap() {
             let name = vector["name"].as_str().unwrap();
             let codec = limits_codec(vector);
             match section {
@@ -314,17 +387,19 @@ fn limits_vectors() {
                         "{name}"
                     );
                 }
-                "decodeOnly" => {
+                "decodeOnly" | "packedDecode" => {
                     let value = value_of(&vector["value"]);
                     let decoded = codec
                         .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
                         .unwrap_or_else(|e| panic!("{name}: {e}"));
                     assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
-                    assert_eq!(
-                        codec.encode_body(&value).expect_err(name).code.as_str(),
-                        "limit",
-                        "{name}"
-                    );
+                    if section == "decodeOnly" {
+                        assert_eq!(
+                            codec.encode_body(&value).expect_err(name).code.as_str(),
+                            "limit",
+                            "{name}"
+                        );
+                    }
                 }
                 _ => unreachable!(),
             }
@@ -495,7 +570,12 @@ fn fingerprints() {
             "row" => Plan::Row,
             _ => Plan::Columnar,
         };
-        let profile = case.get("profile").map(profile_of).transpose().unwrap();
+        let profile = case
+            .get("profile")
+            .filter(|profile| !profile.is_null())
+            .map(profile_of)
+            .transpose()
+            .unwrap();
         let canonical = serialize_artifact(&node_of(&case["ir"]).unwrap(), plan, profile.as_ref());
         assert_eq!(
             canonical,
@@ -592,8 +672,7 @@ fn profile_of(json: &Json) -> Result<Profile, String> {
     if let Some(hints) = root.get("hints") {
         object(hints, "profile hints")?;
     }
-    let version = root["version"]
-        .as_u64()
+    let version = natural(&root["version"])
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| "profile version must be an integer".to_owned())?;
     let shared = object(&root["shared"], "profile shared")?;
@@ -616,8 +695,7 @@ fn profile_of(json: &Json) -> Result<Profile, String> {
                 &["leaf"],
             )?;
         }
-        let leaf = column["leaf"]
-            .as_u64()
+        let leaf = natural(&column["leaf"])
             .and_then(|value| usize::try_from(value).ok())
             .ok_or_else(|| format!("{path}.leaf must be a non-negative integer"))?;
 
@@ -667,12 +745,10 @@ fn profile_of(json: &Json) -> Result<Profile, String> {
                         &["base", "len", "case"],
                         &["base", "len", "case"],
                     )?;
-                    let base = num["base"]
-                        .as_u64()
+                    let base = natural(&num["base"])
                         .and_then(|value| u32::try_from(value).ok())
                         .ok_or_else(|| format!("{num_path}.base must be an integer"))?;
-                    let len = num["len"]
-                        .as_u64()
+                    let len = natural(&num["len"])
                         .and_then(|value| u32::try_from(value).ok())
                         .ok_or_else(|| format!("{num_path}.len must be an integer"))?;
                     let case = match num["case"].as_str() {
@@ -697,8 +773,7 @@ fn profile_of(json: &Json) -> Result<Profile, String> {
                     &["source", "values"],
                     &["source", "values"],
                 )?;
-                let source = derived["source"]
-                    .as_u64()
+                let source = natural(&derived["source"])
                     .and_then(|value| usize::try_from(value).ok())
                     .ok_or_else(|| {
                         format!("{derived_path}.source must be a non-negative integer")
@@ -814,6 +889,98 @@ fn profiled_vectors() {
         };
         assert_eq!(code, v["error"].as_str().unwrap(), "{name}");
     }
+}
+
+#[test]
+fn profiled_values_obey_total_byte_budget() {
+    fn decoded_bytes(value: &Value) -> u64 {
+        match value {
+            Value::Str(s) => s.len() as u64,
+            Value::Bytes(bytes) => bytes.len() as u64,
+            Value::Array(values) => values.iter().map(decoded_bytes).sum(),
+            Value::Object(fields) => fields.iter().map(|(_, v)| decoded_bytes(v)).sum(),
+            _ => 0,
+        }
+    }
+
+    let file = load("columnar.json");
+    for vector in file["profiled"]["valid"].as_array().unwrap() {
+        let name = vector["name"].as_str().unwrap();
+        let value = value_of(&vector["value"]);
+        let total = decoded_bytes(&value);
+        if total == 0 {
+            continue;
+        }
+        let body = from_hex(vector["hex"].as_str().unwrap());
+        for cap in [total, total - 1] {
+            let limits = Limits {
+                max_total_bytes: cap,
+                ..Limits::default()
+            };
+            let codec = Codec::compile_with_profile(
+                node_of(&vector["ir"]).unwrap(),
+                Plan::Columnar,
+                limits,
+                false,
+                Some(profile_of(&vector["profile"]).unwrap()),
+            )
+            .unwrap();
+            if cap == total {
+                assert_eq!(codec.encode_body(&value).expect(name), body, "{name}");
+                assert!(
+                    deep_eq(&codec.decode_body(&body).expect(name), &value),
+                    "{name}"
+                );
+            } else {
+                assert_eq!(
+                    codec.encode_body(&value).expect_err(name).code,
+                    ErrorCode::Limit,
+                    "{name}"
+                );
+                assert_eq!(
+                    codec.encode(&value).expect_err(name).code,
+                    ErrorCode::Limit,
+                    "{name}"
+                );
+                assert_eq!(
+                    codec.decode_body(&body).expect_err(name).code,
+                    ErrorCode::Limit,
+                    "{name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_sign() {
+    let zero = Codec::compile(
+        Node::Literal(Literal::Int(0)),
+        Plan::Row,
+        Limits::default(),
+        false,
+    )
+    .unwrap();
+    for value in [Value::Int(0), Value::Float(0.0), Value::Float(-0.0)] {
+        assert_eq!(zero.encode_body(&value).unwrap(), Vec::<u8>::new());
+    }
+    assert_eq!(
+        zero.encode_body(&Value::Float(1.0))
+            .unwrap_err()
+            .code
+            .as_str(),
+        "type"
+    );
+    let negative = node_of(&serde_json::json!({"kind": "literal", "value": -0.0})).unwrap();
+    assert_eq!(negative, Node::Literal(Literal::Int(0)));
+
+    let float = Codec::compile(Node::Float64, Plan::Row, Limits::default(), false).unwrap();
+    let body = float.encode_body(&Value::Float(-0.0)).unwrap();
+    assert_eq!(body, vec![0; 8]);
+    let Value::Float(decoded) = float.decode_body(&body).unwrap() else {
+        panic!("float64 decodes to a float");
+    };
+    assert!(decoded == 0.0 && decoded.is_sign_positive());
 }
 
 #[test]

@@ -39,6 +39,10 @@
       "dependsOn": [
         "^build"
       ],
+      "env": [
+        "HYPERFLY_FUZZ_SECONDS",
+        "HYPERFLY_FUZZ_SEED"
+      ],
       "outputs": []
     }
   },

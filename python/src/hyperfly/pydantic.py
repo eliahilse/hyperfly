@@ -6,7 +6,7 @@ import typing
 from typing import Any, Callable, Literal
 
 from ._codec import Codec, compile_ir
-from ._wire import INT_MAX, INT_MIN, Limits, UnsupportedSchemaError
+from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, Limits, UnsupportedSchemaError
 
 try:
     import annotated_types as _at
@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
     _at = None
 
 try:
-    from pydantic import BaseModel
+    from pydantic import BaseModel, ValidationError
 except ImportError as _err:  # pragma: no cover
     raise ImportError("hyperfly.pydantic requires pydantic >= 2.5") from _err
 
@@ -217,27 +217,33 @@ class _ModelCodec:
         return self._codec.ir
 
     def _to_value(self, value: Any) -> Any:
-        if isinstance(value, BaseModel):
-            if self._validate:
-                value = self._model.model_validate(value)
-            value = value.model_dump(mode="python", by_alias=True)
-        elif self._validate:
-            value = self._model.model_validate(value).model_dump(mode="python", by_alias=True)
-        return value
+        if not self._validate:
+            return value.model_dump(mode="python", by_alias=True) if isinstance(value, BaseModel) else value
+        try:
+            model = self._model.model_validate(value)
+        except ValidationError as error:
+            raise EncodeError("validation", f"$: {error}") from error
+        return model.model_dump(mode="python", by_alias=True)
+
+    def _from_value(self, value: Any) -> Any:
+        if not self._validate:
+            return value
+        try:
+            return self._model.model_validate(value)
+        except ValidationError as error:
+            raise DecodeError("validation", f"$: {error}") from error
 
     def encode(self, value: Any) -> bytes:
         return self._codec.encode(self._to_value(value))
 
     def decode(self, data: bytes) -> Any:
-        value = self._codec.decode(data)
-        return self._model.model_validate(value) if self._validate else value
+        return self._from_value(self._codec.decode(data))
 
     def encode_body(self, value: Any) -> bytes:
         return self._codec.encode_body(self._to_value(value))
 
     def decode_body(self, data: bytes) -> Any:
-        value = self._codec.decode_body(data)
-        return self._model.model_validate(value) if self._validate else value
+        return self._from_value(self._codec.decode_body(data))
 
 
 def compile(  # noqa: A001 - mirrors the documented API

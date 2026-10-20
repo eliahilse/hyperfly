@@ -1,10 +1,10 @@
 import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
 import { defaultPackHooks } from "./pack.js";
-import { indexProfile, validateProfile, type Profile } from "./profile.js";
+import { checkedProfile, indexProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
-import { encodeNode } from "./encode.js";
+import { checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
-import { validateIR, type IRNode } from "./ir.js";
+import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
 import { Writer } from "./writer.js";
 
@@ -36,50 +36,146 @@ export interface Codec<T = unknown> {
   decodeBody(bytes: Uint8Array): T;
 }
 
+/** Freezes a fresh clone in place, storing zero unsigned: an IR or profile -0 is the integer 0. */
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
-    for (const inner of Object.values(value)) deepFreeze(inner);
+    const record = value as Record<string, unknown>;
+    for (const [key, inner] of Object.entries(record)) {
+      if (Object.is(inner, -0)) record[key] = 0;
+      else deepFreeze(inner);
+    }
     Object.freeze(value);
   }
   return value;
 }
 
-export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
+function isPlainObject(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function readOption<T>(read: () => T): T {
+  try {
+    return read();
+  } catch (cause) {
+    throw new HyperflyError("options", "options: could not read compile options", { cause });
+  }
+}
+
+interface CheckedOptions {
+  limits: DecodeLimits;
+  plan: PlanLayout;
+  pack: PackHooks | false | undefined;
+  profile: Profile | undefined;
+  validate: boolean | undefined;
+}
+
+export function checkedOptions(options: CompileOptions & { validate?: boolean }): CheckedOptions {
+  try {
+    if (!isPlainObject(options)) {
+      throw new HyperflyError("options", "options: must be an object");
+    }
+    const limits = readOption(() => options.limits);
+    const plan = readOption(() => options.plan);
+    const pack = readOption(() => options.pack);
+    const profile = readOption(() => options.profile);
+    const validate = readOption(() => options.validate);
+    const checkedLimits: DecodeLimits = { ...DEFAULT_LIMITS };
+    if (limits !== undefined) {
+      if (!isPlainObject(limits)) {
+        throw new HyperflyError("options", "limits: must be an object");
+      }
+      const allowed = new Set(Object.keys(DEFAULT_LIMITS));
+      const snapshot: Partial<DecodeLimits> = {};
+      for (const key of Reflect.ownKeys(limits)) {
+        if (typeof key !== "string" || !allowed.has(key)) {
+          throw new HyperflyError("options", `limits.${String(key)}: unknown limit`);
+        }
+        snapshot[key as keyof DecodeLimits] = readOption(() => limits[key as keyof DecodeLimits]);
+      }
+      for (const [key, value] of Object.entries(snapshot)) {
+        if (value === undefined) continue;
+        if (!Number.isSafeInteger(value) || value < 0) {
+          throw new HyperflyError("options", `limits.${key}: must be a non-negative safe integer`);
+        }
+        checkedLimits[key as keyof DecodeLimits] = value;
+      }
+    }
+    if (plan !== undefined && plan !== "row" && plan !== "columnar") {
+      throw new HyperflyError("options", "plan: must be row or columnar");
+    }
+    let checkedPack = pack;
+    if (pack !== undefined && pack !== false) {
+      if (!isPlainObject(pack)) {
+        throw new HyperflyError("options", "pack: must be false or an object");
+      }
+      const deflate = readOption(() => pack.deflate);
+      const inflate = readOption(() => pack.inflate);
+      for (const [key, value] of Object.entries({ deflate, inflate })) {
+        if (value !== undefined && typeof value !== "function") {
+          throw new HyperflyError("options", `pack.${key}: must be a function`);
+        }
+      }
+      checkedPack = { deflate, inflate };
+    }
+    if (validate !== undefined && typeof validate !== "boolean") {
+      throw new HyperflyError("options", "validate: must be a boolean");
+    }
+    return { limits: checkedLimits, plan: plan ?? "row", pack: checkedPack, profile, validate };
+  } catch (cause) {
+    if (cause instanceof HyperflyError && cause.code === "options") throw cause;
+    throw new HyperflyError("options", "options: could not read compile options", { cause });
+  }
+}
+
+function compileArtifact(
+  ir: IRNode,
+  plan: PlanLayout,
+  profile: Profile | undefined,
+): { ir: IRNode; profile: Profile | undefined; artifact: string } {
   validateIR(ir);
   // isolate from later mutation, caller-side or through codec.ir: the fingerprint is
   // fixed at compile time and the schema behind it must not drift
   ir = deepFreeze(structuredClone(ir));
-  const plan: PlanLayout = options.plan ?? "row";
-  const profile = options.profile;
-  if (profile) {
-    if (plan !== "columnar") {
-      throw new HyperflyError("ir", "profiles apply to the columnar plan only");
-    }
-    validateProfile(ir, profile);
+  if (profile === undefined || profile === null) {
+    return { ir, profile: undefined, artifact: serializeArtifact(ir, plan) };
+  }
+  if (plan !== "columnar") {
+    throw new HyperflyError("ir", "profiles apply to the columnar plan only");
   }
   // the profile is fixed by the fingerprint exactly as the IR is
-  const frozenProfile = profile ? deepFreeze(structuredClone(profile)) : undefined;
+  const frozen = deepFreeze(checkedProfile(ir, profile));
+  return { ir, profile: frozen, artifact: serializeArtifact(ir, plan, frozen) };
+}
+
+export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = {}): Codec<T> {
+  const { limits, plan, pack: packOptions, profile } = checkedOptions(options);
+  const { ir, profile: frozenProfile, artifact } = withinStack(() => compileArtifact(input, plan, profile));
   const profileIndex = indexProfile(frozenProfile);
-  const artifact = serializeArtifact(ir, plan, frozenProfile);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);
-  const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
   const columnar = plan === "columnar";
-  const pack = options.pack === false ? {} : (options.pack ?? defaultPackHooks());
+  const pack = packOptions === false ? {} : (packOptions ?? defaultPackHooks());
 
   const encodeBody = (value: T): Uint8Array => {
     const w = new Writer();
-    encodeNode(w, ir, value, "$", 0, {
+    const ctx: EncodeCtx = {
       maxDepth: limits.maxDepth,
       maxItems: limits.maxItems,
       maxByteLength: limits.maxByteLength,
       maxAmplification: limits.maxAmplification,
+      maxTotalItems: limits.maxTotalItems,
+      items: 0,
       columnar,
       deflate: pack.deflate,
       canInflate: pack.inflate !== undefined,
       profile: profileIndex,
-    });
-    return w.finish();
+    };
+    encodeNode(w, ir, value, "$", 0, ctx);
+    const body = w.finish();
+    checkItemBudget(ctx, body.length);
+    return body;
   };
 
   const decodeBody = (bytes: Uint8Array): T => {

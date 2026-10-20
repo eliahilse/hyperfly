@@ -19,6 +19,7 @@ from ._ir import (
     column_count,
     fingerprint_of,
     has_payload,
+    normalize_integers,
     serialize_artifact,
     validate_ir,
     validate_profile,
@@ -142,7 +143,8 @@ def _literal_matches(lit: Any, v: Any) -> bool:
     if type(lit) is bool:
         return v is lit
     if type(lit) is int:
-        return type(v) is int and v == lit
+        # zero is the integer 0 whatever its sign, so a float -0.0 or 0.0 matches literal 0
+        return (type(v) is int and v == lit) or (lit == 0 and type(v) is float and v == 0)
     return type(v) is str and v == lit
 
 
@@ -2010,9 +2012,13 @@ class Codec:
             validate_profile(ir, profile)
         # isolate from later caller mutation: the fingerprint is fixed at compile time
         ir = copy.deepcopy(ir)
+        normalize_integers(ir)
         self._ir = ir
         self._plan = plan
         self._profile = copy.deepcopy(profile) if profile is not None else None
+        if self._profile is not None:
+            self._profile["version"] = int(self._profile["version"])
+            normalize_integers(self._profile["shared"])
         self._artifact = serialize_artifact(ir, plan, self._profile)
         self._fp = fingerprint_of(self._artifact)
         self._limits = limits

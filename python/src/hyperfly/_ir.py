@@ -14,7 +14,39 @@ def _fail(path: str, message: str) -> None:
 
 
 def _is_safe_int(v: Any) -> bool:
+    # an integral JSON number is that integer whether it parsed as int or float
+    if type(v) is float:
+        return v.is_integer() and INT_MIN <= v <= INT_MAX
     return type(v) is int and INT_MIN <= v <= INT_MAX
+
+
+def normalize_integers(value: Any) -> None:
+    """In place on validated IR: integral floats become the ints they denote, -0.0 becomes 0."""
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            if type(inner) is float:
+                value[key] = int(inner)
+            else:
+                normalize_integers(inner)
+    elif isinstance(value, (list, tuple)):
+        for inner in value:
+            normalize_integers(inner)
+
+
+_SCALAR_KEYS = frozenset({"kind"})
+_INT_KEYS = frozenset({"kind", "min", "max"})
+_LITERAL_KEYS = frozenset({"kind", "value"})
+_ENUM_KEYS = frozenset({"kind", "members"})
+_NULLABLE_KEYS = frozenset({"kind", "inner"})
+_ARRAY_KEYS = frozenset({"kind", "element", "length"})
+_STRUCT_KEYS = frozenset({"kind", "fields"})
+_FIELD_KEYS = frozenset({"name", "type", "optional", "nullable"})
+
+
+def _check_keys(value: dict[Any, Any], allowed: frozenset[str], path: str) -> None:
+    for key in value:
+        if key not in allowed:
+            _fail(path, f"unknown key {key}" if type(key) is str else "unknown non-string key")
 
 
 def _has_lone_surrogate(s: str) -> bool:
@@ -46,8 +78,10 @@ def validate_ir(node: Any, path: str = "$") -> None:
     if not isinstance(kind, str):
         _fail(path, "IR kind must be a string")
     if kind in ("bool", "float64", "string", "bytes"):
+        _check_keys(node, _SCALAR_KEYS, path)
         return
     if kind == "int":
+        _check_keys(node, _INT_KEYS, path)
         lo, hi = node.get("min"), node.get("max")
         if "min" in node and not _is_safe_int(lo):
             _fail(path, "int min must be a safe integer in the v0 domain")
@@ -57,6 +91,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
             _fail(path, "int min exceeds max")
         return
     if kind == "literal":
+        _check_keys(node, _LITERAL_KEYS, path)
         if "value" not in node:
             _fail(path, "literal needs a value")
         v = node["value"]
@@ -66,6 +101,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
             _check_string(v, path, "literal string")
         return
     if kind == "enum":
+        _check_keys(node, _ENUM_KEYS, path)
         members = node.get("members")
         if not isinstance(members, (list, tuple)):
             _fail(path, "enum members must be an array")
@@ -83,6 +119,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
             seen.add(m)
         return
     if kind == "nullable":
+        _check_keys(node, _NULLABLE_KEYS, path)
         inner = node.get("inner")
         if not isinstance(inner, dict):
             _fail(path, "nullable inner must be an IR object")
@@ -93,12 +130,14 @@ def validate_ir(node: Any, path: str = "$") -> None:
         validate_ir(inner, path + "?")
         return
     if kind == "array":
+        _check_keys(node, _ARRAY_KEYS, path)
         length = node.get("length")
-        if "length" in node and (type(length) is not int or length < 0 or length > INT_MAX):
+        if "length" in node and (not _is_safe_int(length) or length < 0):
             _fail(path, "fixed array length must be a non-negative safe integer")
         validate_ir(node.get("element"), path + "[]")
         return
     if kind == "struct":
+        _check_keys(node, _STRUCT_KEYS, path)
         fields = node.get("fields")
         if not isinstance(fields, (list, tuple)):
             _fail(path, "struct fields must be an array")
@@ -106,6 +145,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
         for f in fields:
             if not isinstance(f, dict):
                 _fail(path, "struct fields must be objects")
+            _check_keys(f, _FIELD_KEYS, path)
             name = f.get("name")
             if type(name) is not str or not name:
                 _fail(path, "field names must be non-empty strings")
@@ -145,6 +185,10 @@ def _esc(s: str) -> str:
     return "".join(out)
 
 
+def _int(v: Any) -> str:
+    return str(int(v))
+
+
 def _literal(v: Any) -> str:
     if v is None:
         return "null"
@@ -152,8 +196,8 @@ def _literal(v: Any) -> str:
         return "true"
     if v is False:
         return "false"
-    if type(v) is int:
-        return str(v)
+    if type(v) is int or type(v) is float:
+        return _int(v)
     return _esc(v)
 
 
@@ -164,9 +208,9 @@ def serialize_node(node: dict[str, Any]) -> str:
     if kind == "int":
         out = '{"kind":"int"'
         if node.get("min") is not None:
-            out += f',"min":{node["min"]}'
+            out += f',"min":{_int(node["min"])}'
         if node.get("max") is not None:
-            out += f',"max":{node["max"]}'
+            out += f',"max":{_int(node["max"])}'
         return out + "}"
     if kind == "literal":
         return f'{{"kind":"literal","value":{_literal(node["value"])}}}'
@@ -177,7 +221,7 @@ def serialize_node(node: dict[str, Any]) -> str:
     if kind == "array":
         out = f'{{"kind":"array","element":{serialize_node(node["element"])}'
         if node.get("length") is not None:
-            out += f',"length":{node["length"]}'
+            out += f',"length":{_int(node["length"])}'
         return out + "}"
     fields = []
     for f in node["fields"]:
@@ -196,7 +240,7 @@ MAX_DICT_ENTRIES = 16383
 def serialize_shared(shared: dict[str, Any]) -> str:
     columns = []
     for column in shared["columns"]:
-        out = '{"leaf":' + str(column["leaf"])
+        out = '{"leaf":' + _int(column["leaf"])
         if "dict" in column:
             out += ',"dict":[' + ",".join(_esc(entry) for entry in column["dict"]) + "]"
         if "grammar" in column:
@@ -208,9 +252,9 @@ def serialize_shared(shared: dict[str, Any]) -> str:
                     num = token["num"]
                     tokens.append(
                         '{"num":{"base":'
-                        + str(num["base"])
+                        + _int(num["base"])
                         + ',"len":'
-                        + str(num["len"])
+                        + _int(num["len"])
                         + ',"case":'
                         + _esc(num["case"])
                         + "}}"
@@ -220,7 +264,7 @@ def serialize_shared(shared: dict[str, Any]) -> str:
             derived = column["derived"]
             out += (
                 ',"derived":{"source":'
-                + str(derived["source"])
+                + _int(derived["source"])
                 + ',"values":['
                 + ",".join(_esc(value) for value in derived["values"])
                 + "]}"
@@ -329,7 +373,7 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
     root = record(profile, "document")
     check_keys(root, "document", {"version", "shared", "hints"}, {"version", "shared"})
     version = root["version"]
-    if type(version) is not int or version not in (1, 2):
+    if not _is_safe_int(version) or version not in (1, 2):
         # Do not stringify unchecked JSON: huge integers can exceed Python's
         # decimal conversion limit, and nested containers can exceed recursion.
         fail("unsupported profile version (expected 1 or 2)")
@@ -361,6 +405,7 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
         leaf = raw["leaf"]
         if not _is_safe_int(leaf):
             fail(f"{path}.leaf must be an integer")
+        leaf = int(leaf)
         if leaf < 0 or leaf >= len(refs):
             fail(f"leaf {leaf} is not a column in this schema")
         if leaf <= previous:
@@ -414,11 +459,13 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
                 num = record(token["num"], num_path)
                 check_keys(num, num_path, {"base", "len", "case"}, {"base", "len", "case"})
                 base = num["base"]
-                if type(base) is not int or base not in (10, 16, 36):
+                if not _is_safe_int(base) or base not in (10, 16, 36):
                     fail(f"{num_path}.base must be 10, 16, or 36")
+                base = int(base)
                 length = num["len"]
                 if not _is_safe_int(length):
                     fail(f"{num_path}.len must be an integer")
+                length = int(length)
                 cap = 15 if base == 10 else 13 if base == 16 else 10
                 if length < 1 or length > cap:
                     fail(f"{num_path}.len must be between 1 and {cap} for base {base}")
@@ -441,6 +488,7 @@ def validate_profile(ir: dict[str, Any], profile: Any) -> None:
             source = derived["source"]
             if not _is_safe_int(source):
                 fail(f"{derived_path}.source must be an integer")
+            source = int(source)
             raw_values = derived["values"]
             if type(raw_values) is not list:
                 fail(f"{derived_path}.values must be an array")

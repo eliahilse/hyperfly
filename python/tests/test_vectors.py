@@ -50,18 +50,24 @@ def run_invalid_encode(vector, plan):
     assert err.value.code == vector["error"], vector["name"]
 
 
+def compile_vector(vector, plan):
+    if "profile" in vector:
+        return compile_ir(revive(vector["ir"]), plan="columnar", profile=revive(vector["profile"]), pack=False)
+    return compile_ir(revive(vector["ir"]), plan=plan)
+
+
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 @pytest.mark.parametrize("vector", IR["invalid"], ids=lambda v: v["name"])
 def test_ir_invalid(vector, plan):
     with pytest.raises(HyperflyError) as err:
-        compile_ir(revive(vector["ir"]), plan=plan)
+        compile_vector(vector, plan)
     assert err.value.code == vector["error"], vector["name"]
 
 
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 @pytest.mark.parametrize("vector", IR["valid"], ids=lambda v: v["name"])
 def test_ir_valid(vector, plan):
-    compile_ir(revive(vector["ir"]), plan=plan)
+    compile_vector(vector, plan)
 
 
 @pytest.mark.parametrize("vector", VECTORS["valid"], ids=lambda v: v["name"])

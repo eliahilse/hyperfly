@@ -120,6 +120,14 @@ pub struct Limits {
     /// effective item budget is `min(max_total_items, max_amplification * (body_length + 1))`,
     /// charged as each array's count is read and checked against the final body on encode.
     pub max_total_items: u64,
+    /// Maximum decoded bytes of every string and bytes value in one body, including
+    /// reconstructed values; default `2^26`. The effective byte budget is
+    /// `min(max_total_bytes, max_byte_amplification * (body_length + 1))`.
+    pub max_total_bytes: u64,
+    /// Body length multiplier bounding decoded bytes of every string and bytes value,
+    /// including reconstructed values; default 64. The effective byte budget is
+    /// `min(max_total_bytes, max_byte_amplification * (body_length + 1))`.
+    pub max_byte_amplification: u64,
 }
 
 impl Default for Limits {
@@ -130,11 +138,19 @@ impl Default for Limits {
             max_byte_length: 1 << 28,
             max_amplification: 32,
             max_total_items: 1 << 24,
+            max_total_bytes: 1 << 26,
+            max_byte_amplification: 64,
         }
     }
 }
 
 impl Limits {
+    pub(crate) fn byte_budget(&self, body_length: usize) -> u64 {
+        let amplified =
+            (body_length as u128 + 1).saturating_mul(u128::from(self.max_byte_amplification));
+        u128::from(self.max_total_bytes).min(amplified) as u64
+    }
+
     pub(crate) fn item_budget(&self, body_length: usize) -> u64 {
         let amplified =
             (body_length as u128 + 1).saturating_mul(u128::from(self.max_amplification));
@@ -142,14 +158,29 @@ impl Limits {
     }
 }
 
-pub(crate) struct ItemBudget {
+pub(crate) struct Budget {
     pub total: u64,
     cap: u64,
+    pub total_bytes: u64,
+    byte_cap: u64,
 }
 
-impl ItemBudget {
-    pub fn new(cap: u64) -> Self {
-        ItemBudget { total: 0, cap }
+impl Budget {
+    pub fn new(cap: u64, byte_cap: u64) -> Self {
+        Budget {
+            total: 0,
+            cap,
+            total_bytes: 0,
+            byte_cap,
+        }
+    }
+
+    pub fn charge_bytes(&mut self, len: u64, path: &str) -> Result<()> {
+        if len > self.byte_cap - self.total_bytes {
+            return err(ErrorCode::Limit, format!("{path}: byte budget exceeded"));
+        }
+        self.total_bytes += len;
+        Ok(())
     }
 
     pub fn charge(&mut self, count: u64, path: &str) -> Result<()> {
@@ -164,7 +195,7 @@ impl ItemBudget {
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
-    items: ItemBudget,
+    budget: Budget,
 }
 
 impl<'a> Reader<'a> {
@@ -172,12 +203,16 @@ impl<'a> Reader<'a> {
         Reader {
             buf,
             pos: 0,
-            items: ItemBudget::new(limits.item_budget(buf.len())),
+            budget: Budget::new(limits.item_budget(buf.len()), limits.byte_budget(buf.len())),
         }
     }
 
+    pub fn charge_bytes(&mut self, len: u64, path: &str) -> Result<()> {
+        self.budget.charge_bytes(len, path)
+    }
+
     pub fn charge_items(&mut self, count: usize, path: &str) -> Result<()> {
-        self.items.charge(count as u64, path)
+        self.budget.charge(count as u64, path)
     }
 
     pub fn u8(&mut self) -> Result<u8> {
