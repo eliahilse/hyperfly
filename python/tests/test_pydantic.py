@@ -1,13 +1,13 @@
 from copy import deepcopy
 from enum import Enum
 from math import ceil, floor
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Generic, Literal, Optional, TypeVar
 
 import pytest
 from annotated_types import Ge, GroupedMetadata, Gt, Interval, Le, Lt
 from pydantic import (
     VERSION, AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
-    WrapValidator, confloat, conint, constr, create_model, field_validator,
+    WrapValidator, confloat, conint, constr, create_model, field_validator, model_validator,
 )
 from pydantic_core import SchemaError, core_schema
 
@@ -23,17 +23,30 @@ PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:2])
 
 
 def _assert_integer_leaf_matches_model_output(model):
-    schema = model.__pydantic_core_schema__
-    if schema["type"] == "definitions":
-        schema = schema["schema"]
-    schema = schema["schema"]["fields"]["x"]["schema"]
-    while schema["type"] in ("list", "nullable", "function-before", "chain"):
+    definitions = {}
+
+    def resolve(schema):
+        while schema["type"] in ("definitions", "definition-ref"):
+            if schema["type"] == "definitions":
+                definitions.update((item["ref"], item) for item in schema["definitions"])
+                schema = schema["schema"]
+            else:
+                schema = definitions[schema["schema_ref"]]
+        return schema
+
+    schema = resolve(model.__pydantic_core_schema__)
+    schema = resolve(schema["schema"]["fields"]["x"]["schema"])
+    defaults = []
+    while schema["type"] in ("list", "nullable", "function-before", "chain", "default"):
+        if schema["type"] == "default" and not schema.get("validate_default", model.model_config.get("validate_default")):
+            defaults.append(schema.get("default"))
         if schema["type"] == "list":
             schema = schema["items_schema"]
         elif schema["type"] == "chain":
             schema = schema["steps"][-1]
         else:
             schema = schema["schema"]
+        schema = resolve(schema)
     expected = {"kind": "int"}
     if schema["type"] == "int":
         lower, upper = [INT_MIN], [INT_MAX]
@@ -49,6 +62,8 @@ def _assert_integer_leaf_matches_model_output(model):
             expected["min"] = max(lower)
         if min(upper) != INT_MAX:
             expected["max"] = min(upper)
+        if any(type(value) is int and not max(lower) <= value <= min(upper) for value in defaults):
+            expected = {"kind": "int"}
     actual = to_ir(model)["fields"][0]["type"]
     while actual["kind"] in ("array", "nullable"):
         actual = actual["element"] if actual["kind"] == "array" else actual["inner"]
@@ -115,6 +130,57 @@ def test_cross_language_fingerprint_for_shared_schema():
 
     ir = to_ir(Shared)
     assert ir == {"kind": "struct", "fields": [{"name": "pct", "type": {"kind": "int", "min": 0, "max": 100}}]}
+
+
+_SIMPLE_BOUND_SHAPES = [
+    *(f"{source}-{key}" for source in ("annotated", "field", "annotated-field", "conint")
+      for key in ("ge", "gt", "le", "lt")),
+    "interval-closed", "interval-open", "field-range", "conint-range",
+]
+_SIMPLE_BOUND_VALUES = [-1000, -100, -10, -1, 0, 1, 2, 5, 10, 100, 1000.0]
+
+
+def _simple_bound_case(shape, bound):
+    source, key = shape.rsplit("-", 1)
+    if key in ("closed", "range"):
+        constraints = {"ge": bound, "le": bound + 10}
+    elif key == "open":
+        constraints = {"gt": bound, "lt": bound + 10}
+    else:
+        constraints = {key: bound}
+    node = {"kind": "int"}
+    if "ge" in constraints:
+        node["min"] = ceil(constraints["ge"])
+    if "gt" in constraints:
+        node["min"] = floor(constraints["gt"]) + 1
+    if "le" in constraints:
+        node["max"] = floor(constraints["le"])
+    if "lt" in constraints:
+        node["max"] = ceil(constraints["lt"]) - 1
+    if source == "conint":
+        return conint(**constraints), ..., node
+    if source == "field":
+        return int, Field(**constraints), node
+    if source == "annotated-field":
+        metadata = Field(**constraints)
+    elif source == "interval":
+        metadata = Interval(**constraints)
+    else:
+        metadata = {"ge": Ge, "gt": Gt, "le": Le, "lt": Lt}[key](bound)
+    return Annotated[int, metadata], ..., node
+
+
+@pytest.mark.parametrize("shape", _SIMPLE_BOUND_SHAPES)
+@pytest.mark.parametrize("bound", _SIMPLE_BOUND_VALUES)
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_simple_bound_shapes_keep_reference_artifacts(shape, bound, plan):
+    annotation, default, node = _simple_bound_case(shape, bound)
+    model = create_model("SimpleBound", x=(annotation, default))
+    reference = compile_ir({"kind": "struct", "fields": [{"name": "x", "type": node}]}, plan=plan)
+    codec = compile(model, plan=plan)
+    assert codec.ir == reference.ir
+    assert codec.artifact == reference.artifact
+    assert codec.fingerprint == reference.fingerprint
 
 
 class _Tag(str, Enum):
@@ -390,6 +456,22 @@ def test_optional_inner_metadata_merges_with_field_metadata():
     pytest.param(Annotated[int, Ge(10), _LastIntChain()], ..., 0, False,
                  id="chain-last-int-defines-output-bounds"),
     pytest.param(Annotated[int, _RefChain()], ..., 0, False, id="chain-definitions-and-refs"),
+    pytest.param(Annotated[list[Annotated[int, Ge(10)]], AfterValidator(lambda xs: [_shift(x) for x in xs])],
+                 ..., 1, False, id="container-after-shifts-elements"),
+    pytest.param(Annotated[list[Annotated[int, Ge(10)]], WrapValidator(lambda xs, h: [_shift(x) for x in h(xs)])],
+                 ..., 1, False, id="container-wrap-shifts-elements"),
+    pytest.param(Annotated[list[Annotated[int, Ge(10)]], PlainValidator(lambda xs: [_shift(x) for x in xs])],
+                 ..., 1, False, id="container-plain-shifts-elements"),
+    pytest.param(Optional[Annotated[list[Annotated[int, Ge(10)]], AfterValidator(lambda xs: [_shift(x) for x in xs])]],
+                 ..., 1, False, id="optional-container-after-shifts-elements"),
+    pytest.param(list[Annotated[list[Annotated[int, Ge(10)]], AfterValidator(lambda xs: [_shift(x) for x in xs])]],
+                 ..., 2, False, id="nested-container-after-shifts-elements"),
+    pytest.param(Annotated[int, Ge(10)], Field(default=-90), 0, False, id="unchecked-static-default"),
+    pytest.param(Annotated[int, _Bounds()], Field(default=-90), 0, False, id="unchecked-grouped-default"),
+    pytest.param(Annotated[int, Ge(10)], Field(default=-90, validate_default=True), 0, True,
+                 id="checked-static-default"),
+    pytest.param(Optional[Annotated[int, Ge(10)]], Field(default=-90), 0, False,
+                 id="unchecked-optional-static-default"),
 ])
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 def test_integer_bounds_accept_pydantic_held_values(annotation, default, depth, exact, plan):
@@ -422,6 +504,263 @@ def test_integer_bounds_accept_pydantic_held_values(annotation, default, depth, 
             if codec_accepts:
                 assert codec.decode(encoded) == payload
     assert accepted > 0
+
+
+@pytest.mark.parametrize("mode", ["after", "wrap", "plain", "before"])
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("validate_default", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_decorated_field_validators_use_the_models_output(mode, grouped, validate_default, plan):
+    annotation = Annotated[int, _Bounds()] if grouped else int
+    default = Field(default=5, validate_default=validate_default) if grouped else Field(
+        default=50, ge=0, validate_default=validate_default,
+    )
+
+    def shift(cls, value, *args):
+        if mode == "wrap":
+            value = args[0](value)
+        return value - 100
+
+    # Pydantic checks signatures even when the validator accepts unused arguments.
+    if mode == "wrap":
+        def validator(cls, value, handler):
+            return shift(cls, value, handler)
+    else:
+        def validator(cls, value):
+            return shift(cls, value)
+
+    model = create_model("Decorated", x=(annotation, default), __validators__={
+        "shift": field_validator("x", mode=mode)(classmethod(validator)),
+    })
+    codec = compile(model, validate=False, plan=plan)
+    expected = {"kind": "int"}
+    if mode == "before":
+        expected.update({"min": 2, "max": 8} if grouped else {"min": 0})
+    assert codec.ir["fields"][0]["type"] == expected
+    _assert_integer_leaf_matches_model_output(model)
+    accepted = 0
+    for payload in [{}, *({"x": value} for value in (-90, 5, 50, 105, 150))]:
+        try:
+            instance = model.model_validate(payload)
+        except ValidationError:
+            continue
+        accepted += 1
+        assert codec.decode(codec.encode(instance)) == instance.model_dump()
+        assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+    assert accepted > 0
+
+
+@pytest.mark.parametrize("validator", [
+    AfterValidator(lambda xs: [v - 100 for v in xs]),
+    WrapValidator(lambda xs, handler: [v - 100 for v in handler(xs)]),
+    PlainValidator(lambda xs: [v - 100 for v in xs]),
+])
+@pytest.mark.parametrize("shape", ["list", "optional", "optional-items", "nested-list", "nested-model"])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_container_validators_drop_every_descendant_bound(validator, shape, plan):
+    annotation = Annotated[list[Annotated[int, Ge(10)]], validator]
+    value = [10]
+    if shape == "optional":
+        annotation = Optional[annotation]
+    elif shape == "optional-items":
+        annotation = list[Annotated[Optional[list[Annotated[int, Ge(10)]]], validator]]
+        value = [[10]]
+    elif shape == "nested-list":
+        annotation = list[annotation]
+        value = [[10]]
+    elif shape == "nested-model":
+        class Inner(BaseModel):
+            x: annotation
+        annotation = list[Optional[Inner]]
+        value = [{"x": [10]}]
+    model = create_model("Container", x=(annotation, ...))
+    codec = compile(model, validate=False, plan=plan)
+    instance = model(x=value)
+    expected = instance.model_dump()
+    assert "-90" in str(expected)
+
+    def assert_unbounded(node):
+        if node["kind"] == "int":
+            assert node == {"kind": "int"}
+        elif node["kind"] == "array":
+            assert_unbounded(node["element"])
+        elif node["kind"] == "nullable":
+            assert_unbounded(node["inner"])
+        elif node["kind"] == "struct":
+            for field in node["fields"]:
+                assert_unbounded(field["type"])
+    assert_unbounded(codec.ir)
+    assert codec.decode(codec.encode(instance)) == expected
+    assert codec.decode_body(codec.encode_body(instance)) == expected
+
+
+@pytest.mark.parametrize("mode", ["after", "wrap", "plain", "before"])
+@pytest.mark.parametrize("optional", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_validator_around_nested_model_container(mode, optional, plan):
+    class Inner(BaseModel):
+        x: Annotated[int, Ge(10)]
+
+    def shift(items):
+        return [item.model_copy(update={"x": item.x - 100}) for item in items]
+
+    if mode == "wrap":
+        validator = WrapValidator(lambda items, handler: shift(handler(items)))
+    elif mode == "plain":
+        validator = PlainValidator(lambda items: shift([Inner.model_validate(item) for item in items]))
+    elif mode == "before":
+        validator = BeforeValidator(lambda items: [{"x": item["x"] - 100} for item in items])
+    else:
+        validator = AfterValidator(shift)
+    annotation = Annotated[list[Inner], validator]
+    if optional:
+        annotation = Optional[annotation]
+    model = create_model("Outer", x=(annotation, ...))
+    instance = model(x=[{"x": 110 if mode == "before" else 10}])
+    codec = compile(model, validate=False, plan=plan)
+    leaf = codec.ir["fields"][0]["type"]["element"]["fields"][0]["type"]
+    assert leaf == ({"kind": "int", "min": 10} if mode == "before" else {"kind": "int"})
+    assert codec.decode(codec.encode(instance)) == instance.model_dump()
+    assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("default,field_validates,config_validates,minimum", [
+    (-90, None, False, None), (-90, False, True, None),
+    (-90, True, False, 10), (-90, None, True, 10),
+    (10, None, False, 10), (100, False, False, 10),
+])
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_static_integer_defaults_respect_validate_default(default, field_validates, config_validates,
+                                                        minimum, grouped, plan):
+    annotation = Annotated[int, _FieldBounds()] if grouped else Annotated[int, Ge(10)]
+    # Use the same lower bound for the plain and GroupedMetadata cases.
+    if grouped:
+        default = -90 if default < 10 else 5
+        minimum = 2 if minimum is not None else None
+    model = create_model("Defaults", __config__=ConfigDict(validate_default=config_validates), x=(
+        annotation, Field(default=default, validate_default=field_validates),
+    ))
+    expected = {"kind": "int"}
+    if minimum is not None:
+        expected["min"] = minimum
+        if grouped:
+            expected["max"] = 8
+    codec = compile(model, validate=False, plan=plan)
+    assert codec.ir["fields"][0]["type"] == expected
+    if minimum is not None and default < minimum:
+        with pytest.raises(ValidationError):
+            model()
+    else:
+        instance = model()
+        assert codec.decode(codec.encode(instance)) == instance.model_dump()
+        assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("mode", ["after", "wrap", "before"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_model_validators_keep_declared_field_bounds(mode, nested, plan):
+    if mode == "after":
+        def validator(self):
+            self.x -= 100
+            return self
+    elif mode == "wrap":
+        def validator(cls, value, handler):
+            instance = handler(value)
+            instance.x -= 100
+            return instance
+        validator = classmethod(validator)
+    else:
+        def validator(cls, value):
+            return {**value, "x": value["x"] - 100}
+        validator = classmethod(validator)
+    inner = create_model("ModelValidated", x=(int, Field(ge=0)), __validators__={
+        "shift": model_validator(mode=mode)(validator),
+    })
+    model = create_model("Nested", x=(list[inner], ...)) if nested else inner
+    value = 150 if mode == "before" else 50
+    instance = model(x=[{"x": value}]) if nested else model(x=value)
+    codec = compile(model, validate=False, plan=plan)
+    leaf = codec.ir["fields"][0]["type"]
+    if nested:
+        leaf = leaf["element"]["fields"][0]["type"]
+    assert leaf == {"kind": "int", "min": 0}
+    for encode in (codec.encode, codec.encode_body):
+        if mode == "before":
+            assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+        else:
+            with pytest.raises(EncodeError) as error:
+                encode(instance)
+            assert error.value.code == "range"
+    assert "outside field validation" in to_ir.__doc__
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_field_and_model_validators_using_the_same_function_remain_distinct(plan):
+    def shift(value):
+        value.x -= 100
+        return value
+
+    inner = create_model("Inner", x=(int, Field(ge=0)), __validators__={
+        "shift": model_validator(mode="after")(shift),
+    })
+    outer = create_model("Outer", x=(Annotated[inner, AfterValidator(shift)], ...))
+    assert to_ir(inner)["fields"][0]["type"] == {"kind": "int", "min": 0}
+    codec = compile(outer, validate=False, plan=plan)
+    assert codec.ir["fields"][0]["type"]["fields"][0]["type"] == {"kind": "int"}
+    instance = outer(x={"x": 150})
+    assert instance.x.x == -50
+    assert codec.decode(codec.encode(instance)) == {"x": {"x": -50}}
+    assert codec.decode_body(codec.encode_body(instance)) == {"x": {"x": -50}}
+
+
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_generic_models_and_forward_refs_resolve_definitions(plan):
+    item_type = TypeVar("item_type")
+
+    class Batch(BaseModel, Generic[item_type]):
+        items: list[item_type]
+
+    bounded_batch = Batch[Annotated[int, Ge(10)]]
+
+    class Envelope(BaseModel):
+        first: "ForwardBatch"
+        rest: list[Optional["ForwardBatch"]]
+
+    Envelope.model_rebuild(_types_namespace={"ForwardBatch": bounded_batch})
+    assert Envelope.__pydantic_core_schema__["type"] == "definitions"
+    codec = compile(Envelope, plan=plan)
+    first = codec.ir["fields"][0]["type"]
+    repeated = codec.ir["fields"][1]["type"]["element"]["inner"]
+    assert first == repeated == {"kind": "struct", "fields": [
+        {"name": "items", "type": {"kind": "array", "element": {"kind": "int", "min": 10}}},
+    ]}
+    instance = Envelope(first={"items": [10]}, rest=[None, {"items": [20]}])
+    assert codec.decode(codec.encode(instance)) == instance.model_dump()
+    with pytest.raises(EncodeError) as error:
+        codec.encode({"first": {"items": [-90]}, "rest": []})
+    assert error.value.code == "range"
+
+
+@pytest.mark.parametrize("bad_schema", [
+    {"type": "unexpected"}, {"type": "list"},
+    {"type": "definition-ref", "schema_ref": "missing"},
+    {"type": "chain", "steps": []},
+    {"type": "list", "items_schema": {"type": "nullable"}},
+])
+def test_unmatched_field_schemas_drop_bounds_without_raw_errors(bad_schema, monkeypatch):
+    class M(BaseModel):
+        x: list[Annotated[int, Ge(10)]]
+        y: int = Field(ge=0)
+
+    schema = deepcopy(M.__pydantic_core_schema__)
+    schema["schema"]["fields"]["x"]["schema"] = bad_schema
+    monkeypatch.setattr(M, "__pydantic_core_schema__", schema)
+    assert to_ir(M) == {"kind": "struct", "fields": [
+        {"name": "x", "type": {"kind": "array", "element": {"kind": "int"}}},
+        {"name": "y", "type": {"kind": "int", "min": 0}},
+    ]}
 
 
 @pytest.mark.parametrize("annotation,default,int_schema", [
@@ -482,7 +821,7 @@ def test_plain_validator_does_not_use_serialization_schema_bounds():
     (Annotated[int, BeforeValidator(_identity), Ge(10)], {"kind": "int"}),
     (Annotated[int, Ge(10), _ShiftChain()], {"kind": "int"}),
     (Annotated[int, Ge(10), _LastIntChain()], {"kind": "int", "min": -100, "max": -80}),
-    (Annotated[int, _RefChain()], {"kind": "int"}),
+    (Annotated[int, _RefChain()], {"kind": "int", "min": 10}),
 ])
 def test_integer_bounds_only_follow_output_schema(annotation, node):
     model = create_model("Constrained", x=(annotation, ...))
@@ -531,15 +870,18 @@ def test_invalid_integer_metadata_is_unsupported_with_cause(convert):
 
 
 def test_unconstrained_integer_leaves_do_not_build_type_adapters(monkeypatch):
-    model = create_model("Plain", x=(int, ...), y=(list[int | None], ...))
+    model = create_model("Plain", x=(int, ...), y=(list[int | None], ...),
+                         z=(Annotated[int, BeforeValidator(_identity)], ...))
 
-    def unexpected_adapter(*args, **kwargs):
-        pytest.fail("unconstrained integers must not build TypeAdapters")
+    def unexpected_walk(*args, **kwargs):
+        pytest.fail("unconstrained integers must not walk schemas or build TypeAdapters")
 
-    monkeypatch.setattr("hyperfly.pydantic.TypeAdapter", unexpected_adapter)
+    monkeypatch.setattr("pydantic.TypeAdapter", unexpected_walk)
+    monkeypatch.setattr("hyperfly.pydantic._apply_bounds", unexpected_walk)
     assert to_ir(model) == {"kind": "struct", "fields": [
         {"name": "x", "type": {"kind": "int"}},
         {"name": "y", "type": {"kind": "array", "element": {"kind": "nullable", "inner": {"kind": "int"}}}},
+        {"name": "z", "type": {"kind": "int"}},
     ]}
 
 

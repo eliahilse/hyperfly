@@ -1,4 +1,10 @@
-"""Pydantic schema conversion and optional validation for Hyperfly codecs."""
+"""Pydantic schema conversion and optional validation for Hyperfly codecs.
+
+Field-level after/wrap/plain validators, decorated or Annotated at any container
+level, drop integer bounds beneath them. Model validators keep field bounds: values
+set outside field validation, e.g. by model validators, assignment or model_construct,
+are checked against the declared bounds and may raise ``range``.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +18,12 @@ from ._ir import _check_field_name, _check_string
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError, Limits, UnsupportedSchemaError
 
 try:
-    from pydantic import BaseModel, TypeAdapter, ValidationError
+    from annotated_types import Ge, GroupedMetadata, Gt, Le, Lt
+    from pydantic import (
+        AfterValidator, BaseModel, BeforeValidator, PlainSerializer, PlainValidator,
+        ValidationError, WrapSerializer, WrapValidator,
+    )
+    from pydantic.fields import FieldInfo
 except ImportError as _err:  # pragma: no cover
     raise ImportError("hyperfly.pydantic requires pydantic >= 2.5") from _err
 
@@ -21,23 +32,41 @@ def _unsupported(path: str, message: str) -> NoReturn:
     raise UnsupportedSchemaError(path, message)
 
 
-def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]:
-    if not metadata:
-        return None, None
-    try:
-        schema = TypeAdapter[Any](typing.Annotated[(int, *metadata)]).core_schema
-        # Only follow schemas whose output is the value stored on the model.
-        while True:
-            if schema["type"] == "function-before":
-                schema = schema["schema"]
-            elif schema["type"] == "chain":
-                schema = schema["steps"][-1]
-            elif schema["type"] == "int":
-                break
-            else:
-                return None, None
-    except Exception as error:
-        raise UnsupportedSchemaError(path, f"cannot build integer validation schema: {error}") from error
+class _SchemaMismatch(Exception):
+    """The installed validation schema cannot be matched to the wire structure."""
+
+
+class _BoundSchemas:
+    def __init__(self) -> None:
+        self.schemas: dict[type[BaseModel], Any] = {}
+        self.models: dict[int, type[BaseModel]] = {}
+        self.pending: set[int] = set()
+        self.paths: dict[int, str] = {}
+
+    def mark(self, node: dict[str, Any], *children: dict[str, Any]) -> dict[str, Any]:
+        if any(id(child) in self.pending for child in children):
+            self.pending.add(id(node))
+        return node
+
+
+def _resolve_schema(schema: Any, definitions: dict[str, Any]) -> dict[str, Any]:
+    seen: set[int] = set()
+    while isinstance(schema, dict):
+        if id(schema) in seen:
+            raise _SchemaMismatch
+        seen.add(id(schema))
+        kind = schema.get("type")
+        if kind == "definitions":
+            definitions.update((item["ref"], item) for item in schema["definitions"])
+            schema = schema["schema"]
+        elif kind == "definition-ref":
+            schema = definitions[schema["schema_ref"]]
+        else:
+            return schema
+    raise _SchemaMismatch
+
+
+def _int_bounds(schema: dict[str, Any], path: str) -> tuple[int | None, int | None]:
     lower: list[int] = []
     upper: list[int] = []
     if "ge" in schema:
@@ -73,22 +102,128 @@ def _floor_int(v: Any, path: str) -> int:
     return cast(int, bound)
 
 
-def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
+def _clear_bounds(node: dict[str, Any]) -> None:
+    kind = node["kind"]
+    if kind == "int":
+        node.pop("min", None)
+        node.pop("max", None)
+    elif kind == "nullable":
+        _clear_bounds(node["inner"])
+    elif kind == "array":
+        _clear_bounds(node["element"])
+    elif kind == "struct":
+        for field in node["fields"]:
+            _clear_bounds(field["type"])
+
+
+def _apply_bounds(
+    node: dict[str, Any], schema: Any, definitions: dict[str, Any],
+    bounds: _BoundSchemas, path: str, validate_default: bool = False,
+    unchecked_defaults: tuple[Any, ...] = (),
+) -> None:
+    if id(node) not in bounds.pending:
+        return
+    schema = _resolve_schema(schema, definitions)
+    # Only wrappers belonging to the model itself may change values outside
+    # field validation. Field validators wrapping that model remain barriers.
+    model = bounds.models.get(id(node))
+    own_model = _resolve_schema(bounds.schemas[model], definitions) if model is not None else None
+    inside_model = False
+    defaults = list(unchecked_defaults)
+    seen: set[int] = set()
+    while True:
+        schema = _resolve_schema(schema, definitions)
+        if id(schema) in seen:
+            raise _SchemaMismatch
+        seen.add(id(schema))
+        kind = schema["type"]
+        if own_model is not None and (schema is own_model or (
+            own_model.get("ref") is not None and schema.get("ref") == own_model["ref"]
+        )):
+            inside_model = True
+        if kind in ("function-after", "function-wrap") and inside_model:
+            schema = schema["schema"]
+        elif kind in ("default", "function-before"):
+            if kind == "default" and not schema.get("validate_default", validate_default):
+                defaults.append(schema.get("default"))
+            schema = schema["schema"]
+        elif kind == "chain":
+            schema = schema["steps"][-1]
+        else:
+            break
+    kind = node["kind"]
+    if kind == "nullable" and schema["type"] == "nullable":
+        _apply_bounds(node["inner"], schema["schema"], definitions, bounds, path,
+                      validate_default, tuple(defaults))
+    elif kind == "array" and schema["type"] == "list":
+        _apply_bounds(node["element"], schema["items_schema"], definitions, bounds, f"{path}[]", validate_default)
+    elif kind == "struct":
+        if schema["type"] == "model":
+            validate_default = schema.get("config", {}).get("validate_default", False)
+            schema = _resolve_schema(schema["schema"], definitions)
+            while schema["type"] == "function-before":
+                schema = _resolve_schema(schema["schema"], definitions)
+        if schema["type"] != "model-fields" or model is None:
+            raise _SchemaMismatch
+        for (name, _), field in zip(model.model_fields.items(), node["fields"], strict=True):
+            field_node = field["type"]
+            if field.get("nullable"):
+                field_node = bounds.mark({"kind": "nullable", "inner": field_node}, field_node)
+            try:
+                field_schema = schema["fields"][name]
+                if field_schema["type"] != "model-field":
+                    raise _SchemaMismatch
+                _apply_bounds(field_node, field_schema["schema"], definitions, bounds,
+                              f"{path}.{name}", validate_default)
+            except UnsupportedSchemaError:
+                raise
+            except Exception:
+                _clear_bounds(field_node)
+    elif kind == "int" and schema["type"] == "int":
+        lo, hi = _int_bounds(schema, path)
+        if any(type(value) is int and (
+            (lo is not None and value < lo) or (hi is not None and value > hi)
+        ) for value in defaults):
+            return
+        if lo is not None and lo != INT_MIN:
+            node["min"] = lo
+        if hi is not None and hi != INT_MAX:
+            node["max"] = hi
+    else:
+        raise _SchemaMismatch
+
+
+def _has_bounds_metadata(metadata: list[Any]) -> bool:
+    for item in metadata:
+        if isinstance(item, (Ge, Gt, Le, Lt, GroupedMetadata)):
+            return True
+        if isinstance(item, FieldInfo) and _has_bounds_metadata(item.metadata):
+            return True
+        if isinstance(item, (AfterValidator, BeforeValidator, PlainValidator, WrapValidator,
+                             PlainSerializer, WrapSerializer)):
+            continue
+        # Custom schema hooks can introduce bounds without standard metadata.
+        if hasattr(item, "__get_pydantic_core_schema__"):
+            return True
+    return False
+
+
+def _node_of(annotation: Any, metadata: list[Any], path: str, bounds: _BoundSchemas) -> dict[str, Any]:
     origin = typing.get_origin(annotation)
 
     if origin is typing.Annotated:
         base, *inner_metadata = typing.get_args(annotation)
         # Outer metadata applies after metadata on the wrapped type.
-        return _node_of(base, [*inner_metadata, *metadata], path)
+        return _node_of(base, [*inner_metadata, *metadata], path, bounds)
 
     if origin in (typing.Union, types.UnionType):
         args = [a for a in typing.get_args(annotation) if a is not type(None)]
         if len(args) != 1 or len(typing.get_args(annotation)) != 2:
             _unsupported(path, "only Optional[T] unions have a v0 encoding")
-        inner = _node_of(args[0], metadata, path)
+        inner = _node_of(args[0], metadata, path, bounds)
         if inner["kind"] == "nullable":
             _unsupported(path, "nested Optional has no v0 encoding")
-        return {"kind": "nullable", "inner": inner}
+        return bounds.mark({"kind": "nullable", "inner": inner}, inner)
 
     if origin is typing.Literal:
         values = list(typing.get_args(annotation))
@@ -103,7 +238,8 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
 
     if origin is list:
         (element,) = typing.get_args(annotation) or (Any,)
-        return {"kind": "array", "element": _node_of(element, [], f"{path}[]")}
+        inner = _node_of(element, [], f"{path}[]", bounds)
+        return bounds.mark({"kind": "array", "element": inner}, inner)
 
     if origin is not None:
         _unsupported(path, f"type {annotation!r} has no v0 encoding")
@@ -111,12 +247,10 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
     if annotation is bool:
         return {"kind": "bool"}
     if annotation is int:
-        lo, hi = _int_bounds(metadata, path)
         node: dict[str, Any] = {"kind": "int"}
-        if lo is not None and lo != INT_MIN:
-            node["min"] = lo
-        if hi is not None and hi != INT_MAX:
-            node["max"] = hi
+        if metadata and _has_bounds_metadata(metadata):
+            bounds.pending.add(id(node))
+            bounds.paths[id(node)] = path
         return node
     if annotation is float:
         return {"kind": "float64"}
@@ -130,13 +264,13 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
             _unsupported(path, "only string-valued enums are supported in v0")
         return {"kind": "enum", "members": members}
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return _struct_of(annotation, path)
+        return _struct_of(annotation, path, bounds)
 
     _unsupported(path, f"type {annotation!r} has no v0 encoding")
     raise AssertionError
 
 
-def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
+def _struct_of(model: type[BaseModel], path: str, bounds: _BoundSchemas) -> dict[str, Any]:
     if model.model_config.get("extra") == "allow":
         _unsupported(path, "models with extra='allow' cannot be represented — the wire has no room for undeclared fields")
     fields = []
@@ -172,22 +306,50 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
         if wire_name in seen:
             _unsupported(field_path, f'duplicate field "{wire_name}"')
         seen.add(wire_name)
-        node = _node_of(info.annotation, list(info.metadata), field_path)
+        node = _node_of(info.annotation, list(info.metadata), field_path, bounds)
         field: dict[str, Any] = {"name": wire_name, "type": node}
         if node["kind"] == "nullable":
             field["type"] = node["inner"]
             field["nullable"] = True
         fields.append(field)
-    return {"kind": "struct", "fields": fields}
+    node = bounds.mark({"kind": "struct", "fields": fields}, *(field["type"] for field in fields))
+    bounds.models[id(node)] = model
+    if model not in bounds.schemas:
+        bounds.schemas[model] = model.__dict__.get("__pydantic_core_schema__")
+    return node
 
 
 def to_ir(model: type[BaseModel]) -> dict[str, Any]:
-    """Return the model's v0 struct schema; raise code ``unsupported`` with a field path."""
+    """Return the model's v0 struct schema; raise code ``unsupported`` with a field path.
+
+    Field-level after/wrap/plain validators, decorated or Annotated at any container
+    level, drop integer bounds beneath them. Model validators keep field bounds: values
+    set outside field validation, e.g. by model validators, assignment or model_construct,
+    are checked against the declared bounds and may raise ``range``.
+    """
     if not (isinstance(model, type) and issubclass(model, BaseModel)):
         _unsupported("$", "expected a pydantic BaseModel subclass")
     if "root" in getattr(model, "model_fields", {}) and type(model).__name__ == "ModelMetaclass" and _is_root_model(model):
         _unsupported("$", "RootModel has no v0 struct encoding — wrap the value in a field")
-    return _struct_of(model, "$")
+    bounds = _BoundSchemas()
+    node = _struct_of(model, "$", bounds)
+    if id(node) in bounds.pending:
+        for bounded_model in bounds.schemas:
+            if not bounded_model.__pydantic_complete__:
+                try:
+                    bounded_model.model_rebuild(_types_namespace={})
+                except Exception as error:
+                    path = next(iter(bounds.paths.values()))
+                    raise UnsupportedSchemaError(path, f"cannot build model validation schema: {error}") from error
+                bounds.schemas[bounded_model] = bounded_model.__pydantic_core_schema__
+        schema = bounds.schemas[model]
+        try:
+            _apply_bounds(node, schema, {}, bounds, "$")
+        except UnsupportedSchemaError:
+            raise
+        except Exception:
+            _clear_bounds(node)
+    return node
 
 
 def _is_root_model(model: type) -> bool:
@@ -206,6 +368,11 @@ class ModelCodec(Codec[Any]):
     With validation disabled, decoding returns plain dictionaries, so the value
     type is Any. Invalid inputs raise ``options``, ``unsupported``, or ``ir``;
     value validation failures raise code ``validation``.
+
+    Field-level after/wrap/plain validators, decorated or Annotated at any container
+    level, drop integer bounds beneath them. Model validators keep field bounds: values
+    set outside field validation, e.g. by model validators, assignment or model_construct,
+    are checked against the declared bounds and may raise ``range``.
     """
 
     def __init__(
