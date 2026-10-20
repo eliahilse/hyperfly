@@ -1,10 +1,10 @@
 from typing import Literal, Optional
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from conftest import load
-from hyperfly import UnsupportedSchemaError, compile_ir
+from hyperfly import DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
 from hyperfly.pydantic import compile, to_ir
 
 
@@ -105,3 +105,37 @@ def test_model_codec_metadata_is_read_only(attribute):
     with pytest.raises(AttributeError):
         setattr(codec, attribute, None)
     assert getattr(codec, attribute) == metadata
+
+
+class _Positive(BaseModel):
+    n: int
+
+    @field_validator("n")
+    @classmethod
+    def _positive(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("negative")
+        return value
+
+
+@pytest.mark.parametrize("method", ["encode", "encode_body"])
+@pytest.mark.parametrize("value", [{"n": -1}, {"m": 1}, "x"])
+def test_failed_validation_on_encode_is_an_encode_error(method, value):
+    codec = compile(_Positive, validate=True)
+    with pytest.raises(EncodeError) as raised:
+        getattr(codec, method)(value)
+    assert raised.value.code == "validation"
+    assert isinstance(raised.value, HyperflyError)
+    assert isinstance(raised.value.__cause__, ValidationError)
+
+
+@pytest.mark.parametrize("method", ["decode", "decode_body"])
+def test_failed_validation_on_decode_is_a_decode_error(method):
+    codec = compile(_Positive, validate=True)
+    loose = compile_ir(codec.ir)
+    data = loose.encode({"n": -1}) if method == "decode" else loose.encode_body({"n": -1})
+    with pytest.raises(DecodeError) as raised:
+        getattr(codec, method)(data)
+    assert raised.value.code == "validation"
+    assert isinstance(raised.value.__cause__, ValidationError)
+    assert compile(_Positive).decode(loose.encode({"n": -1})) == {"n": -1}

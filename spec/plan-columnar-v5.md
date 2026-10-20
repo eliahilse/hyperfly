@@ -92,9 +92,10 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
     `uvarint` blob length and a raw-deflate (RFC 1951) stream of the
     concatenated UTF-8 bytes. The inflated size MUST equal the sum of the
     declared lengths; each slice MUST be strict UTF-8; per-value and total
-    lengths obey the decoder byte limits. A decoder without an inflate
-    capability MUST reject deflate columns as unsupported (and the protocol
-    layer falls back to JSON) rather than guess.
+    lengths obey the decoder byte limits, and the declared total is charged
+    against the byte budget before inflating (wire-v0 §6). A decoder without
+    an inflate capability MUST reject deflate columns as unsupported (and the
+    protocol layer falls back to JSON) rather than guess.
   - `0x03` grammar: requires a grammar for this column in the profile (§6.3);
     a decoder without one MUST reject the column. A `uvarint` escape count
     `E` (`E ≤ k`, larger MUST be rejected); if `0 < E < k`, an escape bitmap
@@ -293,6 +294,8 @@ The result numbers every columnar leaf in the whole schema `0 … N−1`.
   token object holds exactly one of `lit` or `num`; `columns` MUST be
   non-empty — a profile with nothing to say is expressed by having no
   profile, not by an empty one, so one codec never has two artifacts.
+- Integer-valued fields follow wire-v0 §4: `2.0` is the integer 2 and `-0`
+  is 0, while `2.5` is rejected.
 
 Constraints, all validated at compile time:
 

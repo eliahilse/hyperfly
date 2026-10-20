@@ -15,7 +15,10 @@ export type ErrorCode =
   | "fingerprint"
   | "ir"
   | "packed"
-  | "unsupported";
+  | "unsupported"
+  | "json"
+  | "validation"
+  | "options";
 
 export class HyperflyError extends Error {
   readonly code: ErrorCode;

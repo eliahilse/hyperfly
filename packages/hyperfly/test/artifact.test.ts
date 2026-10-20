@@ -43,6 +43,19 @@ describe("loadArtifact", () => {
     expect(derived.shared.columns.some((column) => column.derived)).toBe(true);
   });
 
+  test("reports throwing option getters as options errors", () => {
+    const codec = compileIR(ROWS);
+    const cause = new TypeError("cannot read option");
+    for (const options of [
+      { get limits(): never { throw cause; } },
+      { get pack(): never { throw cause; } },
+    ]) {
+      const run = () => loadArtifact(codec.artifact, codec.fingerprint, options);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options", cause }));
+    }
+  });
+
   test.each(cases)("rebuilds $name with identical bytes", ({ codec, sample }) => {
     const loaded = loadArtifact(codec.artifact, codec.fingerprint);
     expect(loaded.fingerprint).toBe(codec.fingerprint);
@@ -64,9 +77,9 @@ describe("loadArtifact", () => {
     expect(loadArtifact(codec.artifact, codec.fingerprint.toUpperCase()).fingerprint).toBe(codec.fingerprint);
   });
 
-  test("rejects non-JSON with an ir error", () => {
+  test("rejects non-JSON with a json error", () => {
     expect(() => loadArtifact("{", codec.fingerprint)).toThrow(HyperflyError);
-    expect(() => loadArtifact("{", codec.fingerprint)).toThrow(expect.objectContaining({ code: "ir", message: expect.stringContaining("artifact is not JSON") }));
+    expect(() => loadArtifact("{", codec.fingerprint)).toThrow(expect.objectContaining({ code: "json", message: expect.stringContaining("artifact is not JSON"), cause: expect.any(SyntaxError) }));
   });
 
   test.each([
@@ -267,7 +280,7 @@ describe("fetchArtifact", () => {
 
   test("rejects an empty body", async () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(null)) }))
-      .rejects.toThrow(expect.objectContaining({ code: "ir" }));
+      .rejects.toThrow(expect.objectContaining({ code: "json", cause: expect.any(SyntaxError) }));
   });
 
   test("verifies the fetched artifact and forwards codec options", async () => {

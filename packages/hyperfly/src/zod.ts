@@ -1,5 +1,5 @@
-import { compileIR, type Codec, type CompileOptions } from "./codec.js";
-import { UnsupportedSchemaError } from "./errors.js";
+import { checkedOptions, compileIR, type Codec, type CompileOptions } from "./codec.js";
+import { DecodeError, EncodeError, UnsupportedSchemaError } from "./errors.js";
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
@@ -221,18 +221,26 @@ export function compile<S extends ZodSchemaLike>(
   schema: S,
   options: ZodCompileOptions = {},
 ): Codec<InferOutput<S>> {
-  const codec = compileIR<InferOutput<S>>(toIR(schema), options);
-  if (!options.validate) return codec;
+  const checked = checkedOptions(options);
+  const codec = compileIR<InferOutput<S>>(toIR(schema), checked);
+  if (!checked.validate) return codec;
 
   if (typeof schema.parse !== "function") {
     unsupported("$", "validate: true requires a schema with .parse()");
   }
-  const parse = (value: unknown) => schema.parse!(value) as InferOutput<S>;
+  const parse = (value: unknown, ErrorClass: typeof EncodeError | typeof DecodeError): InferOutput<S> => {
+    try {
+      return schema.parse!(value) as InferOutput<S>;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "schema parse failed";
+      throw new ErrorClass("validation", `$: ${message}`, { cause });
+    }
+  };
   return {
     ...codec,
-    encode: (value) => codec.encode(parse(value)),
-    decode: (bytes) => parse(codec.decode(bytes)),
-    encodeBody: (value) => codec.encodeBody(parse(value)),
-    decodeBody: (bytes) => parse(codec.decodeBody(bytes)),
+    encode: (value) => codec.encode(parse(value, EncodeError)),
+    decode: (bytes) => parse(codec.decode(bytes), DecodeError),
+    encodeBody: (value) => codec.encodeBody(parse(value, EncodeError)),
+    decodeBody: (bytes) => parse(codec.decodeBody(bytes), DecodeError),
   };
 }
