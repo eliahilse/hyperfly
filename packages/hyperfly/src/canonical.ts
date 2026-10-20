@@ -102,7 +102,13 @@ export function serializeArtifact(
   validateIR(ir);
   if (profile === undefined || profile === null) return canonicalArtifact(ir, layout);
   if (layout !== "columnar") throw new HyperflyError("ir", "profiles apply to the columnar plan only");
-  return canonicalArtifact(ir, layout, checkedProfile(ir, { version: 2, ...profile } as Profile));
+  let document: Profile;
+  try {
+    document = { version: 2, ...profile } as Profile;
+  } catch (cause) {
+    throw new HyperflyError("ir", "profile: could not read JSON data", { cause });
+  }
+  return canonicalArtifact(ir, layout, checkedProfile(ir, document));
 }
 
 export function fingerprintOf(artifact: string): Uint8Array {

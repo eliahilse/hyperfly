@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import vectors from "../../../spec/vectors/columnar.json" with { type: "json" };
 import { z } from "zod";
 import { compileIR, FingerprintMismatchError, train, type IRNode } from "../src/index.js";
@@ -116,6 +117,25 @@ describe("packed string columns", () => {
     });
     expect(() => codec.encodeBody(prose)).toThrow(EncodeError);
     expect(() => codec.encodeBody(prose)).toThrow(expect.objectContaining({ code: "packed" }));
+  });
+
+  test("accepts a Uint8Array from another realm as the deflate result", () => {
+    const foreignBytes = runInNewContext("(n) => new Uint8Array(n)") as (n: number) => Uint8Array;
+    let deflated = false;
+    const codec = compileIR(IR, {
+      plan: "columnar",
+      pack: {
+        deflate: (bytes) => {
+          deflated = true;
+          const out = foreignBytes(bytes.length);
+          out.set(bytes);
+          return out;
+        },
+        inflate: (bytes) => bytes,
+      },
+    });
+    expect(codec.decodeBody(codec.encodeBody(prose))).toEqual(prose);
+    expect(deflated).toBe(true);
   });
 
   test("a deflate hook returning a revoked proxy is EncodeError packed", () => {

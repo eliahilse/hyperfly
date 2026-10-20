@@ -559,6 +559,27 @@ describe("fetch adapter", () => {
     }
   });
 
+  test("a bodyless response never encodes the value", () => {
+    let encodes = 0;
+    const spied = new CodecRegistry([{
+      ...codecA,
+      encode(input: never) { encodes++; return codecA.encode(input); },
+    } as never]);
+    const binary = { headers: { "Hyperfly-Accept": codecA.fingerprint } };
+    const head = respond(new Request(url, { method: "HEAD", ...binary }), value, spied);
+    expect(head.body).toBeNull();
+    expect(head.headers.get("hyperfly-codec")).toBe(codecA.fingerprint);
+    expect(respond(new Request(url, binary), value, spied, { status: 304 }).body).toBeNull();
+    expect(encodes).toBe(0);
+    const unencodable = { n: 1n, toJSON() { throw new Error("toJSON must not run"); } };
+    for (const [request, status] of [[new Request(url, { method: "HEAD" }), 200], [new Request(url), 204]] as const) {
+      const response = respond(request, unencodable, registry, { status });
+      expect(response.status).toBe(status);
+      expect(response.body).toBeNull();
+      expect(response.headers.get("content-type")).toBe("application/json");
+    }
+  });
+
   test.each([204, 205, 304])("status %d has no body and keeps the negotiated headers", (status) => {
     const request = new Request(url, { headers: { "Hyperfly-Accept": codecA.fingerprint } });
     const response = respond(request, value, registry, { status, headers: { ETag: '"v1"' } });
@@ -962,6 +983,18 @@ describe("request body limits", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.response.status).toBe(413);
     expect(request.bodyUsed).toBe(false);
+  });
+
+  test("compares Content-Length digits to maxBytes exactly at the safe integer bound", async () => {
+    const maxBytes = Number.MAX_SAFE_INTEGER;
+    const over = withContentLength("9007199254740992");
+    const result = await readBody(over, registry, { maxBytes });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(413);
+    expect(over.bodyUsed).toBe(false);
+    for (const contentLength of ["9007199254740991", "0009007199254740991"]) {
+      expect(await readBody(withContentLength(contentLength), registry, { maxBytes })).toEqual({ ok: true, value: 0 });
+    }
   });
 
   test.each(["\u00a02", "2\n", "\v2", "2\r", "\u0662", "２", `${"0".repeat(400)}1`])(

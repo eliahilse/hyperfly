@@ -97,8 +97,8 @@ export default {
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
-`respond` sends no body for HEAD requests and for status 204, 205 or 304, with the same headers otherwise; `discovery`
-answers GET and HEAD and returns `undefined` for other methods.
+For HEAD requests and status 204, 205 or 304, `respond` sends the negotiated headers without encoding the value or
+sending a body; `discovery` answers GET and HEAD and returns `undefined` for other methods.
 A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it advertises a matching fingerprint.
 
 ### JSON fallback
@@ -369,7 +369,7 @@ try {
 | `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
 | `packed` | Invalid compressed stream, decompressed length mismatch, or a failing or invalid deflate hook. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
-| `json` | Malformed JSON or UTF-8 in `decodeResponse`, malformed artifact text, or a value the JSON fallback cannot encode; the underlying error is `cause`. |
+| `json` | Malformed JSON or UTF-8 in `decodeResponse`, malformed artifact text, or a value the JSON fallback cannot encode; the underlying error, when there is one, is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
 | `options` | Invalid compile, artifact, `train` or HTTP options, such as an unknown limit or an invalid `maxBytes`. |
 
