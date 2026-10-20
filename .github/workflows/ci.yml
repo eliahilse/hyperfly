@@ -172,7 +172,7 @@ jobs:
             -f state=pending -f context=ci -f description=Running -f target_url="$RUN_URL"
 
   dispatch-report:
-    needs: [check, pack, release-checks, python, rust, rust-msrv, interop]
+    needs: [dispatch-pending, check, pack, release-checks, python, rust, rust-msrv, interop]
     if: always() && github.event_name == 'workflow_dispatch'
     permissions:
       actions: read
@@ -193,6 +193,7 @@ jobs:
           jobs="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
             --jq '.jobs[] | select(.name != "dispatch-report" and .name != "dispatch-pending") | @json')"
           while IFS= read -r job; do
+            [ -n "$job" ] || continue
             name="$(jq -r '.name' <<< "$job")"
             conclusion="$(jq -r '.conclusion' <<< "$job")"
             url="$(jq -r '.html_url' <<< "$job")"
@@ -203,7 +204,8 @@ jobs:
               *) state=failure; description=Failed ;;
             esac
             gh api --method POST "repos/$REPO/statuses/$SHA" --silent \
-              -f state="$state" -f context="$name" -f description="$description" -f target_url="$url"
+              -f state="$state" -f context="$name" -f description="$description" -f target_url="$url" \
+              || echo "::warning::could not post the status for $name"
           done <<< "$jobs"
           if [ "$CI_SUCCESS" = true ]; then
             state=success
