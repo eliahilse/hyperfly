@@ -1,10 +1,11 @@
 import { checkedOptions, compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
-import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
+import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError, isInstance, messageOf } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
 import type { Limits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
+import { byteLengthOf, isUint8Array } from "./typed-array.js";
 
 export const HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly";
 export const ACCEPT_HEADER = "hyperfly-accept";
@@ -17,10 +18,7 @@ export const DEFAULT_MAX_BODY_BYTES = 1 << 20;
 const MAX_ENTRIES = 32;
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 const VARY = "Hyperfly-Accept, Accept";
-/** The intrinsic getters see a chunk's internal slots, so neither a subclass nor another realm can misreport it. */
-const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
-const typedArrayTag = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
-const typedArrayByteLength = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
+const NULL_BODY_STATUSES = new Set([204, 205, 304]);
 
 /** Client fingerprints in preference order, ignoring malformed entries and duplicates. */
 export function parseAccept(header: string | null | undefined): string[] {
@@ -110,16 +108,27 @@ export interface Encoded {
   headers: Record<string, string>;
 }
 
+function jsonBody(value: unknown): string {
+  let body: string | undefined;
+  try {
+    body = JSON.stringify(value);
+  } catch (cause) {
+    throw new EncodeError("json", `$: ${messageOf(cause, "value could not be encoded as JSON")}`, { cause });
+  }
+  if (body === undefined) throw new EncodeError("json", "$: value has no JSON representation");
+  return body;
+}
+
 /** Encode one value according to a negotiation decision. */
 export function encodeFor<T>(decision: Negotiation<T>, value: T, options: NegotiateOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
     } catch (error) {
-      if (!(error instanceof EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
+      if (!isInstance(error, EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
       options.onFallback?.(error);
       return {
-        body: JSON.stringify(value),
+        body: jsonBody(value),
         headers: {
           Vary: VARY,
           "Content-Type": "application/json",
@@ -128,7 +137,7 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Negoti
       };
     }
   }
-  return { body: JSON.stringify(value), headers: decision.headers };
+  return { body: jsonBody(value), headers: decision.headers };
 }
 
 export interface WellKnownResponse {
@@ -232,8 +241,8 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
   try {
     codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits, pack });
   } catch (error) {
-    if (error instanceof HyperflyError) throw error;
-    throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);
+    if (isInstance(error, HyperflyError)) throw error;
+    throw new HyperflyError("ir", `artifact does not compile: ${messageOf(error, "unknown error")}`);
   }
   const compiled = JSON.parse(codec.artifact) as { plan: { version: number } };
   if (compiled.plan.version !== plan.version) {
@@ -360,7 +369,12 @@ export function decodeResponse<T>(
   registry: CodecRegistry,
 ): { kind: "json"; value: T } | { kind: "hyperfly"; value: T } | { kind: "unknown-codec"; fingerprint: string } {
   if (mediaType(contentType) !== HYPERFLY_MEDIA_TYPE) {
-    const text = typeof body === "string" ? body : new TextDecoder().decode(body);
+    let text: string;
+    try {
+      text = typeof body === "string" ? body : new TextDecoder("utf-8", { fatal: true }).decode(body);
+    } catch (cause) {
+      throw new DecodeError("json", "$: body is not valid UTF-8", { cause });
+    }
     try {
       return { kind: "json", value: JSON.parse(text) as T };
     } catch (cause) {
@@ -395,7 +409,9 @@ export function respond<T>(
     ...options,
     accept: options.accept === undefined ? request.headers.get("accept") : options.accept,
   });
-  const { body, headers } = encodeFor(decision, value, options);
+  const status = options.status ?? 200;
+  const nullBody = NULL_BODY_STATUSES.has(status);
+  const { body, headers } = nullBody ? { body: null, headers: decision.headers } : encodeFor(decision, value, options);
   const responseHeaders = new Headers(options.headers);
   for (const name of ["Content-Type", "Content-Length", "Hyperfly-Codec", "Hyperfly-Offer"]) {
     responseHeaders.delete(name);
@@ -407,10 +423,7 @@ export function respond<T>(
   }
   for (const [name, value] of Object.entries(headers)) responseHeaders.set(name, value);
   responseHeaders.set("Vary", [...vary.values()].join(", "));
-  return new Response(body as BodyInit, {
-    status: options.status ?? 200,
-    headers: responseHeaders,
-  });
+  return new Response(request.method === "HEAD" ? null : body as BodyInit | null, { status, headers: responseHeaders });
 }
 
 /**
@@ -418,9 +431,11 @@ export function respond<T>(
  * caller can chain it ahead of its own router in one line.
  */
 export function discovery(request: Request, registry: CodecRegistry): Response | undefined {
+  if (request.method !== "GET" && request.method !== "HEAD") return undefined;
   const served = serveArtifact(new URL(request.url).pathname, registry);
   if (!served) return undefined;
-  return new Response(served.body || null, { status: served.status, headers: served.headers });
+  const body = request.method === "HEAD" ? null : served.body || null;
+  return new Response(body, { status: served.status, headers: served.headers });
 }
 
 export interface ReadBodyOptions {
@@ -428,12 +443,22 @@ export interface ReadBodyOptions {
 }
 
 /** Read a hyperfly or JSON request body (negotiation §4). */
-export function readBody<T>(
+export async function readBody<T>(
   request: Request,
   registry: CodecRegistry,
   options: ReadBodyOptions = {},
 ): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
   return readBodyWithinLimit<T>(request, registry, bodyLimit(options.maxBytes));
+}
+
+/** Whether a Content-Length of ASCII digits names more than maxBytes, compared as digits so no length rounds. */
+function exceeds(contentLength: string, maxBytes: number): boolean {
+  if (!/^[0-9]+$/.test(contentLength)) return false;
+  let start = 0;
+  while (start < contentLength.length - 1 && contentLength.charCodeAt(start) === 0x30) start++;
+  const digits = contentLength.slice(start);
+  const limit = String(maxBytes);
+  return digits.length > limit.length || (digits.length === limit.length && digits > limit);
 }
 
 function bodyLimit(maxBytes: number | undefined): number {
@@ -456,8 +481,7 @@ async function readBodyWithinLimit<T>(
   if (!isHyperfly && !isJson) {
     return { ok: false, response: new Response(null, { status: 415 }) };
   }
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && /^\d+$/.test(contentLength.trim()) && Number(contentLength) > maxBytes) {
+  if (exceeds(trimOws(request.headers.get("content-length") ?? ""), maxBytes)) {
     return { ok: false, response: new Response(null, { status: 413 }) };
   }
   const result = await readLimited(request.body, maxBytes);
@@ -489,7 +513,7 @@ async function readBodyWithinLimit<T>(
     }
     return { ok: true, value: codec.decode(bytes) as T };
   } catch (error) {
-    if (error instanceof HyperflyError) return { ok: false, response: new Response(null, { status: 400 }) };
+    if (isInstance(error, HyperflyError)) return { ok: false, response: new Response(null, { status: 400 }) };
     throw error;
   }
 }
@@ -519,11 +543,11 @@ async function readLimited(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (typedArrayTag.call(value) !== "Uint8Array") {
+        if (!isUint8Array(value)) {
           cancelQuietly(reader);
           return { ok: false, status: 400 };
         }
-        const size = typedArrayByteLength.call(value) as number;
+        const size = byteLengthOf(value);
         length += size;
         if (length > maxBytes) {
           cancelQuietly(reader);

@@ -5,7 +5,7 @@ import pytest
 
 from conftest import calls, load
 from hyperfly import HyperflyError, Limits, compile_ir
-from test_vectors import deep_eq
+from test_vectors import deep_eq, revive
 
 LIMITS = load("limits.json")
 
@@ -27,16 +27,6 @@ def codec_for(vector):
     limits = dataclasses.replace(Limits(), **overrides)
     pack = None if vector.get("inflate", True) else False
     return compile_ir(vector["ir"], plan=vector["plan"], limits=limits, pack=pack, profile=vector.get("profile"))
-
-
-def revive(value):
-    if isinstance(value, dict) and set(value) == {"$bytes"}:
-        return bytes.fromhex(value["$bytes"])
-    if isinstance(value, dict):
-        return {key: revive(inner) for key, inner in value.items()}
-    if isinstance(value, list):
-        return [revive(inner) for inner in value]
-    return value
 
 
 def test_every_section_is_covered():

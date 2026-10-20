@@ -22,8 +22,9 @@ def deep_eq(a, b) -> bool:
 
 def run_valid(vector, plan):
     codec = compile_ir(vector["ir"], plan=plan)
-    assert codec.encode_body(vector["value"]).hex() == vector["hex"], vector["name"]
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+    value = revive(vector["value"])
+    assert codec.encode_body(value).hex() == vector["hex"], vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), value), vector["name"]
 
 
 def run_invalid_decode(vector, plan):
@@ -34,7 +35,7 @@ def run_invalid_decode(vector, plan):
 
 
 def revive(value):
-    """A copy with surrogate markers revived, without recursion: before Python 3.12 the
+    """A copy with surrogate and bytes markers revived, without recursion: before Python 3.12 the
     512-deep IR rows would exceed the recursion limit."""
     holder = [value]
     stack = [(holder, 0)]
@@ -43,6 +44,8 @@ def revive(value):
         item = parent[key]
         if isinstance(item, dict) and "$surrogate" in item:
             parent[key] = chr(int(item["$surrogate"], 16))
+        elif isinstance(item, dict) and set(item) == {"$bytes"}:
+            parent[key] = bytes.fromhex(item["$bytes"])
         elif isinstance(item, dict):
             parent[key] = copy = dict(item)
             stack.extend((copy, inner) for inner in copy)
@@ -112,7 +115,7 @@ def test_columnar_invalid_encode(vector):
 @pytest.mark.parametrize("vector", COLUMNAR["packedDecode"], ids=lambda v: v["name"])
 def test_columnar_packed_decode(vector):
     codec = compile_ir(vector["ir"], plan="columnar")
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"])
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), revive(vector["value"]))
 
 
 def test_packed_without_inflate_fails_closed():
@@ -129,8 +132,9 @@ PROFILED = COLUMNAR["profiled"]
 @pytest.mark.parametrize("vector", PROFILED["valid"], ids=lambda v: v["name"])
 def test_profiled_valid(vector):
     codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
-    assert codec.encode_body(vector["value"]).hex() == vector["hex"], vector["name"]
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+    value = revive(vector["value"])
+    assert codec.encode_body(value).hex() == vector["hex"], vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), value), vector["name"]
 
 
 @pytest.mark.parametrize("vector", PROFILED["invalidDecode"], ids=lambda v: v["name"])
@@ -152,7 +156,7 @@ def test_profiled_requires_profile(vector):
 @pytest.mark.parametrize("vector", PROFILED["decodeOnly"], ids=lambda v: v["name"])
 def test_profiled_decode_only(vector):
     codec = compile_ir(vector["ir"], plan="columnar", profile=vector["profile"], pack=False)
-    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), vector["value"]), vector["name"]
+    assert deep_eq(codec.decode_body(bytes.fromhex(vector["hex"])), revive(vector["value"])), vector["name"]
 
 
 @pytest.mark.parametrize("vector", PROFILED["invalidProfile"], ids=lambda v: v["name"])

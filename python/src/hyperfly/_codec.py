@@ -350,23 +350,53 @@ def _columnar_eligible(node: dict[str, Any]) -> bool:
 
 _Leaves = list[tuple[tuple[str, ...], dict[str, Any]]]
 
+_HEADED_KINDS = frozenset({"int", "float64", "string"})
 
-def _index_arrays(node: dict[str, Any], columnar: bool, out: dict[int, tuple[_Leaves | None, bool]]) -> None:
-    """Per array node: its columnar leaves (None when row-encoded) and whether its element is zero-bit."""
+_Arrays = dict[int, tuple[_Leaves | None, bool, bool]]
+
+
+def _wire_empty(node: dict[str, Any], arrays: _Arrays) -> bool:
+    """Whether a zero-bit type also occupies no bytes, with every array under `node`
+    already indexed: an eligible array's int, float64 and string columns write their
+    mode byte even when no rows participate. Only meaningful for zero-bit nodes; any
+    other kind outside an array (int, nullable, ...) answers True."""
     stack = [node]
     while stack:
         current = stack.pop()
         kind = current["kind"]
+        if kind == "struct":
+            stack.extend(f["type"] for f in current["fields"])
+        elif kind == "array":
+            leaves = arrays[id(current)][0]
+            if leaves is not None:
+                if any(f["type"]["kind"] in _HEADED_KINDS for _segs, f in leaves):
+                    return False
+            elif current["length"] != 0:
+                stack.append(current["element"])
+    return True
+
+
+def _index_arrays(node: dict[str, Any], columnar: bool, out: _Arrays) -> None:
+    """Per array node: its columnar leaves (None when row-encoded), whether its element
+    is zero-bit, and whether that element also occupies no bytes. Post-order, so an
+    array's nested arrays are indexed before its own entry."""
+    stack = [(node, False)]
+    while stack:
+        current, visited = stack.pop()
+        kind = current["kind"]
         if kind == "array":
             element = current["element"]
-            if id(current) not in out:
+            if not visited:
+                stack.append((current, True))
+                stack.append((element, False))
+            elif id(current) not in out:
                 leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
-                out[id(current)] = (leaves, not has_payload(element))
-            stack.append(element)
+                zero_bit = not has_payload(element)
+                out[id(current)] = (leaves, zero_bit, zero_bit and _wire_empty(element, out))
         elif kind == "nullable":
-            stack.append(current["inner"])
+            stack.append((current["inner"], False))
         elif kind == "struct":
-            stack.extend(reversed([f["type"] for f in current["fields"]]))
+            stack.extend((f["type"], False) for f in reversed(current["fields"]))
 
 
 def _column_fields(node: dict[str, Any], out: list[dict[str, Any]]) -> None:
@@ -502,7 +532,7 @@ class _Ctx:
         inflate: Callable[[bytes, int], bytes] | None,
         profile: dict[str, Any] | None = None,
     ) -> None:
-        self.arrays: dict[int, tuple[_Leaves | None, bool]] = {}
+        self.arrays: _Arrays = {}
         _index_arrays(ir, columnar, self.arrays)
         self.dicts: dict[int, list[str]] = {}
         self.codes: dict[int, dict[str, int]] = {}
@@ -547,7 +577,7 @@ class _Ctx:
         # built once a column is long enough to pay for it
         self.recodings: dict[int, dict[int, int]] = {}
         self.column_counts: dict[int, int] = {}
-        columnar_leaves = [leaves for leaves, _zero_bit in self.arrays.values() if leaves is not None]
+        columnar_leaves = [leaves for leaves, _zero_bit, _empty in self.arrays.values() if leaves is not None]
         self.leaf_plans = {
             id(leaves): [
                 ("[]." + ".".join(segs), segs[-1], len(segs), bool(f.get("optional")), bool(f.get("nullable")), f["type"])
@@ -680,7 +710,7 @@ def _encode_node(
             out.append(1)
             _encode_node(out, node["inner"], value, path, depth + 1, ctx, budget, column)
     elif kind == "array":
-        leaves, zero_bit = ctx.arrays[id(node)]
+        leaves, zero_bit, _empty = ctx.arrays[id(node)]
         if leaves is not None:
             _encode_columnar(out, node, value, path, depth, ctx, budget, leaves, column)
             return
@@ -1339,7 +1369,7 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             _dfail("marker", path, f"invalid nullable marker 0x{marker:x}")
         return _decode_node(r, node["inner"], path, depth + 1, ctx, column)
     if kind == "array":
-        leaves, zero_bit = ctx.arrays[id(node)]
+        leaves, zero_bit, empty = ctx.arrays[id(node)]
         if leaves is not None:
             return _decode_columnar(r, node, leaves, path, depth, ctx, column)
         length = node.get("length")
@@ -1351,10 +1381,10 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         budget = r.budget
         budget.charge(length, path, DecodeError)
         element = node["element"]
-        if zero_bit:
+        if empty:
             if not length:
                 return []
-            # every element decodes from the same zero bits to an equal value, so one
+            # every element decodes from no bytes to an equal value, so one
             # decode stands for all and charges the budgets for each
             counted, decoded = budget.total, budget.bytes
             first = _decode_node(r, element, f"{path}[0]", depth + 1, ctx, column)

@@ -1,5 +1,5 @@
 import { checkedOptions, compileIR, type Codec, type CompileOptions } from "./codec.js";
-import { DecodeError, EncodeError, UnsupportedSchemaError } from "./errors.js";
+import { DecodeError, EncodeError, messageOf, UnsupportedSchemaError } from "./errors.js";
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
 import { checkArtifactDepth } from "./nesting.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
@@ -236,15 +236,19 @@ export function compile<S extends ZodSchemaLike>(
     try {
       return schema.parse!(value) as InferOutput<S>;
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "schema parse failed";
+      const message = messageOf(cause, "schema parse failed");
       throw new ErrorClass("validation", `$: ${message}`, { cause });
     }
   };
-  return {
-    ...codec,
-    encode: (value) => codec.encode(parse(value, EncodeError)),
-    decode: (bytes) => parse(codec.decode(bytes), DecodeError),
-    encodeBody: (value) => codec.encodeBody(parse(value, EncodeError)),
-    decodeBody: (bytes) => parse(codec.decodeBody(bytes), DecodeError),
+  const validated = (value: InferOutput<S>): InferOutput<S> => {
+    parse(value, DecodeError);
+    return value;
   };
+  return Object.freeze({
+    ...codec,
+    encode: (value: InferOutput<S>) => codec.encode(parse(value, EncodeError)),
+    decode: (bytes: Uint8Array) => validated(codec.decode(bytes)),
+    encodeBody: (value: InferOutput<S>) => codec.encodeBody(parse(value, EncodeError)),
+    decodeBody: (bytes: Uint8Array) => validated(codec.decodeBody(bytes)),
+  });
 }

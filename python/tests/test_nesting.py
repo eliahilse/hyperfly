@@ -688,3 +688,73 @@ def test_iterative_column_walks_match_the_recursive_ones():
     eligible = {"kind": "array", "element": {**nested["element"], "fields": nested["element"]["fields"][:2]}}
     leaves = reference_walks(eligible)[1][0]
     assert _shape(leaves, 0, 0, len(leaves)) == (["a", "e"], [(["b", "c"], [0, (["d"], [1])]), 2])
+
+
+def reference_index_arrays(node, columnar):
+    """The recursive post-order array index (#82) the iterative one replaced, as a reference."""
+    from hyperfly._codec import _HEADED_KINDS, _flatten_leaves
+    from hyperfly._ir import has_payload
+
+    out = {}
+
+    def wire_empty(node):
+        kind = node["kind"]
+        if kind == "struct":
+            return all(wire_empty(f["type"]) for f in node["fields"])
+        if kind == "array":
+            leaves = out[id(node)][0]
+            if leaves is not None:
+                return all(f["type"]["kind"] not in _HEADED_KINDS for _segs, f in leaves)
+            return node["length"] == 0 or wire_empty(node["element"])
+        return True
+
+    def walk(node):
+        kind = node["kind"]
+        if kind == "array":
+            element = node["element"]
+            walk(element)
+            if id(node) not in out:
+                leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
+                zero_bit = not has_payload(element)
+                out[id(node)] = (leaves, zero_bit, zero_bit and wire_empty(element))
+        elif kind == "nullable":
+            walk(node["inner"])
+        elif kind == "struct":
+            for f in node["fields"]:
+                walk(f["type"])
+
+    walk(node)
+    return out
+
+
+def test_iterative_array_index_matches_the_recursive_one():
+    from test_zero_bit import EMPTY_INTS, LEAVES, NESTED, _fixed, _rows, _struct
+
+    from hyperfly._codec import _index_arrays
+
+    def fixed_chain(levels, leaf):
+        ir = leaf
+        for _ in range(levels):
+            ir = _fixed(1, ir)
+        return ir
+
+    shared = _fixed(0, _struct(a={"kind": "bool"}))
+    irs = [_rows(_fixed(0, _struct(**fields))) for _label, fields, _headers in LEAVES]
+    irs += [_rows(case[1]) for case in NESTED]
+    irs += [
+        _rows(_fixed(2, _struct(t={"kind": "literal", "value": 7}))),
+        _rows(_struct(a=shared, b=_fixed(3, shared), c={"kind": "nullable", "inner": shared})),
+        fixed_chain(DEEPEST - 2, EMPTY_INTS),
+        fixed_chain(DEEPEST - 1, _struct(s={"kind": "literal", "value": None})),
+        fixed_chain(DEEPEST - 3, _struct(a=_fixed(0, _struct(s={"kind": "string"})), b=_fixed(2, _struct()))),
+        array_chain(DEEPEST),
+        struct_chain(DEEPEST),
+    ]
+    seen = set()
+    for ir in irs:
+        for columnar in (False, True):
+            index = {}
+            _index_arrays(ir, columnar, index)
+            assert list(index.items()) == list(reference_index_arrays(ir, columnar).items())
+            seen.update((zero_bit, empty) for _leaves, zero_bit, empty in index.values())
+    assert seen == {(False, False), (True, False), (True, True)}
