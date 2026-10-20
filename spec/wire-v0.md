@@ -351,17 +351,21 @@ lowercase codes on the implementation's error type. References to the plan below
   bound is exceeded (§6).
 - `header` (decode): a short envelope, bad magic or wrong wire major (§2).
 - `fingerprint` (decode, artifact loading): the envelope fingerprint differs
-  from the codec's fingerprint (§2), or loaded artifact content does not hash
-  to the fingerprint it was fetched under (negotiation-v1 §3).
+  from the codec's fingerprint (§2), loaded artifact content does not hash
+  to the fingerprint it was fetched under, or a fingerprint supplied for
+  artifact loading is not 32 hex characters (negotiation-v1 §3).
 - `ir` (compile): invalid IR or profile (§4, plan §6.2–§6.4), or an artifact
   naming an unimplemented wire, plan layout or plan version (Stability).
 - `packed` (decode): invalid DEFLATE, trailing bytes in its blob or wrong
   inflated length (plan §3–§4).
-- `unsupported` (decode): missing inflate capability or a required profile
-  entry (plan §3).
+- `unsupported` (decode; compile in host-language schema adapters): missing
+  inflate capability or a required profile entry (plan §3), or a host schema
+  construct with no IR equivalent.
 - `artifact` (artifact loading): a discovery response or loaded artifact
-  cannot be read: a non-2xx status, an unreadable, oversized or non-UTF-8
-  body, or text that is not well-formed artifact JSON (negotiation-v1 §3).
+  cannot be read: a non-2xx status other than the `404` miss of
+  negotiation-v1 §3, an unreadable, oversized or non-UTF-8 body, or text that
+  is not well-formed JSON. Parsed content that is not a valid artifact, IR or
+  profile is `ir`.
 
 The code is the contract; messages are not. Wherever a vector pins a code,
 every implementation MUST report that code. §6 fixes the order of limit
@@ -403,12 +407,18 @@ Every hyperfly 1.x release preserves:
 1.x may add only what an existing peer cannot misread:
 
 - New plan layouts or versions, IR node kinds or fields, and profile column
-  kinds or versions. Each produces new artifact text and a new fingerprint;
+  kinds. Each produces new artifact text and a new fingerprint;
   a peer that does not hold it falls back to JSON as for any unknown
   fingerprint (negotiation-v1 §2). No existing artifact's bytes or fingerprint
   change.
+- A new profile document version, provided any content it gives a new
+  meaning is distinguishable in the serialized profile or the plan version,
+  so a peer that does not implement it refuses it with `ir`. The profile
+  `version` itself is not part of the artifact text.
 - New `hints` (plan-columnar-v5 §6.2), which are outside the artifact.
 - New optional HTTP headers, ignored by peers that do not know them.
+- A new media type, for a negotiation change that a 1.x peer could otherwise
+  misread under `application/vnd.hyperfly`.
 - New error codes, only for failures of something added.
 - New limits, only with defaults that reject nothing a 1.x decoder at the
   defaults accepts.
@@ -434,19 +444,23 @@ It MUST NOT compile it as a different version.
 
 ### Vectors
 
-The files under `spec/vectors/` are the 1.x compatibility suite:
+The seven JSON files under `spec/vectors/` are the 1.x compatibility suite:
 
 - `accept.json` — `Hyperfly-Accept` parsing (negotiation-v1 §6).
 - `bytes.json` — byte budgets at and past their bounds (§6).
 - `columnar.json` — payloads, profiles and artifacts (plan-columnar-v5).
-- `fingerprints.json` — IR → canonical text → fingerprint (§5).
+- `fingerprints.json` — IR → canonical text → fingerprint (§5,
+  plan-columnar-v5 §6.5).
 - `ir.json` — invalid IR and valid near misses (§4, plan-columnar-v5 §6.2).
 - `limits.json` — limits at and past their bounds, encode and decode (§6).
 - `vectors.json` — row encode/decode pairs and invalid inputs (§3–§4).
 
-Every 1.x implementation MUST pass every row of every file, with two
-exceptions: `accept.json` binds only implementations that provide HTTP
-negotiation, and a row whose input the implementation's value model cannot
+Every 1.x implementation MUST pass every applicable row: each row that pins
+Frozen behaviour, and each row for an Addition the implementation
+implements. `accept.json` binds only implementations that provide HTTP
+negotiation. A row whose input the implementation's value model cannot
 represent (a lone surrogate in a language whose strings are Unicode scalar
-values) does not apply to it. Within 1.x, rows may be added, never changed
-or removed.
+values) does not apply to it. A row that decodes a deflate-packed column
+needs the inflate capability; an implementation without it reports
+`unsupported` for that row after the §6 checks that precede it. Within 1.x,
+rows may be added, never changed or removed.
