@@ -245,14 +245,28 @@ A decoder charges each string or bytes value against the byte budget as soon
 as its length is known, before reading or allocating its bytes, and reports
 an exceeded budget as `limit`:
 
-- a length-prefixed value, after `maxByteLength` is applied to its prefix;
+- a length-prefixed value (including an escaped value in a dictionary,
+  grammar or derived column), after `maxByteLength` is applied to its prefix
+  and before its bytes are read;
 - a deflate-packed string column (plan-columnar-v5 §3), once, with its
-  declared inflated total, after `maxByteLength` is applied to that total
-  and before inflating; its values are not charged again;
-- a dictionary, grammar or derived value, when it is resolved, after
-  `maxByteLength` is applied to it;
+  declared inflated total, after `maxByteLength` is applied to each declared
+  length and to the total, and before the blob length is read; a decoder
+  without an inflate capability charges it the same way and only then
+  rejects the column as `unsupported`; its values are not charged again;
+- a dictionary, grammar or derived value, when it is resolved, after its own
+  checks (code range, source lookup) and after `maxByteLength` is applied to
+  its length, and before it is built (a grammar value's length follows from
+  its tokens, so it is known before rendering);
 - a literal or enum member, each time it is decoded; a columnar literal leaf
-  is charged for all of its participating rows at once.
+  is charged for all of its participating rows at once. Literals and enum
+  members are schema constants: `maxByteLength` does not apply to them, the
+  byte budget does.
+
+Within a column, a decoder first reads the column's structure (mode, escape
+count and bitmap, packed codes, indexes or grammar lanes, with their padding
+checks), then resolves values one at a time in participating-row order,
+completing each value's checks and charge before examining the next, so the
+first failing value determines the error.
 
 An encoder applies `maxDepth`, `maxItems` and `maxByteLength` as a decoder
 does. It applies the amplification bound to every array with, in place of
