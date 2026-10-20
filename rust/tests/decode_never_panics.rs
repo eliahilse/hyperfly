@@ -1,7 +1,9 @@
 use std::sync::OnceLock;
 
-use hyperfly_core::ir::{Derivation, GrammarCase, GrammarNum, GrammarToken, Profile, ProfileColumn};
-use hyperfly_core::{Codec, Field, Limits, Literal, Node, Plan, Value, HEADER_SIZE};
+use hyperfly_core::{
+    Codec, Derivation, Field, GrammarCase, GrammarNum, GrammarToken, Limits, Literal, Node, Plan,
+    Profile, ProfileColumn, Value, HEADER_SIZE,
+};
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 
@@ -92,7 +94,14 @@ fn row_value(i: i64) -> Value {
         ("y", Value::Bytes(vec![0, 1, 2, 255])),
         ("e", s("b")),
         ("l", s("x")),
-        ("n", if i % 2 == 0 { Value::Null } else { Value::Int(i) }),
+        (
+            "n",
+            if i % 2 == 0 {
+                Value::Null
+            } else {
+                Value::Int(i)
+            },
+        ),
         ("o", s("present")),
         ("arr", Value::Array(vec![s("a"), Value::Null, s("bc")])),
         (
@@ -121,10 +130,13 @@ fn columnar_ir() -> Node {
             "meta",
             Node::Struct(vec![
                 field("region", Node::Str),
-                field("weight", Node::Int {
-                    min: Some(0),
-                    max: None,
-                }),
+                field(
+                    "weight",
+                    Node::Int {
+                        min: Some(0),
+                        max: None,
+                    },
+                ),
             ]),
         ),
         field("tags", array(Node::Str)),
@@ -239,13 +251,6 @@ fn profiled_value(rows: usize) -> Value {
     )
 }
 
-fn limits() -> Limits {
-    Limits {
-        max_amplification: 32,
-        ..Limits::default()
-    }
-}
-
 fn case(codec: Codec, values: Vec<Value>) -> Case {
     let header = codec.encode(&values[0]).unwrap()[..HEADER_SIZE].to_vec();
     let seeds = values
@@ -271,7 +276,7 @@ fn cases() -> &'static [Case] {
         };
         vec![
             case(
-                Codec::compile(row_ir(), Plan::Row, limits(), true).unwrap(),
+                Codec::compile(row_ir(), Plan::Row, Limits::default(), true).unwrap(),
                 vec![row_value(1), row_value(2)],
             ),
             case(
@@ -288,18 +293,18 @@ fn cases() -> &'static [Case] {
                 ])],
             ),
             case(
-                Codec::compile(columnar_ir(), Plan::Columnar, limits(), true).unwrap(),
+                Codec::compile(columnar_ir(), Plan::Columnar, Limits::default(), true).unwrap(),
                 vec![columnar_value(1), columnar_value(9), columnar_value(40)],
             ),
             case(
-                Codec::compile(columnar_ir(), Plan::Columnar, limits(), false).unwrap(),
+                Codec::compile(columnar_ir(), Plan::Columnar, Limits::default(), false).unwrap(),
                 vec![columnar_value(12)],
             ),
             case(
                 Codec::compile_with_profile(
                     profiled_ir(),
                     Plan::Columnar,
-                    limits(),
+                    Limits::default(),
                     true,
                     Some(profile()),
                 )
@@ -308,6 +313,18 @@ fn cases() -> &'static [Case] {
             ),
         ]
     })
+}
+
+fn config() -> Config {
+    let cases = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+        .unwrap_or(2048);
+    Config {
+        cases,
+        failure_persistence: None,
+        ..Config::default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -350,7 +367,7 @@ fn exercise(c: &Case, body: &[u8]) {
 }
 
 proptest! {
-    #![proptest_config(Config { cases: 1024, failure_persistence: None, ..Config::default() })]
+    #![proptest_config(config())]
 
     #[test]
     fn arbitrary_bytes_never_panic(index in any::<usize>(), body in proptest::collection::vec(any::<u8>(), 0..256)) {
