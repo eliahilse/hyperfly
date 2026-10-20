@@ -22,6 +22,48 @@ export interface Leaf {
  * Depth-first leaf columns in declared order. Nested structs flatten only when
  * required and non-nullable, so every leaf inherits its row's participation.
  */
+interface SharedContainers {
+  /** Per leaf, the cache slot of each enclosing container, or -1 for one no other leaf shares. */
+  chains: (readonly number[])[];
+  slots: number;
+}
+
+interface ContainerPrefix {
+  leaves: number;
+  slot: number;
+  next: Map<string, ContainerPrefix>;
+}
+
+const sharedContainers = new WeakMap<StructNode, SharedContainers | null>();
+
+/** Which nested containers two or more leaves share, per element node; null when none is shared. */
+function sharedContainersOf(element: StructNode, leaves: readonly Leaf[]): SharedContainers | null {
+  let shared = sharedContainers.get(element);
+  if (shared !== undefined) return shared;
+  const root = new Map<string, ContainerPrefix>();
+  const walk = (segs: readonly string[], visit: (prefix: ContainerPrefix) => void): void => {
+    let level = root;
+    for (let d = 0; d < segs.length - 1; d++) {
+      let prefix = level.get(segs[d]!);
+      if (!prefix) level.set(segs[d]!, (prefix = { leaves: 0, slot: -1, next: new Map() }));
+      visit(prefix);
+      level = prefix.next;
+    }
+  };
+  let slots = 0;
+  for (const leaf of leaves) walk(leaf.segs, (prefix) => { if (++prefix.leaves === 2) prefix.slot = slots++; });
+  shared = slots === 0 ? null : {
+    chains: leaves.map((leaf) => {
+      const chain: number[] = [];
+      walk(leaf.segs, (prefix) => chain.push(prefix.slot));
+      return chain;
+    }),
+    slots,
+  };
+  sharedContainers.set(element, shared);
+  return shared;
+}
+
 export function flattenLeaves(element: StructNode): Leaf[] | null {
   const out: Leaf[] = [];
   const walk = (node: StructNode, segs: string[]): boolean => {
@@ -1196,23 +1238,18 @@ export function encodeColumnarArray(
 
   // a container shared by several leaves is read and checked once per row, when the first leaf
   // under it reaches that row, so the first reported failure is the same as checking it per leaf
-  const prefixKeys = leaves.map((leaf) => leaf.segs.slice(0, -1).map((_, d) => JSON.stringify(leaf.segs.slice(0, d + 1))));
-  const sharing = new Map<string, number>();
-  for (const keys of prefixKeys) for (const key of keys) sharing.set(key, (sharing.get(key) ?? 0) + 1);
-  const prefixIds = new Map<string, number>();
-  for (const [key, leafCount] of sharing) if (leafCount > 1) prefixIds.set(key, prefixIds.size);
-  const chains = prefixKeys.map((keys) => keys.map((key) => prefixIds.get(key) ?? -1));
-  const containers = Array.from({ length: prefixIds.size }, (): Record<string, unknown>[] => []);
+  const shared = sharedContainersOf(element, leaves);
+  const containers = shared && Array.from({ length: shared.slots }, (): Record<string, unknown>[] => []);
   const containerOf = (
     row: Record<string, unknown>,
     segs: readonly string[],
-    chain: readonly number[],
+    chain: readonly number[] | undefined,
     i: number,
   ): Record<string, unknown> => {
     let obj = row;
-    for (let d = 0; d < chain.length; d++) {
-      const id = chain[d]!;
-      const resolved = id === -1 ? undefined : containers[id]!;
+    for (let d = 0; d < segs.length - 1; d++) {
+      const id = chain ? chain[d]! : -1;
+      const resolved = id === -1 ? undefined : containers![id]!;
       const cached = resolved?.[i];
       if (cached !== undefined) {
         obj = cached;
@@ -1233,7 +1270,7 @@ export function encodeColumnarArray(
   };
 
   const inputs: ColumnInput[] = leaves.map((leaf, leafIndex) => {
-    const chain = chains[leafIndex]!;
+    const chain = shared?.chains[leafIndex];
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const dotted = leaf.segs.join(".");
