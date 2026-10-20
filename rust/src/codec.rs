@@ -871,6 +871,7 @@ impl Codec {
                         format!("{path}: array payload size underflow"),
                     )
                 })?;
+                self.check_amplification(items.len(), payload_bytes, path)?;
                 if has_payload(element) {
                     let affordable = u128::try_from(payload_bytes)
                         .ok()
@@ -888,7 +889,7 @@ impl Codec {
                         );
                     }
                 }
-                self.check_amplification(items.len(), payload_bytes, path)
+                Ok(())
             }
             Node::Struct(fields) => {
                 let Value::Object(_) = value else {
