@@ -3,6 +3,7 @@ import math
 import sys
 import time
 import tracemalloc
+import warnings
 from enum import Enum, IntEnum
 
 import pytest
@@ -373,6 +374,75 @@ def test_json_fallback_overlays_model_bytes_positions(bytes_mode, optional):
         "data": "aGk=", "child": {"data": "aGk="}, "items": ["aGk="],
         "optional": "b3B0aW9uYWw=" if optional else None,
     }
+
+
+@pytest.mark.parametrize("construction", ["construct", "assign"])
+@pytest.mark.parametrize("annotation", [bytes, list[bytes], list[list[bytes]]])
+@pytest.mark.parametrize("bytes_mode", ["utf8", "hex", "base64"])
+@pytest.mark.parametrize("payload", ["already text", 7, None, ["text", 7, None], [["text", 7, None]], [b"test"]])
+def test_json_fallback_unvalidated_bytes_positions_follow_json_mode(construction, annotation, bytes_mode, payload):
+    from pydantic import ConfigDict, Field
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode, validate_assignment=False)
+        payload: annotation = Field(serialization_alias="data")
+
+    data = payload if annotation is bytes else [payload] if annotation == list[bytes] else [[payload]]
+    if construction == "construct":
+        value = Response.model_construct(payload=data)
+    else:
+        value = Response.model_construct()
+        value.payload = data
+
+    with warnings.catch_warnings(record=True) as expected_warnings:
+        warnings.simplefilter("always")
+        expected = value.model_dump(mode="json", by_alias=True)
+    with warnings.catch_warnings(record=True) as actual_warnings:
+        warnings.simplefilter("always")
+        body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == expected
+    assert [(item.category, str(item.message)) for item in actual_warnings] == [
+        (item.category, str(item.message)) for item in expected_warnings
+    ]
+
+
+@pytest.mark.parametrize("construction", ["construct", "assign"])
+@pytest.mark.parametrize("annotation", [bytes, list[bytes], list[list[bytes]]])
+@pytest.mark.parametrize("payload", [object(), [b"\xff"]])
+def test_json_fallback_unvalidated_bytes_positions_preserve_failures(construction, annotation, payload):
+    class Response(BaseModel):
+        payload: annotation
+
+    data = payload if annotation is bytes else [payload] if annotation == list[bytes] else [[payload]]
+    value = Response.model_construct(**({"payload": data} if construction == "construct" else {}))
+    if construction == "assign":
+        value.payload = data
+
+    with warnings.catch_warnings(record=True) as expected_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(Exception) as original:
+            value.model_dump(mode="json", by_alias=True)
+    with warnings.catch_warnings(record=True) as actual_warnings:
+        warnings.simplefilter("always")
+        with pytest.raises(EncodeError) as raised:
+            encode_for(negotiate(None, CodecRegistry()), value)
+    assert raised.value.code == "json"
+    assert str(original.value) in str(raised.value)
+    assert [(item.category, str(item.message)) for item in actual_warnings] == [
+        (item.category, str(item.message)) for item in expected_warnings
+    ]
+
+
+@pytest.mark.parametrize("payload", [b"\xfb\xff", bytearray(b"\xfb\xff")])
+@pytest.mark.parametrize("annotation", [bytes, list[bytes], list[list[bytes]]])
+def test_json_fallback_unvalidated_binary_bytes_positions_use_base64(annotation, payload):
+    class Response(BaseModel):
+        payload: annotation
+
+    data = payload if annotation is bytes else [payload] if annotation == list[bytes] else [[payload]]
+    expected = "+/8=" if annotation is bytes else ["+/8="] if annotation == list[bytes] else [["+/8="]]
+    value = Response.model_construct(payload=data)
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == {"payload": expected}
 
 
 def test_json_fallback_overlays_root_model_bytes():

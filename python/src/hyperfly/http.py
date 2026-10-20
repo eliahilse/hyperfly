@@ -234,6 +234,11 @@ def _base64(value: bytes | bytearray) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
+def _serialize_model_bytes(value: Any, handler: Callable[[Any], Any]) -> Any:
+    # Unvalidated values retain pydantic's JSON conversion, warnings and errors.
+    return _base64(value) if isinstance(value, (bytes, bytearray)) else handler(value)
+
+
 def _build_model_json(cls: type[Any]) -> _ModelJSON:
     from pydantic_core import SchemaSerializer
 
@@ -263,7 +268,9 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
             # Only declared bytes get a safe JSON serializer; Any and other
             # containers retain their original serializer and configuration.
             if "serialization" not in node:
-                copied["serialization"] = {"type": "function-plain", "function": _base64, "when_used": "json"}
+                copied["serialization"] = {
+                    "type": "function-wrap", "function": _serialize_model_bytes, "when_used": "json",
+                }
         elif kind == "definition-ref":
             child, child_plan = visit(definitions[node["schema_ref"]])
             copied["schema_ref"] = child["ref"]
