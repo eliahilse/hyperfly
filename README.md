@@ -12,9 +12,12 @@ expect breaking changes before 1.0.
 
 | Package | Install | Docs |
 |---|---|---|
-| TypeScript, Zod adapter, HTTP | `npm install hyperfly@next` | [packages/hyperfly](packages/hyperfly/README.md) |
-| Python, Pydantic adapter, HTTP | `pip install --pre hyperfly` | [python](python/README.md) |
+| TypeScript, Zod adapter, HTTP | `npm install hyperfly@next zod` | [packages/hyperfly](packages/hyperfly/README.md) |
+| Python, Pydantic adapter, HTTP | `pip install --pre "hyperfly[pydantic]"` | [python](python/README.md) |
 | Rust codec | `cargo add hyperfly-core` | [rust](rust/README.md) |
+
+Zod and Pydantic are needed only for the schema adapters; the codec and HTTP layers
+run without them.
 
 ## What it costs on the wire
 
@@ -61,7 +64,8 @@ code.
 - [negotiation v1](spec/negotiation-v1.md) — how peers agree on binary, how a client
   bootstraps, how a profile rotates without a cutover
 
-The [golden vectors](spec/vectors) every implementation runs:
+The [golden vectors](spec/vectors), which every implementation runs (`accept.json`
+only where HTTP negotiation is implemented, in TypeScript and Python):
 
 - `vectors.json` — valid encode/decode pairs and invalid inputs, row plan
 - `columnar.json` — the columnar plan, with and without profiles
@@ -82,7 +86,7 @@ cargo test --manifest-path rust/Cargo.toml            # Rust
 
 CI runs all three suites with lint, type and clippy checks, a Python version
 matrix, the Rust MSRV, package checks on the npm tarball, and the cross-language
-interop exchange on every push. [CONTRIBUTING.md](CONTRIBUTING.md) covers
+interop exchange on every pull request and every push to `main`. [CONTRIBUTING.md](CONTRIBUTING.md) covers
 changesets and how releases are published.
 
 ## License
