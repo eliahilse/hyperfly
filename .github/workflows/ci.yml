@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # the release workflow dispatches CI on its release PR, which GITHUB_TOKEN pushes never trigger
+  workflow_dispatch:
 
 # pull requests share one group per branch and cancel superseded runs; every main run gets its own group
 concurrency:
@@ -108,6 +110,17 @@ jobs:
       - run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
 
       - run: cargo test --manifest-path rust/Cargo.toml
+
+  # the library builds on the rust-version Cargo.toml declares; the dev-dependencies need a newer toolchain
+  rust-msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.82
+
+      - run: cargo check --manifest-path rust/Cargo.toml --lib --locked
 
   interop:
     runs-on: ubuntu-latest
