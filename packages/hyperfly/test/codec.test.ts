@@ -10,6 +10,22 @@ import { MAX_ARTIFACT_NESTING } from "../src/nesting.js";
 import { HEADER_SIZE } from "../src/codec.js";
 import { DecodeError, HyperflyError } from "../src/errors.js";
 
+function hostileValues(): [string, unknown][] {
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  const trapping = new Proxy({}, { getPrototypeOf() { throw new Error("no prototype"); } });
+  return [["a revoked proxy", revocable.proxy], ["a proxy whose getPrototypeOf throws", trapping]];
+}
+
+function thrown(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected a throw");
+}
+
 const STRUCT: IRNode = {
   kind: "struct",
   fields: [
@@ -234,6 +250,23 @@ describe("compile options", () => {
     }
   });
 
+  test.each(hostileValues())("wraps %s thrown while checking the options object", (_, cause) => {
+    for (const options of [
+      new Proxy({}, { getPrototypeOf() { throw cause; } }),
+      { limits: new Proxy({}, { ownKeys() { throw cause; } }) },
+    ]) {
+      const error = thrown(() => compileIR(STRUCT, options));
+      expect(error).toBeInstanceOf(HyperflyError);
+      expect((error as HyperflyError).code).toBe("options");
+      expect((error as HyperflyError).cause).toBe(cause);
+    }
+  });
+
+  test.each(hostileValues())("rethrows %s thrown while reading the IR unchanged", (_, cause) => {
+    const ir = Object.defineProperty({}, "kind", { get() { throw cause; } });
+    expect(thrown(() => compileIR(ir as never))).toBe(cause);
+  });
+
   test("wraps throwing limit and pack hook getters", () => {
     const cause = new Error("cannot read nested option");
     for (const options of [
@@ -374,6 +407,14 @@ describe("profile JSON data", () => {
     const run = () => compileIR(ir, { plan: "columnar", profile: { version: 1, shared, hints } });
     expect(run).toThrow(HyperflyError);
     expect(run).toThrow(expect.objectContaining({ code: "ir", cause }));
+  });
+
+  test.each(hostileValues())("wraps %s thrown by a profile getter with an ir error", (_, cause) => {
+    const hints = { get value() { throw cause; } };
+    const error = thrown(() => compileIR(ir, { plan: "columnar", profile: { version: 1, shared, hints } }));
+    expect(error).toBeInstanceOf(HyperflyError);
+    expect((error as HyperflyError).code).toBe("ir");
+    expect((error as HyperflyError).cause).toBe(cause);
   });
 
   test("accepts JSON hints at the nesting bound and freezes a snapshot", () => {

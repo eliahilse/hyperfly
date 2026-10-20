@@ -1,5 +1,5 @@
 import { checkedOptions, compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
-import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
+import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError, isInstance, messageOf } from "./errors.js";
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
@@ -18,6 +18,10 @@ const MAX_ENTRIES = 32;
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 const VARY = "Hyperfly-Accept, Accept";
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
+/** The intrinsic getters see a chunk's internal slots, so neither a subclass nor another realm can misreport it. */
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const typedArrayTag = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
 
 /** Client fingerprints in preference order, ignoring malformed entries and duplicates. */
 export function parseAccept(header: string | null | undefined): string[] {
@@ -137,7 +141,7 @@ function jsonBody(value: unknown): string {
   try {
     body = JSON.stringify(value);
   } catch (cause) {
-    throw new EncodeError("json", `$: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    throw new EncodeError("json", `$: ${messageOf(cause, "value could not be encoded as JSON")}`, { cause });
   }
   if (body === undefined) throw new EncodeError("json", "$: value has no JSON representation");
   return body;
@@ -149,7 +153,7 @@ export function encodeFor<T>(decision: Negotiation<T>, value: T, options: Encode
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
     } catch (error) {
-      if (!(error instanceof EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
+      if (!isInstance(error, EncodeError) || (error.code !== "limit" && error.code !== "depth")) throw error;
       options.onFallback?.(error, "encoder-limit");
       return {
         body: jsonBody(value),
@@ -266,8 +270,8 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
   try {
     codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits, pack });
   } catch (error) {
-    if (error instanceof HyperflyError) throw error;
-    throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);
+    if (isInstance(error, HyperflyError)) throw error;
+    throw new HyperflyError("ir", `artifact does not compile: ${messageOf(error, "unknown error")}`);
   }
   const compiled = JSON.parse(codec.artifact) as { plan: { version: number } };
   if (compiled.plan.version !== plan.version) {
@@ -541,7 +545,7 @@ async function readBodyWithinLimit<T>(
   try {
     fingerprint = peekFingerprint(bytes);
   } catch (error) {
-    if (error instanceof HyperflyError) return refuse(400, "malformed-envelope");
+    if (isInstance(error, HyperflyError)) return refuse(400, "malformed-envelope");
     throw error;
   }
   const codecHeader = request.headers.get(CODEC_HEADER);
@@ -554,8 +558,16 @@ async function readBodyWithinLimit<T>(
   try {
     return { ok: true, value: codec.decode(bytes) };
   } catch (error) {
-    if (error instanceof HyperflyError) return refuse(400, "undecodable");
+    if (isInstance(error, HyperflyError)) return refuse(400, "undecodable");
     throw error;
+  }
+}
+
+function cancelQuietly(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    reader.cancel().catch(() => {});
+  } catch {
+    // Cancellation is best effort.
   }
 }
 
@@ -576,17 +588,17 @@ async function readLimited(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (!(value instanceof Uint8Array)) return { ok: false, reason: "unreadable" };
-        length += value.byteLength;
+        if (typedArrayTag.call(value) !== "Uint8Array") {
+          cancelQuietly(reader);
+          return { ok: false, reason: "unreadable" };
+        }
+        const size = typedArrayByteLength.call(value) as number;
+        length += size;
         if (length > maxBytes) {
-          try {
-            reader.cancel().catch(() => {});
-          } catch {
-            // Cancellation is best effort.
-          }
+          cancelQuietly(reader);
           return { ok: false, reason: "too-large" };
         }
-        if (value.byteLength > 0) chunks.push(new Uint8Array(value));
+        if (size > 0) chunks.push(new Uint8Array(value));
       }
     } catch {
       return { ok: false, reason: "unreadable" };

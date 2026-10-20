@@ -273,6 +273,20 @@ describe("fetchArtifact", () => {
     expect(body.locked).toBe(false);
   });
 
+  test("enforces the byte cap on a subclass chunk with an overridden byteLength", async () => {
+    class LyingLength extends Uint8Array {
+      override get byteLength(): number { return 0; }
+    }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new LyingLength(new TextEncoder().encode(codec.artifact)));
+        controller.close();
+      },
+    });
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)), maxBytes: 1 }))
+      .rejects.toThrow(expect.objectContaining({ code: "limit" }));
+  });
+
   test("rejects a locked response body as unreadable", async () => {
     const response = new Response(codec.artifact);
     response.body!.getReader();
