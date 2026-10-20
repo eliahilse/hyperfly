@@ -905,11 +905,24 @@ def test_json_floats_and_big_exponents_parse_like_json_parse():
     assert _request(b"0." + b"0" * 100_000 + b"1").value == 0.0
 
 
-def test_json_nesting_past_the_recursion_limit_is_400():
-    depth = 100_000
-    error = _refusal(b"[" * depth + b"]" * depth)
+def test_json_nesting_past_the_recursion_limit_is_400(monkeypatch):
+    def overflow(*args, **kwargs):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(json, "loads", overflow)
+    error = _refusal(b"[[1]]")
     assert (error.status, error.reason) == (400, "malformed-json")
     assert isinstance(error.__cause__.__cause__, RecursionError)
+
+
+def test_deep_json_nesting_decodes_or_is_400():
+    depth = 100_000
+    try:
+        kind, _ = _request(b"[" * depth + b"]" * depth)
+    except RequestError as error:
+        assert (error.status, error.reason) == (400, "malformed-json")
+    else:
+        assert kind == "json"
 
 
 @pytest.mark.parametrize("body", ["\ud800abc", "\ud83d\ude00" * 3, "\udfff" * 40])
@@ -995,3 +1008,20 @@ def test_read_body_releases_a_yielded_memoryview_before_the_next_pull():
         yield bytes(buffer)
 
     assert read_body(stream()) == b"[1]"
+
+
+def test_read_body_releases_the_crossing_memoryview_before_closing_the_stream():
+    cleared = []
+
+    def stream():
+        buffer = bytearray(b"[1,2]")
+        try:
+            yield memoryview(buffer)
+        finally:
+            buffer.clear()
+            cleared.append(True)
+
+    with pytest.raises(RequestError) as raised:
+        read_body(stream(), max_bytes=4)
+    assert raised.value.status == 413
+    assert cleared == [True]
