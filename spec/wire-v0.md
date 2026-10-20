@@ -76,9 +76,15 @@ All fixed-width values are **little-endian**. `float64` is IEEE 754 binary64.
 
 ## 4. Node encodings (plan `row` v1)
 
-An integer-valued field accepts any JSON number whose value is an integer in
-`[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
-fractional values and values beyond that range are invalid IR.
+An integer-valued IR field accepts any JSON number whose value is an integer
+in `[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its
+sign; fractional values and values beyond that range are invalid IR.
+
+For an `int` node or an integer `literal`, a value MUST be accepted as an
+integer regardless of its host representation when it is a number whose
+value is an integer in that domain: `1.0` is 1 and `-0.0` is 0. Booleans are
+not numbers. Fractional, non-finite and out-of-domain values MUST be rejected
+on encode with `type`; declared bounds are checked as in §4.4.
 
 IR nodes MUST be objects whose `kind` names one of the kinds below, with all
 required members shown below; fields MUST be objects with `name` and `type`.
@@ -96,6 +102,10 @@ Zero bytes. The value is part of the artifact. v0 literal values are strings,
 booleans, `null`, or JSON-safe integers (non-integer numeric literals are not
 representable in v0).
 
+An integer literal matches any numeric value equal to that integer under the
+§4 rule, including an integral floating-point value. A mismatch MUST be
+rejected on encode with `type`.
+
 ### 4.3 `enum { members }`
 
 ULEB128 index into `members`, in declared order. Index MUST be
@@ -108,7 +118,9 @@ reordering members is a new artifact.
 - If `min` is declared: `uvarint(value - min)` using exact integer arithmetic.
 - Otherwise: `svarint(value)`.
 - Declared bounds are validated on encode AND decode; out-of-bounds MUST be
-  rejected on both sides.
+  rejected on both sides with `range`. On encode, the §4 integer-domain
+  check precedes the bound checks, including for integral floating-point
+  values.
 - If both bounds are declared, `min` MUST NOT exceed `max`.
 
 ### 4.5 `float64`
@@ -162,6 +174,17 @@ subject to the other constraints on that string.
 specification does not define for their kind, and profile objects MUST NOT
 carry keys the columnar plan's profile document (plan-columnar-v5 §6.2) does
 not define; such IR or profile is invalid.
+
+**Artifact nesting.** The canonical artifact text (§5, plan-columnar-v5
+§6.5) MUST NOT nest JSON containers deeper than 512. The artifact object is
+depth 1; every object or array value is one deeper than its container.
+This depth is a function of the IR and profile alone, independent of their
+input spelling. An IR or profile whose artifact would exceed this bound is
+invalid IR and MUST be rejected with `ir`. Acceptance within the bound
+MUST NOT depend on a host-language recursion limit, and an implementation
+MUST reject IR or a profile past the bound without unbounded recursion.
+Implementations MUST document any host stack sizing they require. This bound
+is independent of `maxDepth` (§6).
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
@@ -378,8 +401,9 @@ partial values.
 
 - Little-endian everywhere; no big-endian variant will exist.
 - The IR exclusions in §4.10 (portable field names, well-formed Unicode,
-  closed objects, unambiguous null) are permanent: they exist so that every
-  implementation accepts exactly the same set of artifacts.
+  closed objects, artifact nesting, unambiguous null) are permanent: they
+  exist so that every implementation accepts exactly the same set of
+  artifacts.
 - The fingerprint identifies the full codec artifact. Future columnar, delta,
   dictionary, or profiled layouts are new `plan` values under the same
   serialization scheme; v0 reserves no in-band escape values for them.
@@ -533,16 +557,18 @@ The JSON files under `spec/vectors/` are the 1.x compatibility suite:
 - `columnar.json` — payloads, profiles and artifacts (plan-columnar-v5).
 - `fingerprints.json` — IR → canonical text → fingerprint (§5,
   plan-columnar-v5 §6.5).
+- `http.json` — JSON body representation, response decoding and request bounds
+  (negotiation-v1 §§2, 4).
 - `ir.json` — invalid IR and valid near misses (§4, plan-columnar-v5 §6.2).
 - `limits.json` — limits at and past their bounds, encode and decode (§6).
 - `vectors.json` — row encode/decode pairs and invalid inputs (§3–§4).
 
 Every 1.x implementation MUST pass every applicable row: each row that pins
 Frozen behaviour, and each row for an Addition the implementation
-implements. `accept.json` binds only implementations that provide HTTP
-negotiation. A row whose input the implementation's value model cannot
-represent (a lone surrogate in a language whose strings are Unicode scalar
-values) does not apply to it. A row that decodes a deflate-packed column
-needs the inflate capability; an implementation without it reports
+implements. `accept.json` and `http.json` bind only implementations that
+provide HTTP negotiation. A row whose input the implementation's value model
+cannot represent (a lone surrogate in a language whose strings are Unicode
+scalar values) does not apply to it. A row that decodes a deflate-packed
+column needs the inflate capability; an implementation without it reports
 `unsupported` for that row after the §6 checks that precede it. Within 1.x,
 rows may be added, never changed or removed.
