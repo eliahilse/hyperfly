@@ -209,6 +209,26 @@ describe("coded validation errors", () => {
     }
   });
 
+  test("applies a value-changing check once across a round trip", () => {
+    const codec = compile(z.string().overwrite((s) => s + "!"), { validate: true });
+    expect(codec.decode(codec.encode("x"))).toBe("x!");
+    expect(codec.decodeBody(codec.encodeBody("x"))).toBe("x!");
+  });
+
+  test.each(["decode", "decodeBody"] as const)("%s still rejects values that fail validation", (method) => {
+    const codec = compile(z.string().min(3), { validate: true });
+    const trusted = compile(z.string());
+    const bytes = method === "decode" ? trusted.encode("x") : trusted.encodeBody("x");
+    expect(() => codec[method](bytes)).toThrow(DecodeError);
+    expect(() => codec[method](bytes)).toThrow(expect.objectContaining({ code: "validation" }));
+  });
+
+  test("the validating codec is frozen like a compiled codec", () => {
+    const codec = compile(z.string(), { validate: true });
+    expect(Object.isFrozen(codec)).toBe(true);
+    expect(Object.isFrozen(compile(z.string()))).toBe(true);
+  });
+
   test("preserves an error thrown by a custom parse", () => {
     const cause = new TypeError("custom validation failed");
     const schema = z.string();

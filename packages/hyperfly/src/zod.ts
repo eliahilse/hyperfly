@@ -236,11 +236,15 @@ export function compile<S extends ZodSchemaLike>(
       throw new ErrorClass("validation", `$: ${message}`, { cause });
     }
   };
-  return {
-    ...codec,
-    encode: (value) => codec.encode(parse(value, EncodeError)),
-    decode: (bytes) => parse(codec.decode(bytes), DecodeError),
-    encodeBody: (value) => codec.encodeBody(parse(value, EncodeError)),
-    decodeBody: (bytes) => parse(codec.decodeBody(bytes), DecodeError),
+  const validated = (value: InferOutput<S>): InferOutput<S> => {
+    parse(value, DecodeError);
+    return value;
   };
+  return Object.freeze({
+    ...codec,
+    encode: (value: InferOutput<S>) => codec.encode(parse(value, EncodeError)),
+    decode: (bytes: Uint8Array) => validated(codec.decode(bytes)),
+    encodeBody: (value: InferOutput<S>) => codec.encodeBody(parse(value, EncodeError)),
+    decodeBody: (bytes: Uint8Array) => validated(codec.decodeBody(bytes)),
+  });
 }

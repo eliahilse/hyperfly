@@ -45,7 +45,9 @@ compile(z.object({ meta: z.record(z.string(), z.unknown()) }));
 ```
 
 Zod refinements and string/array length constraints are checked only with
-`compile(EventResponse, { validate: true })`, on encode and decode. Validation is off by default.
+`compile(EventResponse, { validate: true })`, on encode and decode. Validation is off by default. Encode sends the
+parsed value; decode checks the decoded value and returns it as decoded, so a value-changing check such as `overwrite`
+applies once per round trip.
 
 ## Columns and profiles
 
