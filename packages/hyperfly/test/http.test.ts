@@ -4,7 +4,7 @@ import { z } from "zod";
 import { CodecRegistry, type IRNode } from "../src/index.js";
 import { compileIR } from "../src/index.js";
 import { HEADER_SIZE, WIRE_VERSION } from "../src/codec.js";
-import { DecodeError, EncodeError } from "../src/errors.js";
+import { DecodeError, EncodeError, HyperflyError } from "../src/errors.js";
 import {
   ACCEPT_HEADER,
   HYPERFLY_MEDIA_TYPE,
@@ -12,6 +12,7 @@ import {
   acceptHeader,
   decodeResponse,
   encodeFor,
+  loadArtifact,
   negotiate,
   parseAccept,
   serveArtifact,
@@ -196,6 +197,43 @@ describe("round trip over the protocol", () => {
     expect(decodeResponse(headers["Content-Type"], body, registry)).toEqual({ kind: "json", value });
   });
 
+  test.each(["{", new TextEncoder().encode("{")])("malformed JSON responses have a coded error and cause: %p", (body) => {
+    try {
+      decodeResponse("application/json", body, registry);
+      throw new Error("expected invalid JSON");
+    } catch (error) {
+      expect(error).toBeInstanceOf(DecodeError);
+      expect(error).toBeInstanceOf(HyperflyError);
+      expect((error as DecodeError).code).toBe("json");
+      expect((error as DecodeError).cause).toBeInstanceOf(SyntaxError);
+      expect((error as DecodeError).message).toBe(`$: ${((error as DecodeError).cause as Error).message}`);
+    }
+  });
+
+  test("malformed JSON artifacts preserve the SyntaxError cause", () => {
+    try {
+      loadArtifact("{", codecA.fingerprint);
+      throw new Error("expected invalid JSON");
+    } catch (error) {
+      expect(error).toBeInstanceOf(HyperflyError);
+      expect(error).not.toBeInstanceOf(DecodeError);
+      expect((error as HyperflyError).code).toBe("json");
+      expect((error as HyperflyError).cause).toBeInstanceOf(SyntaxError);
+      expect((error as HyperflyError).message).toContain("artifact is not JSON");
+    }
+  });
+
+  test("JSON responses rethrow non-syntax parse failures unchanged", () => {
+    const parse = JSON.parse;
+    const cause = new TypeError("parse failed");
+    try {
+      JSON.parse = () => { throw cause; };
+      expect(() => decodeResponse("application/json", "{}", registry)).toThrow(cause);
+    } finally {
+      JSON.parse = parse;
+    }
+  });
+
   test("a client without the codec reports a miss rather than guessing", () => {
     const decision = negotiate<typeof value>(acceptHeader([codecA.fingerprint]), registry);
     const { body, headers } = encodeFor(decision, value);
@@ -344,6 +382,62 @@ describe("fetch adapter", () => {
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.json()).toEqual(values);
     expect(errors.map((error) => error.code)).toEqual(["depth"]);
+  });
+
+  for (const plan of ["row", "columnar"] as const) {
+    test.each(["maxItems", "maxByteLength"] as const)(`falls back to JSON on a ${plan} encoder %s refusal`, async (limit) => {
+      const limited = compileIR<{ s: string }[]>({
+        kind: "array",
+        element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+      }, { plan, limits: { [limit]: 1 } });
+      const values = [{ s: "ab" }, { s: "cd" }];
+      const errors: EncodeError[] = [];
+      const response = respond(new Request(url, {
+        headers: { "Hyperfly-Accept": limited.fingerprint },
+      }), values, new CodecRegistry([limited as never]), {
+        onFallback: (error) => { errors.push(error); },
+      });
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(response.headers.get("hyperfly-offer")).toBe(limited.fingerprint);
+      expect(await response.json()).toEqual(values);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toBeInstanceOf(EncodeError);
+      expect(errors[0]!.code).toBe("limit");
+    });
+  }
+
+  test("falls back to JSON on a columnar leaf depth refusal", async () => {
+    const limited = compileIR<{ s: string }[]>({
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+    }, { plan: "columnar", limits: { maxDepth: 1 } });
+    const values = [{ s: "a" }];
+    const errors: EncodeError[] = [];
+    const response = respond(new Request(url, {
+      headers: { "Hyperfly-Accept": limited.fingerprint },
+    }), values, new CodecRegistry([limited as never]), {
+      onFallback: (error) => { errors.push(error); },
+    });
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual(values);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(EncodeError);
+    expect(errors[0]!.code).toBe("depth");
+  });
+
+  test.each([
+    ["range", { kind: "int", min: 0 }, -1],
+    ["required", { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] }, {}],
+    ["utf8", { kind: "string" }, "\ud800"],
+    ["float", { kind: "float64" }, Infinity],
+  ] as const)("rethrows encoder %s errors without reporting a fallback", (code, ir, value) => {
+    const codec = compileIR(ir as IRNode);
+    const errors: EncodeError[] = [];
+    const decision = negotiate(codec.fingerprint, new CodecRegistry([codec as never]));
+    const run = () => encodeFor(decision, value, { onFallback: (error) => { errors.push(error); } });
+    expect(run).toThrow(EncodeError);
+    expect(run).toThrow(expect.objectContaining({ code }));
+    expect(errors).toEqual([]);
   });
 
   test("rethrows encoder type errors without reporting a fallback", () => {
