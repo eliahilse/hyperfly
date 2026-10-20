@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/fingerprints.json" with { type: "json" };
-import { fingerprintOf, serializeArtifact, toHex, type IRNode, type PlanLayout } from "../src/index.js";
+import { serializeArtifact, type IRNode, type PlanLayout } from "../src/index.js";
+import { fingerprintOf, toHex } from "../src/canonical.js";
 
 describe("fingerprint vectors", () => {
   for (const c of vectors.cases) {

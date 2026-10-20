@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { compileIR, train, MAX_DICT_ENTRIES, type IRNode } from "../src/index.js";
+import { compileIR, train, type IRNode } from "../src/index.js";
+import { MAX_DICT_ENTRIES } from "../src/profile.js";
 
 const ROWS: IRNode = {
   kind: "array",

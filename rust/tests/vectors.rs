@@ -1,8 +1,6 @@
-use hyperfly_core::ir::{
-    Derivation, GrammarCase, GrammarNum, GrammarToken, Profile, ProfileColumn,
-};
 use hyperfly_core::{
-    fingerprint_of, serialize_artifact, Codec, ErrorCode, Field, Limits, Literal, Node, Plan, Value,
+    fingerprint_of, serialize_artifact, Codec, Derivation, ErrorCode, Field, GrammarCase,
+    GrammarNum, GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn, Value,
 };
 use serde_json::Value as Json;
 
@@ -19,7 +17,9 @@ fn node_of(json: &Json) -> Result<Node, String> {
 
     fn flag(field: &Json, name: &str) -> Result<bool, String> {
         field.get(name).map_or(Ok(false), |value| {
-            value.as_bool().ok_or_else(|| format!("{name} flag must be a boolean"))
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{name} flag must be a boolean"))
         })
     }
 
@@ -402,6 +402,21 @@ fn fingerprints() {
         );
         assert_eq!(
             to_hex(&fingerprint_of(&canonical)),
+            case["fingerprint"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        let codec = Codec::compile_with_profile(
+            node_of(&case["ir"]).unwrap(),
+            plan,
+            Limits::default(),
+            false,
+            profile,
+        )
+        .unwrap();
+        assert_eq!(codec.artifact(), canonical, "{}", case["name"]);
+        assert_eq!(
+            codec.fingerprint(),
             case["fingerprint"].as_str().unwrap(),
             "{}",
             case["name"]
