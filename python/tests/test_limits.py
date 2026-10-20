@@ -16,13 +16,18 @@ FIELDS = {
     "maxByteLength": "max_byte_length",
     "maxAmplification": "max_amplification",
     "maxTotalItems": "max_total_items",
+    "maxTotalBytes": "max_total_bytes",
+    "maxByteAmplification": "max_byte_amplification",
 }
+KEYS = {"name", "description", "plan", "ir", "limits", "profile", "inflate", "value", "hex", "error"}
 
 
 def codec_for(vector):
+    assert set(vector) <= KEYS, set(vector) - KEYS
     overrides = {FIELDS[key]: value for key, value in vector.get("limits", {}).items()}
     limits = dataclasses.replace(Limits(), **overrides)
-    return compile_ir(vector["ir"], plan=vector["plan"], limits=limits)
+    pack = None if vector.get("inflate", True) else False
+    return compile_ir(vector["ir"], plan=vector["plan"], limits=limits, pack=pack, profile=vector.get("profile"))
 
 
 def revive(value):
@@ -74,6 +79,8 @@ def test_decode_only(vector):
 def test_defaults_match_the_spec():
     assert Limits().max_amplification == 32
     assert Limits().max_total_items == 2**24
+    assert Limits().max_total_bytes == 2**26
+    assert Limits().max_byte_amplification == 64
 
 
 TWO_INTS = {
@@ -194,7 +201,8 @@ HOSTILE = [
 
 @pytest.mark.parametrize("ir, profile, body, code", [case[1:] for case in HOSTILE], ids=[case[0] for case in HOSTILE])
 def test_hostile_bodies_fail_fast_and_small(ir, profile, body, code):
-    codec = compile_ir(ir, plan="columnar", profile=profile)
+    # these bodies target the item budget and column structure, so the byte budget stays out of the way
+    codec = compile_ir(ir, plan="columnar", profile=profile, limits=Limits(max_total_bytes=2**40, max_byte_amplification=2**40))
     body = bytes.fromhex(body)
     assert len(body) < 64 * 1024
     start = time.perf_counter()

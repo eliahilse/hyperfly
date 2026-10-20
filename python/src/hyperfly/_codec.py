@@ -32,7 +32,7 @@ from ._wire import (
     DecodeError,
     EncodeError,
     FingerprintMismatchError,
-    ItemBudget,
+    Budget,
     Limits,
     Reader,
     read_bitmap,
@@ -131,6 +131,10 @@ def _utf8(v: Any, path: str) -> bytes:
     except UnicodeEncodeError:
         _efail("utf8", path, "lone surrogate")
     raise AssertionError
+
+
+def _text_bytes(text: str) -> int:
+    return len(text) if text.isascii() else len(text.encode("utf-8"))
 
 
 def _type_accepts_null(node: dict[str, Any]) -> bool:
@@ -259,7 +263,7 @@ def _lowest(bits: int) -> int | None:
     return (bits & -bits).bit_length() - 1 if bits else None
 
 
-def _merge(rows: bytes, unset: Iterable[Any], chosen: Iterable[Any]) -> Iterator[Any]:
+def _merge(rows: Iterable[int], unset: Iterable[Any], chosen: Iterable[Any]) -> Iterator[Any]:
     """Interleave two streams by a selector: the next of `chosen` where the row's byte is 1."""
     return map(next, map((iter(unset), iter(chosen)).__getitem__, rows))
 
@@ -441,6 +445,9 @@ class _Ctx:
         "leaf_plans",
         "shapes",
         "column_counts",
+        "entry_bytes",
+        "derived_bytes",
+        "enum_bytes",
     )
 
     def __init__(self, ir: dict[str, Any], limits: Limits, columnar: bool, deflate, inflate, profile=None) -> None:
@@ -504,12 +511,24 @@ class _Ctx:
             )
             for ordinal, derivation in self.derivations.items()
         }
+        # decoded byte lengths by code, for the byte budget; code 0 is an escape
+        self.entry_bytes = {ordinal: (0, *map(_text_bytes, entries)) for ordinal, entries in self.dicts.items()}
+        self.derived_bytes = {
+            ordinal: (0, *map(_text_bytes, derivation["values"])) for ordinal, derivation in self.derivations.items()
+        }
+        self.enum_bytes: dict[int, tuple[int, ...]] = {}
 
     def column_count(self, node: dict[str, Any]) -> int:
         count = self.column_counts.get(id(node))
         if count is None:
             count = self.column_counts[id(node)] = column_count(node)
         return count
+
+    def member_bytes(self, node: dict[str, Any]) -> tuple[int, ...]:
+        sizes = self.enum_bytes.get(id(node))
+        if sizes is None:
+            sizes = self.enum_bytes[id(node)] = tuple(map(_text_bytes, node["members"]))
+        return sizes
 
     def grammar_codes(self, ordinal: int, lookup: dict[str, int]) -> dict[Any, int]:
         """Dictionary codes keyed by the lanes of the entries that match the column's grammar."""
@@ -533,7 +552,7 @@ def _encode_node(
     path: str,
     depth: int,
     ctx: _Ctx,
-    budget: ItemBudget,
+    budget: Budget,
     column: int = 0,
 ) -> None:
     if depth > ctx.max_depth:
@@ -552,6 +571,7 @@ def _encode_node(
         data = _utf8(value, path)
         if len(data) > ctx.max_byte_length:
             _efail("limit", path, f"string of {len(data)} bytes exceeds the codec limit")
+        budget.charge_bytes(len(data), path, EncodeError)
         write_uleb(out, len(data))
         out += data
     elif kind == "bytes":
@@ -559,11 +579,15 @@ def _encode_node(
             _efail("type", path, "expected bytes")
         if len(value) > ctx.max_byte_length:
             _efail("limit", path, f"bytes of {len(value)} exceeds the codec limit")
+        budget.charge_bytes(len(value), path, EncodeError)
         write_uleb(out, len(value))
         out += value
     elif kind == "literal":
-        if not _literal_matches(node["value"], value):
-            _efail("type", path, f"expected literal {node['value']!r}")
+        literal = node["value"]
+        if not _literal_matches(literal, value):
+            _efail("type", path, f"expected literal {literal!r}")
+        if type(literal) is str:
+            budget.charge_bytes(_text_bytes(literal), path, EncodeError)
     elif kind == "enum":
         if type(value) is not str:
             value = getattr(value, "value", value)
@@ -571,6 +595,7 @@ def _encode_node(
             index = node["members"].index(value)
         except (ValueError, TypeError):
             _efail("type", path, f"{value!r} is not an enum member")
+        budget.charge_bytes(_text_bytes(value), path, EncodeError)
         write_uleb(out, index)
     elif kind == "nullable":
         if value is None:
@@ -887,6 +912,7 @@ def _encode_string_column(
     source_value,
     path: str,
     ctx: _Ctx,
+    budget: Budget,
     ordinal: int,
 ) -> None:
     if not values:
@@ -901,6 +927,7 @@ def _encode_string_column(
                 f"{path}[{i}]",
                 f"string of {len(data)} bytes exceeds the codec limit",
             )
+        budget.charge_bytes(len(data), f"{path}[{i}]", EncodeError)
         encoded.append(data)
     plain_cost = sum(uleb_len(len(b)) + len(b) for b in encoded)
 
@@ -1004,7 +1031,7 @@ def _encode_string_column(
 
 
 def _encode_enum_column(
-    out: bytearray, node: dict[str, Any], values: list[Any], path: str
+    out: bytearray, node: dict[str, Any], values: list[Any], path: str, budget: Budget
 ) -> None:
     indices = []
     for i, value in enumerate(values):
@@ -1014,6 +1041,7 @@ def _encode_enum_column(
             indices.append(node["members"].index(value))
         except (ValueError, TypeError):
             _efail("type", f"{path}[{i}]", f"{value!r} is not an enum member")
+        budget.charge_bytes(_text_bytes(value), f"{path}[{i}]", EncodeError)
     _pack_bits(out, indices, _bit_width(len(node["members"]) - 1))
 
 
@@ -1024,7 +1052,7 @@ def _encode_columnar(
     path: str,
     depth: int,
     ctx: _Ctx,
-    budget: ItemBudget,
+    budget: Budget,
     leaves: _Leaves,
     ordinal_base: int = 0,
 ) -> None:
@@ -1140,10 +1168,11 @@ def _encode_columnar(
                 source_value,
                 field_path,
                 ctx,
+                budget,
                 ordinal_base + leaf_index,
             )
         elif kind == "enum":
-            _encode_enum_column(out, t, participating, field_path)
+            _encode_enum_column(out, t, participating, field_path, budget)
         else:
             for i, v in enumerate(participating):
                 _encode_node(out, t, v, f"{field_path}[{i}]", depth + 2, ctx, budget)
@@ -1176,6 +1205,7 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         n = read_uleb(r)
         if n > r.limits.max_byte_length:
             _dfail("limit", path, "string length exceeds limit")
+        r.budget.charge_bytes(n, path, DecodeError)
         data = r.take(n)
         try:
             return data.decode("utf-8")
@@ -1185,14 +1215,20 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         n = read_uleb(r)
         if n > r.limits.max_byte_length:
             _dfail("limit", path, "bytes length exceeds limit")
+        r.budget.charge_bytes(n, path, DecodeError)
         return bytes(r.take(n))
     if kind == "literal":
-        return node["value"]
+        literal = node["value"]
+        if type(literal) is str:
+            r.budget.charge_bytes(_text_bytes(literal), path, DecodeError)
+        return literal
     if kind == "enum":
         index = read_uleb(r)
         if index >= len(node["members"]):
             _dfail("range", path, f"enum index {index} out of range")
-        return node["members"][index]
+        member = node["members"][index]
+        r.budget.charge_bytes(_text_bytes(member), path, DecodeError)
+        return member
     if kind == "nullable":
         marker = r.u8()
         if marker == 0:
@@ -1210,16 +1246,18 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
         if length > r.limits.max_items:
             _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
         _bound_by_input(r, length, zero_bit, path)
-        r.items.charge(length, path, DecodeError)
+        budget = r.budget
+        budget.charge(length, path, DecodeError)
         element = node["element"]
         if zero_bit:
             if not length:
                 return []
             # every element decodes from the same zero bits to an equal value, so one
-            # decode stands for all and charges the budget for each
-            charged = r.items.total
+            # decode stands for all and charges the budgets for each
+            counted, decoded = budget.total, budget.bytes
             first = _decode_node(r, element, f"{path}[0]", depth + 1, ctx, column)
-            r.items.charge((length - 1) * (r.items.total - charged), path, DecodeError)
+            budget.charge((length - 1) * (budget.total - counted), path, DecodeError)
+            budget.charge_bytes((length - 1) * (budget.bytes - decoded), path, DecodeError)
             items: list[Any] = []
             r.deferred.append((items, lambda: _copies(first, length)))
             return items
@@ -1255,7 +1293,10 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
     _dfail("marker", path, f"unknown kind {kind}")
 
 
-def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -> _Values:
+def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str, lane: bool = False) -> _Values:
+    """A column's values, each checked against the node's bounds in row order with its
+    structure; a grammar lane reads only its structure here and leaves its bounds to the
+    column, which checks them value by value."""
     mode = r.u8()
     if mode > 4:
         _dfail("marker", path, f"invalid int column mode 0x{mode:x}")
@@ -1266,6 +1307,8 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
     lo = node.get("min")
     if mode <= 0x01:
         raws, err = read_ulebs(r, count)
+        if lane and err is not None:
+            raise err
         values = array("q")
         if raws:
             if mode == 0x00:
@@ -1273,6 +1316,8 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
             else:
                 first = raws[0] + lo if lo is not None else unzigzag(raws[0])
                 make = lambda: accumulate(_unzigzag(raws, 1), initial=first)
+            if lane:
+                return _Values(make)
             values = _checked_ints(make, node, path)
         if err is not None:
             raise err
@@ -1280,7 +1325,7 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
     if mode == 0x02:
         base = unzigzag(read_uleb(r))
         width = r.u8()
-        return _framed(_unpack_bits(r, count, width, path), base, count, node, path)
+        return _framed(_unpack_bits(r, count, width, path), base, count, node, path, lane)
     if mode == 0x03:
         if count < 2:
             _dfail("marker", path, "delta frame requires at least two values")
@@ -1290,8 +1335,12 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
         width = r.u8()
         packed = _unpack_bits(r, count - 1, width, path)
         if packed is None:
-            return _arithmetic(first, base, count, node, path)
-        values = _checked_ints(lambda: accumulate(map(add, packed, repeat(base)), initial=first), node, path)
+            return _arithmetic(first, base, count, node, path, lane)
+        deltas: array = packed
+        make = lambda: accumulate(map(add, deltas, repeat(base)), initial=first)
+        if lane:
+            return _Values(make)
+        values = _checked_ints(make, node, path)
         return _Values(lambda: values)
     base = unzigzag(read_uleb(r))
     low_width = r.u8()
@@ -1309,7 +1358,7 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
     patched = exceptions.bit_count()
     highs = _unpack_bits(r, patched, high_width, path)
     if highs is None or not patched:
-        return _framed(lows, base, count, node, path)
+        return _framed(lows, base, count, node, path, lane)
     high_parts: array = highs
     rows = _selector(exceptions, count)
 
@@ -1321,10 +1370,12 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
 
     if 0 in high_parts:
         row = next(islice(compress(itertools.count(), rows), high_parts.index(0), None))
-        index = _first_outside(lambda: islice(patched_values(), row), *_int_bounds(node))
+        index = None if lane else _first_outside(lambda: islice(patched_values(), row), *_int_bounds(node))
         if index is None:
             _dfail("bitmap", f"{path}[{row}]", "patched frame exception has a zero high part")
         _range_fail(node, path, index, next(islice(patched_values(), index, None)))
+    if lane:
+        return _Values(patched_values)
     values = _checked_ints(patched_values, node, path)
     return _Values(lambda: values)
 
@@ -1337,12 +1388,16 @@ def _int_bounds(node: dict[str, Any]) -> tuple[int, int]:
     )
 
 
-def _range_fail(node: dict[str, Any], path: str, index: int, value: int) -> NoReturn:
+def _range_error(node: dict[str, Any], path: str, index: int, value: int) -> DecodeError:
     if value < INT_MIN or value > INT_MAX:
-        _dfail("range", f"{path}[{index}]", "decoded integer outside the v0 domain")
+        return DecodeError("range", f"{path}[{index}]: decoded integer outside the v0 domain")
     if node.get("min") is not None and value < node["min"]:
-        _dfail("range", f"{path}[{index}]", "below declared min")
-    _dfail("range", f"{path}[{index}]", "above declared max")
+        return DecodeError("range", f"{path}[{index}]: below declared min")
+    return DecodeError("range", f"{path}[{index}]: above declared max")
+
+
+def _range_fail(node: dict[str, Any], path: str, index: int, value: int) -> NoReturn:
+    raise _range_error(node, path, index, value)
 
 
 def _first_outside(make: Callable[[], Iterable[int]], floor: int, ceil: int) -> int | None:
@@ -1368,7 +1423,12 @@ def _checked_ints(make: Callable[[], Iterable[int]], node: dict[str, Any], path:
     return values
 
 
-def _framed(packed: array | None, base: int, count: int, node: dict[str, Any], path: str) -> _Values:
+def _framed(packed: array | None, base: int, count: int, node: dict[str, Any], path: str, lane: bool) -> _Values:
+    if lane:
+        if packed is None:
+            return _constant(base, count)
+        offsets: array = packed
+        return _Values(lambda: map(add, offsets, repeat(base)))
     floor, ceil = _int_bounds(node)
     if packed is None:
         if not floor <= base <= ceil:
@@ -1383,22 +1443,37 @@ def _framed(packed: array | None, base: int, count: int, node: dict[str, Any], p
     return _Values(lambda: map(add, packed, repeat(base)))
 
 
-def _arithmetic(first: int, step: int, count: int, node: dict[str, Any], path: str) -> _Values:
-    """A width-zero delta frame: the values run from first by step, so the ends
-    bound them all and the first one out of bounds is a division away."""
-    floor, ceil = _int_bounds(node)
-    if not floor <= first <= ceil:
-        _range_fail(node, path, 0, first)
-    last = first + (count - 1) * step
-    if last > ceil:
-        index = (ceil - first) // step + 1
-        _range_fail(node, path, index, first + index * step)
-    if last < floor:
-        index = (first - floor) // -step + 1
-        _range_fail(node, path, index, first + index * step)
+def _arithmetic(first: int, step: int, count: int, node: dict[str, Any], path: str, lane: bool) -> _Values:
+    """A width-zero delta frame: the values run from first by step."""
+    if not lane:
+        index = _arithmetic_outside(first, step, count, *_int_bounds(node))
+        if index is not None:
+            _range_fail(node, path, index, first + index * step)
     if step == 0:
         return _constant(first, count)
     return _Values(lambda: range(first, first + count * step, step))
+
+
+def _arithmetic_outside(first: int, step: int, count: int, floor: int, ceil: int) -> int | None:
+    """The ends of a progression bound it, so its first value out of bounds is a division away."""
+    if not floor <= first <= ceil:
+        return 0
+    last = first + (count - 1) * step
+    if last > ceil:
+        return (ceil - first) // step + 1
+    if last < floor:
+        return (first - floor) // -step + 1
+    return None
+
+
+def _lane_outside(values: _Values, ceil: int) -> int | None:
+    """The first grammar lane value outside [0, ceil]."""
+    if values.const is not _ABSENT:
+        return None if 0 <= values.const <= ceil else 0
+    run = values.make()
+    if type(run) is range:
+        return _arithmetic_outside(run.start, run.step, len(run), 0, ceil)
+    return _first_outside(values.make, 0, ceil)
 
 
 def _decode_float_column(r: Reader, count: int, path: str) -> _Values:
@@ -1478,11 +1553,17 @@ def _decode_float_column(r: Reader, count: int, path: str) -> _Values:
     return _Values(lambda: floats)
 
 
+# a value's own failure: its participating row, whether its length is charged to the
+# byte budget before the error, and the error
+_Failure = tuple[int, bool, DecodeError]
+
+
 def _read_slices(
     r: Reader, count: int, path: str, what: str, at: Callable[[int], int] | None = None
-) -> tuple[array, array, DecodeError | None]:
+) -> tuple[array, array, _Failure | None, int]:
     """Offsets of up to `count` length-prefixed values, stopping at the first
-    malformed one, whose error is returned for the caller to order."""
+    malformed one, whose failure is returned for the caller to order, with the
+    declared length of a value whose bytes run out."""
     buf = r.buf
     pos = r.pos
     end = len(buf)
@@ -1498,31 +1579,30 @@ def _read_slices(
             try:
                 n, pos = uleb_at(buf, pos)
             except DecodeError as err:
-                return starts, ends, err
+                return starts, ends, (j, False, err), 0
         if n > limit:
             index = at(j) if at else j
-            return starts, ends, DecodeError("limit", f"{path}[{index}]: {what} length exceeds limit")
+            return starts, ends, (j, False, DecodeError("limit", f"{path}[{index}]: {what} length exceeds limit")), 0
         if pos + n > end:
-            return starts, ends, DecodeError("truncated", "unexpected end of input")
+            return starts, ends, (j, True, DecodeError("truncated", "unexpected end of input")), n
         starts.append(pos)
         pos += n
         ends.append(pos)
     r.pos = pos
-    return starts, ends, None
+    return starts, ends, None, 0
 
 
-def _check_utf8(buf: bytes, starts: array, ends: array, path: str, at: Callable[[int], int] | None) -> None:
-    """Every slice is strict UTF-8. One decode covers them all: the length prefixes
-    between them are ASCII once the multi-byte ones are blanked, and an ASCII byte
-    never sits inside a UTF-8 sequence."""
-    n = len(starts)
-    if not n:
-        return
+def _invalid_utf8(buf: bytes, starts: array, ends: array, count: int) -> int | None:
+    """The first of the first `count` slices that is not strict UTF-8. One decode
+    covers them all: the length prefixes between them are ASCII once the multi-byte
+    ones are blanked, and an ASCII byte never sits inside a UTF-8 sequence."""
+    if not count:
+        return None
     lo = starts[0]
-    span: bytes | bytearray = buf[lo : ends[n - 1]]
+    span: bytes | bytearray = buf[lo : ends[count - 1]]
     if span.isascii():
-        return
-    gaps = map(sub, islice(starts, 1, None), ends)
+        return None
+    gaps = map(sub, islice(starts, 1, count), ends)
     wide = list(compress(itertools.count(1), map((1).__lt__, gaps)))
     if wide:
         span = bytearray(span)
@@ -1531,15 +1611,55 @@ def _check_utf8(buf: bytes, starts: array, ends: array, path: str, at: Callable[
     try:
         span.decode("utf-8")
     except UnicodeDecodeError as err:
-        j = bisect_right(starts, lo + err.start) - 1
-        _dfail("utf8", f"{path}[{at(j) if at else j}]", "invalid UTF-8")
+        return bisect_right(starts, lo + err.start, 0, count) - 1
+    return None
 
 
-def _literals(r: Reader, count: int, path: str, at: Callable[[int], int] | None = None) -> tuple[array, array]:
-    starts, ends, err = _read_slices(r, count, path, "string", at)
-    _check_utf8(r.buf, starts, ends, path, at)
-    if err is not None:
-        raise err
+def _escapes(
+    r: Reader, count: int, path: str, at: Callable[[int], int] | None = None, what: str = "string"
+) -> tuple[array, array, _Failure | None, Callable[[], Iterator[int]]]:
+    """Up to `count` length-prefixed values in row order: their offsets, the first
+    that fails at its participating row, and their lengths as far as they were read."""
+    starts, ends, failure, pending = _read_slices(r, count, path, what, at)
+    if what == "string":
+        bad = _invalid_utf8(r.buf, starts, ends, len(starts))
+        if bad is not None:
+            failure = (bad, True, DecodeError("utf8", f"{path}[{at(bad) if at else bad}]: invalid UTF-8"))
+    if failure is not None and at is not None:
+        failure = (at(failure[0]), failure[1], failure[2])
+    return starts, ends, failure, lambda: chain(map(sub, ends, starts), (pending,))
+
+
+def _settle(
+    r: Reader,
+    make: Callable[[], Iterable[int]],
+    failure: _Failure | None,
+    path: str,
+    total: int | None = None,
+) -> None:
+    """Charge a column's value lengths, given in participating-row order, as if value
+    by value: the first value whose own checks fail or whose charge passes the byte
+    budget decides the error. `total`, when given, is the sum of every length."""
+    budget = r.budget
+    remaining = budget.byte_cap - budget.bytes
+    lengths = make
+    if failure is not None:
+        stop = failure[0] + failure[1]
+        lengths = lambda: islice(make(), stop)
+        total = None
+    if total is None:
+        total = sum(lengths())
+    if total > remaining:
+        index = next(compress(itertools.count(), map(remaining.__lt__, accumulate(lengths()))))
+        _dfail("limit", f"{path}[{index}]", f"decoded bytes exceed the byte budget of {budget.byte_cap}")
+    if failure is not None:
+        raise failure[2]
+    budget.bytes += total
+
+
+def _literals(r: Reader, count: int, path: str, what: str = "string") -> tuple[array, array]:
+    starts, ends, failure, lengths = _escapes(r, count, path, what=what)
+    _settle(r, lengths, failure, path)
     return starts, ends
 
 
@@ -1605,6 +1725,9 @@ def _decode_string_column(
             _dfail("marker", path, "empty column must use mode 0x00")
         return _NONE
     buf = r.buf
+    failure: _Failure | None = None
+    make: Callable[[], Iterable[int]]
+    total: int | None = None
 
     if mode == 0x00:
         return _plain(buf, *_literals(r, count, path))
@@ -1620,19 +1743,26 @@ def _decode_string_column(
         if packed is None:
             return _plain(buf, *_literals(r, count, path))
         codes: array = packed
-        stop: tuple[int, str, str] | None = None
         if max(codes) > len(entries):
             index = next(compress(itertools.count(), map(len(entries).__lt__, codes)))
-            stop = (index, "range", f"dictionary code {codes[index]} out of range")
+            failure = (index, False, DecodeError("range", f"{path}[{index}]: dictionary code {codes[index]} out of range"))
         long_codes = ctx.long_codes[ordinal]
         if long_codes:
             too_long = next(compress(itertools.count(), map(long_codes.__contains__, codes)), None)
-            if too_long is not None and (stop is None or too_long < stop[0]):
-                stop = (too_long, "limit", "reconstructed string length exceeds limit")
-        escaped = codes.count(0) if stop is None else codes[: stop[0]].count(0)
-        starts, ends = _literals(r, escaped, path, lambda j: next(islice(_zeros(codes), j, None)))
-        if stop is not None:
-            _dfail(stop[1], f"{path}[{stop[0]}]", stop[2])
+            if too_long is not None and (failure is None or too_long < failure[0]):
+                failure = (too_long, False, _too_long(path, too_long))
+        escaped = codes.count(0) if failure is None else codes[: failure[0]].count(0)
+        starts, ends, escape_failure, escape_lengths = _escapes(
+            r, escaped, path, lambda j: next(islice(_zeros(codes), j, None))
+        )
+        sizes = ctx.entry_bytes[ordinal]
+        if escaped:
+            make = lambda: map(add, map(sizes.__getitem__, codes), _merge(map(not_, codes), repeat(0), escape_lengths()))
+        else:
+            make = lambda: map(sizes.__getitem__, codes)
+        if failure is None:
+            total = sum(map(sizes.__getitem__, codes)) + sum(escape_lengths())
+        _settle(r, make, escape_failure or failure, path, total)
         table = ctx.tables[ordinal]
 
         def lookup_values() -> list[Any]:
@@ -1657,18 +1787,42 @@ def _decode_string_column(
             _dfail("unsupported", path, "grammar column requires a profile for this leaf")
         escapes, escaped = _read_escapes(r, count, path)
         matched = count - escaped
+        bounds = ctx.lane_bounds[ordinal]
         lanes = [
-            _decode_int_column(r, bounds, matched, f"{path}.lane[{lane_index}]")
-            for lane_index, bounds in enumerate(ctx.lane_bounds[ordinal])
+            _decode_int_column(r, node, matched, f"{path}.lane[{lane_index}]", lane=True)
+            for lane_index, node in enumerate(bounds)
         ]
         rows = _selector(escapes, count) if 0 < escaped < count else b""
         at = _nth_set(rows) if rows else None
-        # every rendering of one grammar has the same length, so one check stands for all
-        if matched and ctx.grammar_bytes[ordinal] > r.limits.max_byte_length:
-            first = ((escapes + 1) & ~escapes).bit_length() - 1
-            _literals(r, first, path, at)
-            _dfail("limit", f"{path}[{first}]", "reconstructed string length exceeds limit")
-        starts, ends = _literals(r, escaped, path, at)
+        outside: tuple[int, int] | None = None
+        for lane_index, (lane, node) in enumerate(zip(lanes, bounds)):
+            beyond = _lane_outside(lane, node["max"])
+            if beyond is not None and (outside is None or beyond < outside[0]):
+                outside = (beyond, lane_index)
+        # every rendering of one grammar has the same length, known from its tokens
+        length = ctx.grammar_bytes[ordinal]
+        too_long = matched > 0 and length > r.limits.max_byte_length
+        before = escaped
+        if outside is not None or too_long:
+            index = outside[0] if outside is not None and not too_long else 0
+            row = next(islice(compress(itertools.count(), map(not_, rows)), index, None)) if rows else index
+            if outside is not None and outside[0] == index:
+                lane_index = outside[1]
+                value = next(islice(lanes[lane_index].make(), index, None))
+                failure = (row, False, _range_error(bounds[lane_index], f"{path}.lane[{lane_index}]", index, value))
+            else:
+                failure = (row, False, _too_long(path, row))
+            before = (escapes & ((1 << row) - 1)).bit_count()
+        starts, ends, escape_failure, escape_lengths = _escapes(r, before, path, at)
+        if not escaped:
+            make = lambda: repeat(length, count)
+        elif escaped == count:
+            make = escape_lengths
+        else:
+            make = lambda: _merge(rows, repeat(length), escape_lengths())
+        if failure is None:
+            total = length * matched + sum(escape_lengths())
+        _settle(r, make, escape_failure or failure, path, total)
         render = ctx.renderers[ordinal]
 
         def keys() -> Iterator[Any]:
@@ -1703,22 +1857,38 @@ def _decode_string_column(
         at = _nth_set(rows) if rows else None
         assert source_codes is not None
         source: Any = source_codes(derivation["source"]) if escaped < count else 0
-        failure = None
         if escaped < count:
-            failure = _first_derived_failure(source, escapes, escaped, ctx.long_derived[ordinal])
-        if failure is not None:
-            _literals(r, (escapes & ((1 << failure[0]) - 1)).bit_count(), path, at)
-            _dfail(failure[1], f"{path}[{failure[0]}]", failure[2])
-        starts, ends = _literals(r, escaped, path, at)
-        table = ctx.derived_tables[ordinal]
-
-        if isinstance(source, int) and not escaped:
-            return _constant(table[source], count)
+            found = _first_derived_failure(source, escapes, escaped, ctx.long_derived[ordinal])
+            if found is not None:
+                failure = (found[0], False, DecodeError(found[1], f"{path}[{found[0]}]: {found[2]}"))
+        before = escaped if failure is None else (escapes & ((1 << failure[0]) - 1)).bit_count()
+        starts, ends, escape_failure, escape_lengths = _escapes(r, before, path, at)
+        sizes = ctx.derived_bytes[ordinal]
 
         def conforming() -> Iterable[int]:
             if isinstance(source, int):
                 return repeat(source)
             return compress(source, map(not_, rows)) if escaped else source
+
+        def derived_lengths() -> Iterable[int]:
+            if isinstance(source, int):
+                return map(sizes.__getitem__, repeat(source, count - escaped))
+            return map(sizes.__getitem__, conforming())
+
+        if escaped == count:
+            make = escape_lengths
+        elif escaped:
+            make = lambda: _merge(rows, derived_lengths(), escape_lengths())
+        else:
+            make = derived_lengths
+        if failure is None:
+            conformed = sizes[source] * (count - escaped) if isinstance(source, int) else sum(derived_lengths())
+            total = conformed + sum(escape_lengths())
+        _settle(r, make, escape_failure or failure, path, total)
+        table = ctx.derived_tables[ordinal]
+
+        if isinstance(source, int) and not escaped:
+            return _constant(table[source], count)
 
         def derived_values() -> Iterator[Any]:
             if escaped == count:
@@ -1743,12 +1913,13 @@ def _decode_string_column(
     if err is not None:
         raise err
     total = sum(lengths)
+    r.budget.charge_bytes(total, path, DecodeError)
+    if ctx.inflate is None:
+        _dfail("unsupported", path, "packed string column requires an inflate hook")
     blob_len = read_uleb(r)
     if blob_len > limit:
         _dfail("limit", path, "packed blob exceeds limit")
     blob = r.take(blob_len)
-    if ctx.inflate is None:
-        _dfail("unsupported", path, "packed string column requires an inflate hook")
     try:
         inflated = ctx.inflate(blob, total)
     except Exception:
@@ -1778,6 +1949,10 @@ def _joined_utf8(data: bytes, starts: array, total: int) -> bool:
         return False
     heads = bytes(map(data.__getitem__, filter(total.__gt__, islice(starts, 1, None))))
     return 1 not in heads.translate(_CONTINUATION)
+
+
+def _too_long(path: str, index: int) -> DecodeError:
+    return DecodeError("limit", f"{path}[{index}]: reconstructed string length exceeds limit")
 
 
 def _zeros(codes: array) -> Iterator[int]:
@@ -1810,15 +1985,22 @@ def _first_derived_failure(
     return None
 
 
-def _decode_enum_column(r: Reader, node: dict[str, Any], count: int, path: str) -> _Values:
+def _decode_enum_column(r: Reader, node: dict[str, Any], count: int, path: str, ctx: _Ctx) -> _Values:
     members = node["members"]
+    sizes = ctx.member_bytes(node)
     indices = _unpack_bits(r, count, _bit_width(len(members) - 1), path)
     if indices is None:
+        _settle(r, lambda: repeat(sizes[0], count), None, path, sizes[0] * count)
         return _constant(members[0], count)
     found: array = indices
+    failure: _Failure | None = None
     if max(found, default=0) >= len(members):
         index = next(compress(itertools.count(), map(len(members).__le__, found)))
-        _dfail("range", f"{path}[{index}]", f"enum index {found[index]} out of range")
+        failure = (index, False, DecodeError("range", f"{path}[{index}]: enum index {found[index]} out of range"))
+    total = None
+    if failure is None:
+        total = sizes[0] * count if min(sizes) == max(sizes) else sum(map(sizes.__getitem__, found))
+    _settle(r, lambda: map(sizes.__getitem__, found), failure, path, total)
     return _Values(lambda: map(members.__getitem__, found))
 
 
@@ -1840,7 +2022,7 @@ def _decode_columnar(
     if length > r.limits.max_items:
         _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
     _bound_amplification(r, length, path)
-    r.items.charge(length, path, DecodeError)
+    r.budget.charge(length, path, DecodeError)
     count = length
 
     # columns stay packed, typed or arithmetic until the whole body has decoded, so a
@@ -1886,13 +2068,14 @@ def _decode_columnar(
                 partial(_source_codes, ctx, columns, ordinal_base, count, part) if ordinal in ctx.derivations else None,
             )
         elif kind == "enum":
-            values = _decode_enum_column(r, t, participating, field_path)
+            values = _decode_enum_column(r, t, participating, field_path, ctx)
         elif kind == "literal":
-            values = _constant(t["value"], participating)
+            literal = t["value"]
+            if type(literal) is str:
+                r.budget.charge_bytes(_text_bytes(literal) * participating, field_path, DecodeError)
+            values = _constant(literal, participating)
         else:
-            starts, ends, err = _read_slices(r, participating, field_path, "bytes")
-            if err is not None:
-                raise err
+            starts, ends = _literals(r, participating, field_path, "bytes")
             values = _Values(partial(_slices, r.buf, starts, ends))
         columns.append((presence, nulls, part, values))
 
@@ -2054,11 +2237,14 @@ class Codec:
 
     def encode_body(self, value: Any) -> bytes:
         out = bytearray()
-        budget = ItemBudget(self._limits.max_total_items)
+        budget = Budget(self._limits.max_total_items, self._limits.max_total_bytes)
         _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
         cap = self._limits.item_budget(len(out))
         if budget.total > cap:
             raise EncodeError("limit", f"$: {budget.total} items exceed the item budget of {cap}")
+        byte_cap = self._limits.byte_budget(len(out))
+        if budget.bytes > byte_cap:
+            raise EncodeError("limit", f"$: {budget.bytes} bytes exceed the byte budget of {byte_cap}")
         return bytes(out)
 
     def decode_body(self, data: bytes) -> Any:

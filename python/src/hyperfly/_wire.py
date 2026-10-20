@@ -46,36 +46,49 @@ class Limits:
     max_byte_length: int = 2**28
     max_amplification: int = 32
     max_total_items: int = 2**24
+    max_total_bytes: int = 2**26
+    max_byte_amplification: int = 64
 
     def item_budget(self, body_length: int) -> int:
         """Items one body may declare across all its arrays: wire-v0 section 6."""
         return min(self.max_total_items, self.max_amplification * (body_length + 1))
 
+    def byte_budget(self, body_length: int) -> int:
+        """Decoded bytes of every string and bytes value in one body: wire-v0 section 6."""
+        return min(self.max_total_bytes, self.max_byte_amplification * (body_length + 1))
+
 
 DEFAULT_LIMITS = Limits()
 
 
-class ItemBudget:
-    __slots__ = ("cap", "total")
+class Budget:
+    __slots__ = ("cap", "total", "byte_cap", "bytes")
 
-    def __init__(self, cap: int) -> None:
+    def __init__(self, cap: int, byte_cap: int) -> None:
         self.cap = cap
         self.total = 0
+        self.byte_cap = byte_cap
+        self.bytes = 0
 
     def charge(self, count: int, path: str, error: type[HyperflyError]) -> None:
         if count > self.cap - self.total:
             raise error("limit", f"{path}: {self.total + count} items exceed the item budget of {self.cap}")
         self.total += count
 
+    def charge_bytes(self, length: int, path: str, error: type[HyperflyError]) -> None:
+        if length > self.byte_cap - self.bytes:
+            raise error("limit", f"{path}: {self.bytes + length} bytes exceed the byte budget of {self.byte_cap}")
+        self.bytes += length
+
 
 class Reader:
-    __slots__ = ("buf", "pos", "limits", "items", "deferred")
+    __slots__ = ("buf", "pos", "limits", "budget", "deferred")
 
     def __init__(self, buf: bytes, limits: Limits) -> None:
         self.buf = buf
         self.pos = 0
         self.limits = limits
-        self.items = ItemBudget(limits.item_budget(len(buf)))
+        self.budget = Budget(limits.item_budget(len(buf)), limits.byte_budget(len(buf)))
         # arrays whose items are built only once the whole body has decoded
         self.deferred: list[tuple[list, Callable[[], Iterable]]] = []
 
