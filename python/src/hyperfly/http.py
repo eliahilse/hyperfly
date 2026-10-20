@@ -16,6 +16,7 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable, Literal, NamedTuple, cast
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
@@ -250,6 +251,11 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
         copies[id(node)] = copied
         plans[id(node)] = plan
         kind = node["type"]
+        if node.get("serialization", {}).get("type") in ("function-plain", "function-wrap"):
+            # Custom serializers own their whole output. Keep their original
+            # subtree and config, including bytes passed through a wrap handler.
+            plan["type"] = "custom"
+            return copied, plan
         if "ref" in node:
             copied["ref"] = node["ref"] + ":hyperfly-http"
             references[copied["ref"]] = copied
@@ -270,13 +276,24 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
                 plan["root"] = node.get("root_model", False)
         elif kind == "model-fields":
             copied["fields"] = dict(node["fields"])
+            aliases: dict[str, int] = {}
             for name, item in node["fields"].items():
-                if item.get("serialization_exclude"):
+                if not item.get("serialization_exclude"):
+                    alias = item.get("serialization_alias")
+                    alias = name if alias is None else alias
+                    aliases[alias] = aliases.get(alias, 0) + 1
+            for item in node.get("computed_fields", []):
+                alias = item.get("alias")
+                alias = item["property_name"] if alias is None else alias
+                aliases[alias] = aliases.get(alias, 0) + 1
+            for name, item in node["fields"].items():
+                alias = item.get("serialization_alias")
+                alias = name if alias is None else alias
+                if item.get("serialization_exclude") or aliases[alias] > 1:
                     continue
                 child, child_plan = visit(item["schema"])
                 copied["fields"][name] = {**item, "schema": child}
-                alias = item.get("serialization_alias")
-                plan["children"].append((name, name if alias is None else alias, child_plan))
+                plan["children"].append((name, alias, child_plan))
         elif kind == "list":
             copied["items_schema"], child_plan = visit(node["items_schema"])
             plan["children"] = [child_plan]
@@ -355,8 +372,9 @@ def _overlay_model_bytes(plain: Any, source: Any, plan: dict[str, Any]) -> Any:
                 parent[key] = _base64(value)
         elif kind == "model-fields":
             if isinstance(target, dict):
+                extras = getattr(value, "__pydantic_extra__", None) or {}
                 for name, alias, child in children:
-                    if child["active"] and alias in target:
+                    if child["active"] and alias in target and alias not in extras:
                         pending.append((target, alias, getattr(value, name), child))
         elif kind == "model":
             pending.append((parent, key, getattr(value, "root") if node["root"] else value, children[0]))
@@ -402,8 +420,6 @@ def _json_value(value: Any) -> Any:
 
 
 def _json_container(value: Any) -> Any:
-    from pydantic_core import to_jsonable_python
-
     root: list[Any] = []
     active: set[int] = set()
     stack: list[tuple[Iterator[tuple[Any, Any]], Any, int | None]] = [(iter(((0, value),)), root, None)]
@@ -426,9 +442,17 @@ def _json_container(value: Any) -> Any:
         else:
             converted = _json_value(item)
         if isinstance(parent, dict):
-            # Keys retain pydantic's JSON spelling, including bytes and enums.
-            json_key = next(iter(to_jsonable_python({key: None})))
-            parent[json_key] = converted
+            # Native keys keep json.dumps spelling; other supported keys use
+            # pydantic's conversion without changing bytes values.
+            if isinstance(key, Enum):
+                key = key.value
+            if isinstance(key, float) and not math.isfinite(key):
+                key = "NaN" if key != key else ("Infinity" if key > 0 else "-Infinity")
+            if isinstance(key, (bytes, bytearray)):
+                from pydantic_core import to_jsonable_python
+
+                key = to_jsonable_python(key)
+            parent[key] = converted
         else:
             parent.append(converted)
     return root[0]
@@ -472,8 +496,9 @@ def encode_for(
     A value the codec refuses under its limits is answered in JSON, never an error
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
     In JSON fallback, plain dicts, lists and tuples write bytes as standard padded
-    base64. Pydantic models write base64 at declared bytes positions and follow
-    JSON mode elsewhere, including Any and extras. Dict keys keep their JSON spelling.
+    base64. Pydantic models write base64 at unambiguous declared bytes positions
+    outside custom serializers, and follow JSON mode elsewhere, including Any
+    and extras. Dict keys keep their JSON spelling.
     Serialization failures raise EncodeError with code ``json``.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:

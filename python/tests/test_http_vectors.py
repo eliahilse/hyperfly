@@ -82,6 +82,40 @@ def declared_type(ir):
     return {"bytes": bytes, "bool": bool, "int": int, "float64": float, "string": str}[kind]
 
 
+def model_input(value, ir):
+    """Normalize JSON integral numbers before pydantic validates int literals."""
+    kind = ir["kind"]
+    if kind == "nullable":
+        return None if value is None else model_input(value, ir["inner"])
+    if kind == "int" or (kind == "literal" and type(ir["value"]) in (int, float)):
+        return int(value) if type(value) is float and value.is_integer() else value
+    if kind == "array":
+        return [model_input(item, ir["element"]) for item in value]
+    if kind == "struct":
+        fields = {field["name"]: field["type"] for field in ir["fields"]}
+        return {key: model_input(item, fields[key]) if key in fields and item is not None else item
+                for key, item in value.items()}
+    return value
+
+
+def test_model_input_normalizes_only_declared_integral_positions():
+    ir = {"kind": "struct", "fields": [
+        {"name": "integers", "type": {"kind": "array", "element": {"kind": "int"}}},
+        {"name": "literal", "type": {"kind": "nullable", "inner": {"kind": "literal", "value": 1}}},
+        {"name": "number", "type": {"kind": "float64"}},
+    ]}
+    original = {"integers": [1.0, 1.5, True], "literal": 1.0, "number": 1.0, "extra": 1.0}
+    actual = model_input(original, ir)
+    assert actual == original
+    assert type(actual["integers"][0]) is int
+    assert type(actual["integers"][1]) is float
+    assert type(actual["integers"][2]) is bool
+    assert type(actual["literal"]) is int
+    assert type(actual["number"]) is type(actual["extra"]) is float
+    assert type(original["integers"][0]) is type(original["literal"]) is float
+    assert model_input({"literal": None}, ir) == {"literal": None}
+
+
 def decode_json(direction, body, registry):
     if direction == "response":
         return decode_response("application/json", body, registry)
@@ -96,7 +130,7 @@ def test_json_fallback_valid(row, direction):
     if direction == "encode":
         # A struct's IR bytes positions are represented by declared model fields.
         if row["ir"]["kind"] == "struct":
-            value = declared_type(row["ir"]).model_validate(value)
+            value = declared_type(row["ir"]).model_validate(model_input(value, row["ir"]))
         body, headers = encode_for(negotiate(None, registry), value)
         assert headers["Content-Type"] == "application/json"
         assert same_value(json.loads(body), json.loads(row["json"]), row["ir"])
