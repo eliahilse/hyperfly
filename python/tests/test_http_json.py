@@ -5,7 +5,7 @@ import tracemalloc
 import pytest
 from conftest import calls
 
-from hyperfly import CodecRegistry, DecodeError, compile_ir
+from hyperfly import CodecRegistry, DecodeError, HyperflyError, compile_ir
 from hyperfly.http import RequestError, decode_request, decode_response, read_body
 
 
@@ -130,20 +130,19 @@ def test_json_struct_field_flags_and_unknown_keys(direction):
         assert f"{path}: {reason}" in str(error)
 
 
-def test_json_conversion_supports_512_levels():
+def test_json_conversion_supports_the_deepest_ir():
+    # the artifact is depth 1 and the IR depth 2, so 510 arrays nest the artifact 512 deep
     ir = {"kind": "int"}
-    for _ in range(512):
+    for _ in range(510):
         ir = {"kind": "array", "element": ir}
-    recursion_limit = sys.getrecursionlimit()
-    try:
-        sys.setrecursionlimit(max(recursion_limit, 3000))
-        registry = CodecRegistry([compile_ir(ir)])
-    finally:
-        sys.setrecursionlimit(recursion_limit)
+    with pytest.raises(HyperflyError) as raised:
+        compile_ir({"kind": "array", "element": ir})
+    assert (raised.value.code, str(raised.value)) == ("ir", "artifact nests deeper than 512")
+    registry = CodecRegistry([compile_ir(ir)])
     for direction in ("response", "request"):
-        kind, value = decode(direction, b"[" * 512 + b"3e0" + b"]" * 512, registry)
+        kind, value = decode(direction, b"[" * 510 + b"3e0" + b"]" * 510, registry)
         assert kind == "json"
-        for _ in range(512):
+        for _ in range(510):
             assert isinstance(value, list) and len(value) == 1
             value = value[0]
         assert type(value) is int and value == 3
