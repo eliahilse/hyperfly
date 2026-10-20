@@ -83,6 +83,13 @@ pub struct Error {
 }
 
 impl Error {
+    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Error {
+        Error {
+            code,
+            message: message.into(),
+        }
+    }
+
     /// Returns the machine-readable failure category.
     ///
     /// ```
@@ -115,10 +122,7 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
-    Err(Error {
-        code,
-        message: message.into(),
-    })
+    Err(Error::new(code, message))
 }
 
 /// The smallest wire integer, `-(2^53 - 1)`.

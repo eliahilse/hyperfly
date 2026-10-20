@@ -225,14 +225,15 @@ fn columnar_leaves(element: &Node) -> Option<Vec<LeafCol<'_>>> {
 }
 
 fn enum_width(member_count: usize) -> Result<u8> {
-    let max_index = member_count.checked_sub(1).ok_or_else(|| Error {
-        code: ErrorCode::Ir,
-        message: "enum needs at least one member".into(),
-    })?;
+    let max_index = member_count
+        .checked_sub(1)
+        .ok_or_else(|| Error::new(ErrorCode::Ir, "enum needs at least one member"))?;
     let width = usize::BITS - max_index.leading_zeros();
-    let width = u8::try_from(width).map_err(|_| Error {
-        code: ErrorCode::Ir,
-        message: "enum bit width does not fit the host width type".into(),
+    let width = u8::try_from(width).map_err(|_| {
+        Error::new(
+            ErrorCode::Ir,
+            "enum bit width does not fit the host width type",
+        )
     })?;
     if width > MAX_WIDTH {
         return err(
@@ -273,10 +274,8 @@ fn type_accepts_null(node: &Node) -> bool {
 
 fn int_form(min: Option<i64>, value: i64) -> Result<u64> {
     match min {
-        Some(lo) => u64::try_from(value as i128 - lo as i128).map_err(|_| Error {
-            code: ErrorCode::Range,
-            message: "integer offset is negative".into(),
-        }),
+        Some(lo) => u64::try_from(value as i128 - lo as i128)
+            .map_err(|_| Error::new(ErrorCode::Range, "integer offset is negative")),
         None => Ok(zigzag(value)),
     }
 }
@@ -328,9 +327,11 @@ fn decoded_int(min: Option<i64>, max: Option<i64>, value: i128, path: &str) -> R
             return err(ErrorCode::Range, format!("{path}: above declared max"));
         }
     }
-    i64::try_from(value).map_err(|_| Error {
-        code: ErrorCode::Range,
-        message: format!("{path}: decoded integer outside the host integer domain"),
+    i64::try_from(value).map_err(|_| {
+        Error::new(
+            ErrorCode::Range,
+            format!("{path}: decoded integer outside the host integer domain"),
+        )
     })
 }
 
@@ -525,13 +526,10 @@ impl Codec {
                         let code = u64::try_from(index)
                             .ok()
                             .and_then(|value| value.checked_add(1))
-                            .ok_or_else(|| Error {
-                                code: ErrorCode::Ir,
-                                message: format!(
+                            .ok_or_else(|| Error::new(ErrorCode::Ir, format!(
                                     "profile: leaf {} dictionary index exceeds the wire code domain",
                                     column.leaf
-                                ),
-                            })?;
+                                )))?;
                         lookup.insert(entry.clone(), code);
                     }
                     codes.insert(column.leaf, lookup);
@@ -710,9 +708,11 @@ impl Codec {
             }
             Node::Str => match value {
                 Value::Str(s) => {
-                    let len = u64::try_from(s.len()).map_err(|_| Error {
-                        code: ErrorCode::Limit,
-                        message: format!("{path}: string length exceeds the wire size domain"),
+                    let len = u64::try_from(s.len()).map_err(|_| {
+                        Error::new(
+                            ErrorCode::Limit,
+                            format!("{path}: string length exceeds the wire size domain"),
+                        )
                     })?;
                     if len > self.limits.max_byte_length {
                         return err(
@@ -729,9 +729,11 @@ impl Codec {
             },
             Node::Bytes => match value {
                 Value::Bytes(b) => {
-                    let len = u64::try_from(b.len()).map_err(|_| Error {
-                        code: ErrorCode::Limit,
-                        message: format!("{path}: bytes length exceeds the wire size domain"),
+                    let len = u64::try_from(b.len()).map_err(|_| {
+                        Error::new(
+                            ErrorCode::Limit,
+                            format!("{path}: bytes length exceeds the wire size domain"),
+                        )
                     })?;
                     if len > self.limits.max_byte_length {
                         return err(
@@ -770,11 +772,11 @@ impl Codec {
                         budget.charge_bytes(s.len() as u64, path)?;
                         write_uleb(
                             out,
-                            u64::try_from(i).map_err(|_| Error {
-                                code: ErrorCode::Range,
-                                message: format!(
-                                    "{path}: enum index exceeds the wire integer domain"
-                                ),
+                            u64::try_from(i).map_err(|_| {
+                                Error::new(
+                                    ErrorCode::Range,
+                                    format!("{path}: enum index exceeds the wire integer domain"),
+                                )
                             })?,
                         )
                     }
@@ -813,9 +815,11 @@ impl Codec {
                 let Value::Array(items) = value else {
                     return err(ErrorCode::Type, format!("{path}: expected array"));
                 };
-                let item_count = u64::try_from(items.len()).map_err(|_| Error {
-                    code: ErrorCode::Limit,
-                    message: format!("{path}: array length does not fit the wire count domain"),
+                let item_count = u64::try_from(items.len()).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        format!("{path}: array length does not fit the wire count domain"),
+                    )
                 })?;
                 if item_count > self.limits.max_items {
                     return err(
@@ -847,17 +851,21 @@ impl Codec {
                         budget,
                     )?;
                 }
-                let payload_bytes = out.len().checked_sub(payload_start).ok_or_else(|| Error {
-                    code: ErrorCode::Limit,
-                    message: format!("{path}: array payload size underflow"),
+                let payload_bytes = out.len().checked_sub(payload_start).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        format!("{path}: array payload size underflow"),
+                    )
                 })?;
                 if has_payload(element) {
                     let affordable = u128::try_from(payload_bytes)
                         .ok()
                         .and_then(|payload| payload.checked_mul(8))
-                        .ok_or_else(|| Error {
-                            code: ErrorCode::Limit,
-                            message: format!("{path}: row affordability arithmetic overflow"),
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Limit,
+                                format!("{path}: row affordability arithmetic overflow"),
+                            )
                         })?;
                     if u128::from(item_count) > affordable {
                         return err(
@@ -937,9 +945,11 @@ impl Codec {
         let Value::Array(rows) = value else {
             return err(ErrorCode::Type, format!("{path}: expected array"));
         };
-        let row_count = u64::try_from(rows.len()).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: array length does not fit the wire count domain"),
+        let row_count = u64::try_from(rows.len()).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: array length does not fit the wire count domain"),
+            )
         })?;
         if row_count > self.limits.max_items {
             return err(
@@ -1041,9 +1051,11 @@ impl Codec {
             let f = leaf.field;
             let dotted = leaf.segs.join(".");
             let field_path = format!("{path}[].{dotted}");
-            let input = inputs.get(leaf_index).ok_or_else(|| Error {
-                code: ErrorCode::Ir,
-                message: format!("{field_path}: missing compiled column input"),
+            let input = inputs.get(leaf_index).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Ir,
+                    format!("{field_path}: missing compiled column input"),
+                )
             })?;
             if f.optional {
                 write_bitmap(out, &input.present);
@@ -1052,9 +1064,11 @@ impl Codec {
                 write_bitmap(out, &input.is_null);
             }
 
-            let segment_depth = u32::try_from(leaf.segs.len()).map_err(|_| Error {
-                code: ErrorCode::Depth,
-                message: format!("{field_path}: field path exceeds the depth arithmetic domain"),
+            let segment_depth = u32::try_from(leaf.segs.len()).map_err(|_| {
+                Error::new(
+                    ErrorCode::Depth,
+                    format!("{field_path}: field path exceeds the depth arithmetic domain"),
+                )
             })?;
             if !rows.is_empty() && depth.saturating_add(segment_depth) > self.limits.max_depth {
                 return err(
@@ -1154,9 +1168,11 @@ impl Codec {
                 }
             }
         }
-        let payload_bytes = out.len().checked_sub(payload_start).ok_or_else(|| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: columnar payload size underflow"),
+        let payload_bytes = out.len().checked_sub(payload_start).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: columnar payload size underflow"),
+            )
         })?;
         self.check_amplification(rows.len(), payload_bytes, path)
     }
@@ -1209,9 +1225,11 @@ impl Codec {
                     );
                 }
                 r.charge_bytes(n, path)?;
-                let len = usize::try_from(n).map_err(|_| Error {
-                    code: ErrorCode::Limit,
-                    message: format!("{path}: string length exceeds the host size domain"),
+                let len = usize::try_from(n).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        format!("{path}: string length exceeds the host size domain"),
+                    )
                 })?;
                 let data = r.take(len)?;
                 match std::str::from_utf8(data) {
@@ -1228,9 +1246,11 @@ impl Codec {
                     );
                 }
                 r.charge_bytes(n, path)?;
-                let len = usize::try_from(n).map_err(|_| Error {
-                    code: ErrorCode::Limit,
-                    message: format!("{path}: bytes length exceeds the host size domain"),
+                let len = usize::try_from(n).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        format!("{path}: bytes length exceeds the host size domain"),
+                    )
                 })?;
                 Ok(Value::Bytes(r.take(len)?.to_vec()))
             }
@@ -1245,13 +1265,17 @@ impl Codec {
             }),
             Node::Enum(members) => {
                 let index = read_uleb(r)?;
-                let index = usize::try_from(index).map_err(|_| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}: enum index is outside the host size domain"),
+                let index = usize::try_from(index).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}: enum index is outside the host size domain"),
+                    )
                 })?;
-                let member = members.get(index).ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}: enum index {index} out of range"),
+                let member = members.get(index).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}: enum index {index} out of range"),
+                    )
                 })?;
                 r.charge_bytes(member.len() as u64, path)?;
                 Ok(Value::Str(member.clone()))
@@ -1298,11 +1322,11 @@ impl Codec {
                     let base = field_column;
                     field_column += column_count(&f.ty);
                     let present = if f.optional {
-                        let value = *presence.get(pi).ok_or_else(|| Error {
-                            code: ErrorCode::Truncated,
-                            message: format!(
-                                "{path}: presence bitmap is shorter than the field table"
-                            ),
+                        let value = *presence.get(pi).ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Truncated,
+                                format!("{path}: presence bitmap is shorter than the field table"),
+                            )
                         })?;
                         pi += 1;
                         value
@@ -1310,9 +1334,11 @@ impl Codec {
                         true
                     };
                     let is_null = if f.nullable {
-                        let value = *nulls.get(ni).ok_or_else(|| Error {
-                            code: ErrorCode::Truncated,
-                            message: format!("{path}: null bitmap is shorter than the field table"),
+                        let value = *nulls.get(ni).ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Truncated,
+                                format!("{path}: null bitmap is shorter than the field table"),
+                            )
                         })?;
                         ni += 1;
                         value
@@ -1349,20 +1375,26 @@ impl Codec {
     }
 
     fn check_amplification(&self, count: usize, payload_bytes: usize, path: &str) -> Result<()> {
-        let payload = u128::try_from(payload_bytes).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: payload size exceeds the amplification arithmetic domain"),
+        let payload = u128::try_from(payload_bytes).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: payload size exceeds the amplification arithmetic domain"),
+            )
         })?;
         let ceiling = payload
             .checked_add(1)
             .and_then(|value| value.checked_mul(u128::from(self.limits.max_amplification)))
-            .ok_or_else(|| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: amplification limit arithmetic overflow"),
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: amplification limit arithmetic overflow"),
+                )
             })?;
-        let count = u128::try_from(count).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: item count exceeds the amplification arithmetic domain"),
+        let count = u128::try_from(count).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: item count exceeds the amplification arithmetic domain"),
+            )
         })?;
         if count > ceiling {
             return err(
@@ -1374,20 +1406,26 @@ impl Codec {
     }
 
     fn bound_amplification(&self, r: &Reader, count: usize, path: &str) -> Result<()> {
-        let remaining = u128::try_from(r.remaining()).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: remaining input exceeds the amplification arithmetic domain"),
+        let remaining = u128::try_from(r.remaining()).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: remaining input exceeds the amplification arithmetic domain"),
+            )
         })?;
         let ceiling = remaining
             .checked_add(1)
             .and_then(|value| value.checked_mul(u128::from(self.limits.max_amplification)))
-            .ok_or_else(|| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: amplification limit arithmetic overflow"),
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: amplification limit arithmetic overflow"),
+                )
             })?;
-        let count = u128::try_from(count).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: item count exceeds the amplification arithmetic domain"),
+        let count = u128::try_from(count).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: item count exceeds the amplification arithmetic domain"),
+            )
         })?;
         if count > ceiling {
             return err(
@@ -1414,13 +1452,17 @@ impl Codec {
         let affordable = u128::try_from(r.remaining())
             .ok()
             .and_then(|remaining| remaining.checked_mul(8))
-            .ok_or_else(|| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: row affordability arithmetic overflow"),
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: row affordability arithmetic overflow"),
+                )
             })?;
-        let count_exact = u128::try_from(count).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: row count exceeds the affordability arithmetic domain"),
+        let count_exact = u128::try_from(count).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: row count exceeds the affordability arithmetic domain"),
+            )
         })?;
         if count_exact > affordable {
             return err(
@@ -1445,9 +1487,11 @@ impl Codec {
                 format!("{path}: array count {n} exceeds limit"),
             );
         }
-        usize::try_from(n).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: array count {n} exceeds the host size domain"),
+        usize::try_from(n).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: array count {n} exceeds the host size domain"),
+            )
         })
     }
 
@@ -1523,18 +1567,20 @@ impl Codec {
             let mut null_rows = Vec::new();
             for i in 0..count {
                 let present = match &presence {
-                    Some(bits) => *bits.get(i).ok_or_else(|| Error {
-                        code: ErrorCode::Truncated,
-                        message: format!(
-                            "{field_path}: presence bitmap is shorter than the row count"
-                        ),
+                    Some(bits) => *bits.get(i).ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::Truncated,
+                            format!("{field_path}: presence bitmap is shorter than the row count"),
+                        )
                     })?,
                     None => true,
                 };
                 let is_null = match &nulls {
-                    Some(bits) => *bits.get(i).ok_or_else(|| Error {
-                        code: ErrorCode::Truncated,
-                        message: format!("{field_path}: null bitmap is shorter than the row count"),
+                    Some(bits) => *bits.get(i).ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::Truncated,
+                            format!("{field_path}: null bitmap is shorter than the row count"),
+                        )
                     })?,
                     None => false,
                 };
@@ -1554,9 +1600,11 @@ impl Codec {
                 slots.push(i);
             }
 
-            let segment_depth = u32::try_from(leaf.segs.len()).map_err(|_| Error {
-                code: ErrorCode::Depth,
-                message: format!("{field_path}: field path exceeds the depth arithmetic domain"),
+            let segment_depth = u32::try_from(leaf.segs.len()).map_err(|_| {
+                Error::new(
+                    ErrorCode::Depth,
+                    format!("{field_path}: field path exceeds the depth arithmetic domain"),
+                )
             })?;
             if count > 0 && depth.saturating_add(segment_depth) > self.limits.max_depth {
                 return err(
@@ -1605,11 +1653,13 @@ impl Codec {
                 Node::Literal(Literal::Str(s)) if !slots.is_empty() => {
                     let total = (s.len() as u64)
                         .checked_mul(slots.len() as u64)
-                        .ok_or_else(|| Error {
-                            code: ErrorCode::Limit,
-                            message: format!(
-                                "{field_path}: literal byte total overflows exact arithmetic"
-                            ),
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Limit,
+                                format!(
+                                    "{field_path}: literal byte total overflows exact arithmetic"
+                                ),
+                            )
                         })?;
                     r.charge_bytes(total, &field_path)?;
                     LeafValues::Repeated(Value::Str(s.clone()), slots.len())
@@ -1677,27 +1727,33 @@ impl Codec {
                     ensure_path(row, &leaf.segs[..leaf.segs.len() - 1])?;
                 }
             }
-            let mut entry = decoded.next().ok_or_else(|| Error {
-                code: ErrorCode::Truncated,
-                message: format!("{path}: decoded leaf table is incomplete"),
+            let mut entry = decoded.next().ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Truncated,
+                    format!("{path}: decoded leaf table is incomplete"),
+                )
             })?;
             for row_index in &entry.null_rows {
-                let row = rows.get_mut(*row_index).ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}: null row index exceeds the declared row count"),
+                let row = rows.get_mut(*row_index).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}: null row index exceeds the declared row count"),
+                    )
                 })?;
                 set_path(row, &leaf.segs, Value::Null)?;
             }
             for (participant, row_index) in entry.slots.iter().enumerate() {
-                let row = rows.get_mut(*row_index).ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!(
-                        "{path}: participant row index exceeds the declared row count"
-                    ),
+                let row = rows.get_mut(*row_index).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}: participant row index exceeds the declared row count"),
+                    )
                 })?;
-                let value = entry.values.take_value(participant).ok_or_else(|| Error {
-                    code: ErrorCode::Truncated,
-                    message: format!("{path}: decoded leaf value table is incomplete"),
+                let value = entry.values.take_value(participant).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Truncated,
+                        format!("{path}: decoded leaf value table is incomplete"),
+                    )
                 })?;
                 set_path(row, &leaf.segs, value)?;
             }
@@ -1752,9 +1808,11 @@ fn unpack_bits(r: &mut Reader, count: usize, width: u8, path: &str) -> Result<Ve
     if width == 0 {
         return Ok(vec![0; count]);
     }
-    let byte_count = packed_bytes(count, width).ok_or_else(|| Error {
-        code: ErrorCode::Limit,
-        message: format!("{path}: packed payload length overflows the host size domain"),
+    let byte_count = packed_bytes(count, width).ok_or_else(|| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}: packed payload length overflows the host size domain"),
+        )
     })?;
     let data = r.take(byte_count)?.to_vec();
     let mask: u128 = (1u128 << width) - 1;
@@ -1764,9 +1822,11 @@ fn unpack_bits(r: &mut Reader, count: usize, width: u8, path: &str) -> Result<Ve
     let mut index = 0usize;
     for _ in 0..count {
         while bits < width as u32 {
-            let byte = data.get(index).copied().ok_or_else(|| Error {
-                code: ErrorCode::Truncated,
-                message: format!("{path}: packed payload ended inside a value"),
+            let byte = data.get(index).copied().ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Truncated,
+                    format!("{path}: packed payload ended inside a value"),
+                )
             })?;
             index += 1;
             acc |= (byte as u128) << bits;
@@ -1806,9 +1866,11 @@ fn enc_enum_column(
             return err(ErrorCode::Type, format!("{path}[{i}]: not an enum member"));
         };
         budget.charge_bytes(member.len() as u64, &format!("{path}[{i}]"))?;
-        indices.push(u64::try_from(index).map_err(|_| Error {
-            code: ErrorCode::Range,
-            message: format!("{path}[{i}]: enum index exceeds the wire integer domain"),
+        indices.push(u64::try_from(index).map_err(|_| {
+            Error::new(
+                ErrorCode::Range,
+                format!("{path}[{i}]: enum index exceeds the wire integer domain"),
+            )
         })?);
     }
     pack_bits(out, &indices, width);
@@ -1825,9 +1887,11 @@ fn dec_enum_column(
     let indices = unpack_bits(r, count, width, path)?;
     let mut out = Vec::with_capacity(count);
     for (i, index) in indices.into_iter().enumerate() {
-        let index = usize::try_from(index).map_err(|_| Error {
-            code: ErrorCode::Range,
-            message: format!("{path}[{i}]: enum index is outside the host size domain"),
+        let index = usize::try_from(index).map_err(|_| {
+            Error::new(
+                ErrorCode::Range,
+                format!("{path}[{i}]: enum index is outside the host size domain"),
+            )
         })?;
         let Some(member) = members.get(index) else {
             return err(
@@ -1842,9 +1906,11 @@ fn dec_enum_column(
 }
 
 fn zigzag_i128(value: i128) -> Result<u64> {
-    let narrowed = i64::try_from(value).map_err(|_| Error {
-        code: ErrorCode::Range,
-        message: "integer delta exceeds the signed wire arithmetic domain".into(),
+    let narrowed = i64::try_from(value).map_err(|_| {
+        Error::new(
+            ErrorCode::Range,
+            "integer delta exceeds the signed wire arithmetic domain",
+        )
     })?;
     Ok(zigzag(narrowed))
 }
@@ -1859,17 +1925,14 @@ struct PforCandidate {
 }
 
 fn add_cost(total: usize, part: usize) -> Result<usize> {
-    total.checked_add(part).ok_or_else(|| Error {
-        code: ErrorCode::Limit,
-        message: "column encoded-size arithmetic overflow".into(),
-    })
+    total
+        .checked_add(part)
+        .ok_or_else(|| Error::new(ErrorCode::Limit, "column encoded-size arithmetic overflow"))
 }
 
 fn packed_cost(count: usize, width: u8) -> Result<usize> {
-    packed_bytes(count, width).ok_or_else(|| Error {
-        code: ErrorCode::Limit,
-        message: "column packed-size arithmetic overflow".into(),
-    })
+    packed_bytes(count, width)
+        .ok_or_else(|| Error::new(ErrorCode::Limit, "column packed-size arithmetic overflow"))
 }
 
 fn enc_int_column(out: &mut Vec<u8>, min: Option<i64>, values: &[i64]) -> Result<()> {
@@ -1895,17 +1958,16 @@ fn enc_int_column(out: &mut Vec<u8>, min: Option<i64>, values: &[i64]) -> Result
         delta_cost = add_cost(delta_cost, uleb_len(zigzag_i128(*diff)?))?;
     }
 
-    let for_base = values.iter().copied().min().ok_or_else(|| Error {
-        code: ErrorCode::Ir,
-        message: "non-empty integer column has no minimum".into(),
-    })?;
+    let for_base = values
+        .iter()
+        .copied()
+        .min()
+        .ok_or_else(|| Error::new(ErrorCode::Ir, "non-empty integer column has no minimum"))?;
     let offsets: Vec<u64> = values
         .iter()
         .map(|value| {
-            u64::try_from(*value as i128 - for_base as i128).map_err(|_| Error {
-                code: ErrorCode::Range,
-                message: "frame-of-reference offset is negative".into(),
-            })
+            u64::try_from(*value as i128 - for_base as i128)
+                .map_err(|_| Error::new(ErrorCode::Range, "frame-of-reference offset is negative"))
         })
         .collect::<Result<Vec<_>>>()?;
     let for_span = offsets.iter().copied().max().unwrap_or(0);
@@ -1928,10 +1990,8 @@ fn enc_int_column(out: &mut Vec<u8>, min: Option<i64>, values: &[i64]) -> Result
         delta_offsets = diffs
             .iter()
             .map(|diff| {
-                u64::try_from(*diff - delta_base).map_err(|_| Error {
-                    code: ErrorCode::Range,
-                    message: "delta frame offset is negative".into(),
-                })
+                u64::try_from(*diff - delta_base)
+                    .map_err(|_| Error::new(ErrorCode::Range, "delta frame offset is negative"))
             })
             .collect::<Result<Vec<_>>>()?;
         delta_width = bit_width(delta_offsets.iter().copied().max().unwrap_or(0));
@@ -2017,9 +2077,8 @@ fn enc_int_column(out: &mut Vec<u8>, min: Option<i64>, values: &[i64]) -> Result
             pack_bits(out, &delta_offsets, delta_width);
         }
         _ => {
-            let candidate = pfor.ok_or_else(|| Error {
-                code: ErrorCode::Ir,
-                message: "patched frame selected without a candidate".into(),
+            let candidate = pfor.ok_or_else(|| {
+                Error::new(ErrorCode::Ir, "patched frame selected without a candidate")
             })?;
             out.push(0x04);
             write_uleb(out, zigzag(for_base))?;
@@ -2034,9 +2093,11 @@ fn enc_int_column(out: &mut Vec<u8>, min: Option<i64>, values: &[i64]) -> Result
 }
 
 fn checked_add_i128(left: i128, right: i128, path: &str) -> Result<i128> {
-    left.checked_add(right).ok_or_else(|| Error {
-        code: ErrorCode::Range,
-        message: format!("{path}: integer reconstruction overflow"),
+    left.checked_add(right).ok_or_else(|| {
+        Error::new(
+            ErrorCode::Range,
+            format!("{path}: integer reconstruction overflow"),
+        )
     })
 }
 
@@ -2113,9 +2174,11 @@ fn dec_int_column_with<T>(
         let mut running = first;
         out.push(decode(running, &format!("{path}[0]"))?);
         for (offset_index, offset) in packed.into_iter().enumerate() {
-            let i = offset_index.checked_add(1).ok_or_else(|| Error {
-                code: ErrorCode::Range,
-                message: format!("{path}: delta-frame row index overflow"),
+            let i = offset_index.checked_add(1).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Range,
+                    format!("{path}: delta-frame row index overflow"),
+                )
             })?;
             let delta = checked_add_i128(base, offset as i128, &format!("{path}[{i}]"))?;
             running = checked_add_i128(running, delta, &format!("{path}[{i}]"))?;
@@ -2146,9 +2209,11 @@ fn dec_int_column_with<T>(
         let mut high_index = 0usize;
         for (i, (exception, low)) in exceptions.iter().zip(&lows).enumerate() {
             let high = if *exception {
-                let value = *highs.get(high_index).ok_or_else(|| Error {
-                    code: ErrorCode::Truncated,
-                    message: format!("{path}[{i}]: missing patched-frame high part"),
+                let value = *highs.get(high_index).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Truncated,
+                        format!("{path}[{i}]: missing patched-frame high part"),
+                    )
                 })?;
                 high_index += 1;
                 if value == 0 {
@@ -2163,9 +2228,11 @@ fn dec_int_column_with<T>(
             };
             let shifted = (high as i128)
                 .checked_shl(u32::from(low_width))
-                .ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}[{i}]: patched-frame shift overflow"),
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}[{i}]: patched-frame shift overflow"),
+                    )
                 })?;
             let offset = checked_add_i128(*low as i128, shifted, &format!("{path}[{i}]"))?;
             let value = checked_add_i128(base, offset, &format!("{path}[{i}]"))?;
@@ -2248,9 +2315,11 @@ fn enc_float_column(out: &mut Vec<u8>, values: &[f64]) -> Result<()> {
         }
     } else if best == sd_cost {
         out.push(2);
-        out.push(scale.ok_or_else(|| Error {
-            code: ErrorCode::Ir,
-            message: "scaled-delta float mode selected without a scale".into(),
+        out.push(scale.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Ir,
+                "scaled-delta float mode selected without a scale",
+            )
         })?);
         write_uleb(out, zigzag(mantissas[0]))?;
         for w in mantissas.windows(2) {
@@ -2258,9 +2327,11 @@ fn enc_float_column(out: &mut Vec<u8>, values: &[f64]) -> Result<()> {
         }
     } else {
         out.push(3);
-        out.push(scale.ok_or_else(|| Error {
-            code: ErrorCode::Ir,
-            message: "scaled-raw float mode selected without a scale".into(),
+        out.push(scale.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Ir,
+                "scaled-raw float mode selected without a scale",
+            )
         })?);
         for m in &mantissas {
             write_uleb(out, zigzag(*m))?;
@@ -2364,14 +2435,18 @@ fn dec_float_column(r: &mut Reader, count: usize, path: &str) -> Result<Vec<f64>
 fn grammar_limit(base: u32, len: u32) -> Result<u64> {
     let mut limit = 1u128;
     for _ in 0..len {
-        limit = limit.checked_mul(u128::from(base)).ok_or_else(|| Error {
-            code: ErrorCode::Ir,
-            message: "profile grammar lane limit overflows exact arithmetic".into(),
+        limit = limit.checked_mul(u128::from(base)).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Ir,
+                "profile grammar lane limit overflows exact arithmetic",
+            )
         })?;
     }
-    u64::try_from(limit).map_err(|_| Error {
-        code: ErrorCode::Ir,
-        message: "profile grammar lane limit exceeds the wire integer domain".into(),
+    u64::try_from(limit).map_err(|_| {
+        Error::new(
+            ErrorCode::Ir,
+            "profile grammar lane limit exceeds the wire integer domain",
+        )
     })
 }
 
@@ -2395,9 +2470,11 @@ fn match_grammar(value: &str, grammar: &[GrammarToken]) -> Result<Option<Vec<u64
     for token in grammar {
         match token {
             GrammarToken::Lit(literal) => {
-                let end = offset.checked_add(literal.len()).ok_or_else(|| Error {
-                    code: ErrorCode::Limit,
-                    message: "grammar literal offset overflows the host size domain".into(),
+                let end = offset.checked_add(literal.len()).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        "grammar literal offset overflows the host size domain",
+                    )
                 })?;
                 if bytes.get(offset..end) != Some(literal.as_bytes()) {
                     return Ok(None);
@@ -2405,13 +2482,17 @@ fn match_grammar(value: &str, grammar: &[GrammarToken]) -> Result<Option<Vec<u64
                 offset = end;
             }
             GrammarToken::Num(num) => {
-                let len = usize::try_from(num.len).map_err(|_| Error {
-                    code: ErrorCode::Ir,
-                    message: "grammar token length exceeds the host size domain".into(),
+                let len = usize::try_from(num.len).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Ir,
+                        "grammar token length exceeds the host size domain",
+                    )
                 })?;
-                let end = offset.checked_add(len).ok_or_else(|| Error {
-                    code: ErrorCode::Limit,
-                    message: "grammar numeric offset overflows the host size domain".into(),
+                let end = offset.checked_add(len).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        "grammar numeric offset overflows the host size domain",
+                    )
                 })?;
                 let Some(digits) = bytes.get(offset..end) else {
                     return Ok(None);
@@ -2424,14 +2505,18 @@ fn match_grammar(value: &str, grammar: &[GrammarToken]) -> Result<Option<Vec<u64
                     lane = lane
                         .checked_mul(u128::from(num.base))
                         .and_then(|value| value.checked_add(u128::from(digit)))
-                        .ok_or_else(|| Error {
-                            code: ErrorCode::Ir,
-                            message: "grammar lane parse overflows exact arithmetic".into(),
+                        .ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Ir,
+                                "grammar lane parse overflows exact arithmetic",
+                            )
                         })?;
                 }
-                lanes.push(u64::try_from(lane).map_err(|_| Error {
-                    code: ErrorCode::Ir,
-                    message: "grammar lane exceeds the wire integer domain".into(),
+                lanes.push(u64::try_from(lane).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Ir,
+                        "grammar lane exceeds the wire integer domain",
+                    )
                 })?);
                 offset = end;
             }
@@ -2449,14 +2534,18 @@ fn render_grammar(out: &mut String, grammar: &[GrammarToken], lanes: &[u64]) -> 
         match token {
             GrammarToken::Lit(literal) => out.push_str(literal),
             GrammarToken::Num(num) => {
-                let mut value = *lanes.get(lane_index).ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: "grammar lane is missing during reconstruction".into(),
+                let mut value = *lanes.get(lane_index).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        "grammar lane is missing during reconstruction",
+                    )
                 })?;
                 lane_index += 1;
-                let len = usize::try_from(num.len).map_err(|_| Error {
-                    code: ErrorCode::Ir,
-                    message: "grammar token length exceeds the host size domain".into(),
+                let len = usize::try_from(num.len).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Ir,
+                        "grammar token length exceeds the host size domain",
+                    )
                 })?;
                 let alphabet = if num.case == GrammarCase::Lower {
                     LOWER
@@ -2464,19 +2553,21 @@ fn render_grammar(out: &mut String, grammar: &[GrammarToken], lanes: &[u64]) -> 
                     UPPER
                 };
                 let mut buffer = [0u8; 20];
-                let digits = buffer.get_mut(..len).ok_or_else(|| Error {
-                    code: ErrorCode::Ir,
-                    message: "grammar token length exceeds the render buffer".into(),
+                let digits = buffer.get_mut(..len).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Ir,
+                        "grammar token length exceeds the render buffer",
+                    )
                 })?;
                 for slot in digits.iter_mut().rev() {
-                    let digit =
-                        usize::try_from(value % u64::from(num.base)).map_err(|_| Error {
-                            code: ErrorCode::Range,
-                            message: "grammar digit exceeds the host size domain".into(),
-                        })?;
-                    *slot = *alphabet.get(digit).ok_or_else(|| Error {
-                        code: ErrorCode::Range,
-                        message: "grammar digit exceeds its alphabet".into(),
+                    let digit = usize::try_from(value % u64::from(num.base)).map_err(|_| {
+                        Error::new(
+                            ErrorCode::Range,
+                            "grammar digit exceeds the host size domain",
+                        )
+                    })?;
+                    *slot = *alphabet.get(digit).ok_or_else(|| {
+                        Error::new(ErrorCode::Range, "grammar digit exceeds its alphabet")
                     })?;
                     value /= u64::from(num.base);
                 }
@@ -2505,9 +2596,11 @@ fn escaped_payload(values: &[&str], escaped: &[bool]) -> Result<Vec<u8>> {
         if !is_escaped {
             continue;
         }
-        let len = u64::try_from(value.len()).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: "string length exceeds the wire size domain".into(),
+        let len = u64::try_from(value.len()).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                "string length exceeds the wire size domain",
+            )
         })?;
         write_uleb(&mut payload, len)?;
         payload.extend_from_slice(value.as_bytes());
@@ -2519,9 +2612,11 @@ fn write_escape_header(payload: &mut Vec<u8>, escaped: &[bool]) -> Result<()> {
     let count = escaped.iter().filter(|value| **value).count();
     write_uleb(
         payload,
-        u64::try_from(count).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: "escape count exceeds the wire size domain".into(),
+        u64::try_from(count).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                "escape count exceeds the wire size domain",
+            )
         })?,
     )?;
     if count > 0 && count < escaped.len() {
@@ -2551,9 +2646,11 @@ fn enc_string_column(
         return Ok(());
     }
     for (i, value) in values.iter().enumerate() {
-        let len = u64::try_from(value.len()).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}[{i}]: string length exceeds the wire size domain"),
+        let len = u64::try_from(value.len()).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}[{i}]: string length exceeds the wire size domain"),
+            )
         })?;
         if len > limits.max_byte_length {
             return err(
@@ -2582,19 +2679,25 @@ fn enc_string_column(
 
     if pack {
         let total = values.iter().try_fold(0u64, |sum, value| {
-            let len = u64::try_from(value.len()).map_err(|_| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: packed string total exceeds the wire size domain"),
+            let len = u64::try_from(value.len()).map_err(|_| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: packed string total exceeds the wire size domain"),
+                )
             })?;
-            sum.checked_add(len).ok_or_else(|| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: packed string total overflows exact arithmetic"),
+            sum.checked_add(len).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: packed string total overflows exact arithmetic"),
+                )
             })
         })?;
         if total <= limits.max_byte_length {
-            let total_usize = usize::try_from(total).map_err(|_| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: packed string total exceeds the host size domain"),
+            let total_usize = usize::try_from(total).map_err(|_| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: packed string total exceeds the host size domain"),
+                )
             })?;
             let mut concat = Vec::with_capacity(total_usize);
             for value in values {
@@ -2605,17 +2708,21 @@ fn enc_string_column(
             for value in values {
                 write_uleb(
                     &mut payload,
-                    u64::try_from(value.len()).map_err(|_| Error {
-                        code: ErrorCode::Limit,
-                        message: format!("{path}: string length exceeds the wire size domain"),
+                    u64::try_from(value.len()).map_err(|_| {
+                        Error::new(
+                            ErrorCode::Limit,
+                            format!("{path}: string length exceeds the wire size domain"),
+                        )
                     })?,
                 )?;
             }
             write_uleb(
                 &mut payload,
-                u64::try_from(packed.len()).map_err(|_| Error {
-                    code: ErrorCode::Limit,
-                    message: format!("{path}: packed blob exceeds the wire size domain"),
+                u64::try_from(packed.len()).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        format!("{path}: packed blob exceeds the wire size domain"),
+                    )
                 })?,
             )?;
             payload.extend_from_slice(&packed);
@@ -2636,9 +2743,11 @@ fn enc_string_column(
         let mut lanes: Vec<Vec<i64>> = (0..numeric_count).map(|_| Vec::new()).collect();
         for row in parsed.iter().flatten() {
             for (lane, value) in row.iter().enumerate() {
-                let narrowed = i64::try_from(*value).map_err(|_| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}: grammar lane exceeds the v0 integer domain"),
+                let narrowed = i64::try_from(*value).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}: grammar lane exceeds the v0 integer domain"),
+                    )
                 })?;
                 if let Some(values) = lanes.get_mut(lane) {
                     values.push(narrowed);
@@ -2680,10 +2789,7 @@ fn enc_string_column(
     let (mode, payload) = candidates
         .into_iter()
         .min_by_key(|(mode, payload)| (payload.len(), *mode))
-        .ok_or_else(|| Error {
-            code: ErrorCode::Ir,
-            message: "string column has no encoding candidate".into(),
-        })?;
+        .ok_or_else(|| Error::new(ErrorCode::Ir, "string column has no encoding candidate"))?;
     out.push(mode);
     out.extend_from_slice(&payload);
     Ok(())
@@ -2718,10 +2824,8 @@ fn inflate_exact(blob: &[u8], expected: usize) -> std::result::Result<Vec<u8>, (
 }
 
 fn decode_utf8<'a>(data: &'a [u8], path: &str, index: usize) -> Result<&'a str> {
-    std::str::from_utf8(data).map_err(|_| Error {
-        code: ErrorCode::Utf8,
-        message: format!("{path}[{index}]: invalid UTF-8"),
-    })
+    std::str::from_utf8(data)
+        .map_err(|_| Error::new(ErrorCode::Utf8, format!("{path}[{index}]: invalid UTF-8")))
 }
 
 fn read_string_literal<'a>(
@@ -2738,9 +2842,11 @@ fn read_string_literal<'a>(
         );
     }
     r.charge_bytes(len, &format!("{path}[{index}]"))?;
-    let len = usize::try_from(len).map_err(|_| Error {
-        code: ErrorCode::Limit,
-        message: format!("{path}[{index}]: string length exceeds the host size domain"),
+    let len = usize::try_from(len).map_err(|_| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}[{index}]: string length exceeds the host size domain"),
+        )
     })?;
     decode_utf8(r.take(len)?, path, index)
 }
@@ -2752,11 +2858,11 @@ fn check_reconstructed_len(
     path: &str,
     index: usize,
 ) -> Result<()> {
-    let len = u64::try_from(len).map_err(|_| Error {
-        code: ErrorCode::Limit,
-        message: format!(
-            "{path}[{index}]: reconstructed string length exceeds the wire size domain"
-        ),
+    let len = u64::try_from(len).map_err(|_| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}[{index}]: reconstructed string length exceeds the wire size domain"),
+        )
     })?;
     if len > limits.max_byte_length {
         return err(
@@ -2769,9 +2875,11 @@ fn check_reconstructed_len(
 
 fn read_escapes(r: &mut Reader, count: usize, path: &str) -> Result<(Vec<bool>, usize)> {
     let raw = read_uleb(r)?;
-    let count_u64 = u64::try_from(count).map_err(|_| Error {
-        code: ErrorCode::Limit,
-        message: format!("{path}: participating row count exceeds the wire size domain"),
+    let count_u64 = u64::try_from(count).map_err(|_| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}: participating row count exceeds the wire size domain"),
+        )
     })?;
     if raw > count_u64 {
         return err(
@@ -2779,9 +2887,11 @@ fn read_escapes(r: &mut Reader, count: usize, path: &str) -> Result<(Vec<bool>, 
             format!("{path}: escape count {raw} exceeds participating row count {count}"),
         );
     }
-    let escape_count = usize::try_from(raw).map_err(|_| Error {
-        code: ErrorCode::Limit,
-        message: format!("{path}: escape count exceeds the host size domain"),
+    let escape_count = usize::try_from(raw).map_err(|_| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}: escape count exceeds the host size domain"),
+        )
     })?;
     if escape_count == 0 {
         return Ok((vec![false; count], 0));
@@ -2844,9 +2954,11 @@ fn dec_string_column(
     }
 
     if mode == 0x01 {
-        let entries = dict.ok_or_else(|| Error {
-            code: ErrorCode::Unsupported,
-            message: format!("{path}: dictionary column requires a profile for this leaf"),
+        let entries = dict.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Unsupported,
+                format!("{path}: dictionary column requires a profile for this leaf"),
+            )
         })?;
         let width = r.u8()?;
         if width > 14 {
@@ -2864,13 +2976,17 @@ fn dec_string_column(
             let index = code
                 .checked_sub(1)
                 .and_then(|value| usize::try_from(value).ok())
-                .ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}[{i}]: dictionary code {code} out of range"),
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}[{i}]: dictionary code {code} out of range"),
+                    )
                 })?;
-            let entry = entries.get(index).ok_or_else(|| Error {
-                code: ErrorCode::Range,
-                message: format!("{path}[{i}]: dictionary code {code} out of range"),
+            let entry = entries.get(index).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Range,
+                    format!("{path}[{i}]: dictionary code {code} out of range"),
+                )
             })?;
             check_reconstructed_len(r, entry.len(), limits, path, i)?;
             out.push(entry);
@@ -2879,14 +2995,18 @@ fn dec_string_column(
     }
 
     if mode == 0x03 {
-        let grammar = grammar.ok_or_else(|| Error {
-            code: ErrorCode::Unsupported,
-            message: format!("{path}: grammar column requires a profile for this leaf"),
+        let grammar = grammar.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Unsupported,
+                format!("{path}: grammar column requires a profile for this leaf"),
+            )
         })?;
         let (escaped, escape_count) = read_escapes(r, count, path)?;
-        let matched_count = count.checked_sub(escape_count).ok_or_else(|| Error {
-            code: ErrorCode::Range,
-            message: format!("{path}: escape count exceeds participating row count"),
+        let matched_count = count.checked_sub(escape_count).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Range,
+                format!("{path}: escape count exceeds participating row count"),
+            )
         })?;
         let mut lanes = Vec::new();
         for (lane_index, token) in grammar
@@ -2898,15 +3018,19 @@ fn dec_string_column(
             .enumerate()
         {
             let limit = grammar_limit(token.base, token.len)?;
-            let maximum = limit.checked_sub(1).ok_or_else(|| Error {
-                code: ErrorCode::Ir,
-                message: format!("{path}.lane[{lane_index}]: grammar bound is empty"),
+            let maximum = limit.checked_sub(1).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Ir,
+                    format!("{path}.lane[{lane_index}]: grammar bound is empty"),
+                )
             })?;
-            let maximum = i64::try_from(maximum).map_err(|_| Error {
-                code: ErrorCode::Ir,
-                message: format!(
-                    "{path}.lane[{lane_index}]: grammar bound exceeds the v0 integer domain"
-                ),
+            let maximum = i64::try_from(maximum).map_err(|_| {
+                Error::new(
+                    ErrorCode::Ir,
+                    format!(
+                        "{path}.lane[{lane_index}]: grammar bound exceeds the v0 integer domain"
+                    ),
+                )
             })?;
             lanes.push((
                 maximum,
@@ -2923,14 +3047,18 @@ fn dec_string_column(
         let rendered_len = grammar.iter().try_fold(0usize, |len, token| {
             let token_len = match token {
                 GrammarToken::Lit(literal) => literal.len(),
-                GrammarToken::Num(num) => usize::try_from(num.len).map_err(|_| Error {
-                    code: ErrorCode::Limit,
-                    message: format!("{path}: grammar token length exceeds the host size domain"),
+                GrammarToken::Num(num) => usize::try_from(num.len).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Limit,
+                        format!("{path}: grammar token length exceeds the host size domain"),
+                    )
                 })?,
             };
-            len.checked_add(token_len).ok_or_else(|| Error {
-                code: ErrorCode::Limit,
-                message: format!("{path}: rendered grammar length exceeds the host size domain"),
+            len.checked_add(token_len).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Limit,
+                    format!("{path}: rendered grammar length exceeds the host size domain"),
+                )
             })
         })?;
         let mut matched = 0usize;
@@ -2942,11 +3070,11 @@ fn dec_string_column(
             }
             values.clear();
             for (lane_index, (maximum, lane)) in lanes.iter_mut().enumerate() {
-                let value = lane.next().ok_or_else(|| Error {
-                    code: ErrorCode::Truncated,
-                    message: format!(
-                        "{path}[{i}]: grammar lane is shorter than the matched row count"
-                    ),
+                let value = lane.next().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Truncated,
+                        format!("{path}[{i}]: grammar lane is shorter than the matched row count"),
+                    )
                 })?;
                 let value = if (0..=i128::from((*maximum).min(INT_MAX))).contains(&value) {
                     value as i64
@@ -2958,9 +3086,11 @@ fn dec_string_column(
                         &format!("{path}.lane[{lane_index}][{matched}]"),
                     )?
                 };
-                values.push(u64::try_from(value).map_err(|_| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}[{i}]: grammar lane value is negative"),
+                values.push(u64::try_from(value).map_err(|_| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}[{i}]: grammar lane value is negative"),
+                    )
                 })?);
             }
             check_reconstructed_len(r, rendered_len, limits, path, i)?;
@@ -2971,9 +3101,11 @@ fn dec_string_column(
     }
 
     if mode == 0x04 {
-        let derivation = derivation.ok_or_else(|| Error {
-            code: ErrorCode::Unsupported,
-            message: format!("{path}: derived column requires a profile for this leaf"),
+        let derivation = derivation.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Unsupported,
+                format!("{path}: derived column requires a profile for this leaf"),
+            )
         })?;
         let (escaped, _) = read_escapes(r, count, path)?;
         let source_codes = all_codes.get(&derivation.source);
@@ -2982,36 +3114,46 @@ fn dec_string_column(
                 out.push(read_string_literal(r, limits, path, i)?);
                 continue;
             }
-            let row = *slots.get(i).ok_or_else(|| Error {
-                code: ErrorCode::Range,
-                message: format!("{path}[{i}]: missing array row for derived value"),
+            let row = *slots.get(i).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Range,
+                    format!("{path}[{i}]: missing array row for derived value"),
+                )
             })?;
             let source = decoded_source_value(decoded, ordinal_base, derivation.source, row)
-                .ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!(
-                        "{path}[{i}]: derived source does not participate in this array row"
-                    ),
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!(
+                            "{path}[{i}]: derived source does not participate in this array row"
+                        ),
+                    )
                 })?;
             let code = source_codes
                 .and_then(|codes| codes.get(source))
                 .copied()
-                .ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!("{path}[{i}]: derived source value is outside its dictionary"),
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!("{path}[{i}]: derived source value is outside its dictionary"),
+                    )
                 })?;
             let index = code
                 .checked_sub(1)
                 .and_then(|value| usize::try_from(value).ok())
-                .ok_or_else(|| Error {
-                    code: ErrorCode::Range,
-                    message: format!(
-                        "{path}[{i}]: derived dictionary code is outside the host size domain"
-                    ),
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Range,
+                        format!(
+                            "{path}[{i}]: derived dictionary code is outside the host size domain"
+                        ),
+                    )
                 })?;
-            let value = derivation.values.get(index).ok_or_else(|| Error {
-                code: ErrorCode::Range,
-                message: format!("{path}[{i}]: derived dictionary code is outside the mapping"),
+            let value = derivation.values.get(index).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Range,
+                    format!("{path}[{i}]: derived dictionary code is outside the mapping"),
+                )
             })?;
             check_reconstructed_len(r, value.len(), limits, path, i)?;
             out.push(value);
@@ -3029,9 +3171,11 @@ fn dec_string_column(
                 format!("{path}[{i}]: string length exceeds limit"),
             );
         }
-        total = total.checked_add(len).ok_or_else(|| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}: packed column total overflows exact arithmetic"),
+        total = total.checked_add(len).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}: packed column total overflows exact arithmetic"),
+            )
         })?;
         if total > limits.max_byte_length {
             return err(
@@ -3039,9 +3183,11 @@ fn dec_string_column(
                 format!("{path}: packed column total exceeds limit"),
             );
         }
-        lengths.push(usize::try_from(len).map_err(|_| Error {
-            code: ErrorCode::Limit,
-            message: format!("{path}[{i}]: string length exceeds the host size domain"),
+        lengths.push(usize::try_from(len).map_err(|_| {
+            Error::new(
+                ErrorCode::Limit,
+                format!("{path}[{i}]: string length exceeds the host size domain"),
+            )
         })?);
     }
     r.charge_bytes(total, path)?;
@@ -3058,37 +3204,45 @@ fn dec_string_column(
             format!("{path}: packed blob exceeds limit"),
         );
     }
-    let blob_len = usize::try_from(blob_len).map_err(|_| Error {
-        code: ErrorCode::Limit,
-        message: format!("{path}: packed blob exceeds the host size domain"),
+    let blob_len = usize::try_from(blob_len).map_err(|_| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}: packed blob exceeds the host size domain"),
+        )
     })?;
     let blob = r.take(blob_len)?;
-    let expected = usize::try_from(total).map_err(|_| Error {
-        code: ErrorCode::Limit,
-        message: format!("{path}: packed output exceeds the host size domain"),
+    let expected = usize::try_from(total).map_err(|_| {
+        Error::new(
+            ErrorCode::Limit,
+            format!("{path}: packed output exceeds the host size domain"),
+        )
     })?;
-    let inflated = inflate_exact(blob, expected).map_err(|_| Error {
-        code: ErrorCode::Packed,
-        message: format!("{path}: packed blob failed to inflate or has trailing bytes"),
+    let inflated = inflate_exact(blob, expected).map_err(|_| {
+        Error::new(
+            ErrorCode::Packed,
+            format!("{path}: packed blob failed to inflate or has trailing bytes"),
+        )
     })?;
     let mut offset = 0usize;
     for (i, len) in lengths.iter_mut().enumerate() {
-        let end = offset.checked_add(*len).ok_or_else(|| Error {
-            code: ErrorCode::Packed,
-            message: format!("{path}[{i}]: packed slice offset overflow"),
+        let end = offset.checked_add(*len).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Packed,
+                format!("{path}[{i}]: packed slice offset overflow"),
+            )
         })?;
-        let slice = inflated.get(offset..end).ok_or_else(|| Error {
-            code: ErrorCode::Packed,
-            message: format!("{path}[{i}]: packed slice exceeds inflated output"),
+        let slice = inflated.get(offset..end).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Packed,
+                format!("{path}[{i}]: packed slice exceeds inflated output"),
+            )
         })?;
         decode_utf8(slice, path, i)?;
         *len = end;
         offset = end;
     }
-    let text = String::from_utf8(inflated).map_err(|_| Error {
-        code: ErrorCode::Utf8,
-        message: format!("{path}[0]: invalid UTF-8"),
-    })?;
+    let text = String::from_utf8(inflated)
+        .map_err(|_| Error::new(ErrorCode::Utf8, format!("{path}[0]: invalid UTF-8")))?;
     Ok(StrColumn {
         text,
         ends: lengths,
