@@ -576,15 +576,15 @@ describe("request body limits", () => {
   const registry = new CodecRegistry([codecA as never]);
   const url = "https://example.test/v1/thing";
 
-  test.each([NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
-    "rejects invalid maxBytes %s synchronously without reading",
+  test.each([NaN, Infinity, -Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, "1024", true])(
+    "rejects invalid maxBytes %p synchronously without reading",
     (maxBytes) => {
       let pulled = false;
       const body = new ReadableStream<Uint8Array>({
         pull() { pulled = true; },
       }, { highWaterMark: 0 });
       const request = new Request(url, { method: "POST", body });
-      const run = () => readBody(request, registry, { maxBytes });
+      const run = () => readBody(request, registry, { maxBytes: maxBytes as never });
       expect(run).toThrow(HyperflyError);
       expect(run).toThrow(expect.objectContaining({ code: "options" }));
       expect(pulled).toBe(false);

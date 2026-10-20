@@ -253,7 +253,7 @@ export async function fetchArtifact<T = unknown>(
   options: FetchArtifactOptions = {},
 ): Promise<Codec<T> | undefined> {
   const fp = checkedFingerprint(fingerprint);
-  const maxBytes = bodyLimit(options.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
+  const maxBytes = bodyLimit(options.maxBytes);
   const response = await (options.fetch ?? globalThis.fetch)(new URL(WELL_KNOWN_PREFIX + fp, base), {
     method: "GET",
     headers: options.headers,
@@ -429,10 +429,11 @@ export function readBody<T>(
   registry: CodecRegistry,
   options: ReadBodyOptions = {},
 ): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
-  return readBodyWithinLimit<T>(request, registry, bodyLimit(options.maxBytes ?? DEFAULT_MAX_BODY_BYTES));
+  return readBodyWithinLimit<T>(request, registry, bodyLimit(options.maxBytes));
 }
 
-function bodyLimit(maxBytes: number): number {
+function bodyLimit(maxBytes: number | undefined): number {
+  if (maxBytes === undefined) return DEFAULT_MAX_BODY_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new HyperflyError("options", "maxBytes: must be a non-negative safe integer");
   }

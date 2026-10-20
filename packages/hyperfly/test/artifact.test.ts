@@ -209,10 +209,10 @@ describe("fetchArtifact", () => {
     expect(called).toBe(false);
   });
 
-  test.each([NaN, Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])("rejects maxBytes %s before fetching", async (maxBytes) => {
+  test.each([NaN, Infinity, -Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, "1024", true])("rejects maxBytes %p before fetching", async (maxBytes) => {
     let called = false;
     const fetch = (async () => { called = true; return new Response(); }) as unknown as typeof globalThis.fetch;
-    const run = fetchArtifact(base, codec.fingerprint, { fetch, maxBytes });
+    const run = fetchArtifact(base, codec.fingerprint, { fetch, maxBytes: maxBytes as never });
     await expect(run).rejects.toBeInstanceOf(HyperflyError);
     await expect(run).rejects.toThrow(expect.objectContaining({ code: "options" }));
     expect(called).toBe(false);
