@@ -637,3 +637,44 @@ fn profiled_vectors() {
         assert_eq!(code, v["error"].as_str().unwrap(), "{name}");
     }
 }
+
+#[test]
+fn columnar_bytes_and_literal_leaves_round_trip() {
+    let field = |name: &str, ty: Node, optional: bool| Field {
+        name: name.into(),
+        ty,
+        optional,
+        nullable: false,
+    };
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(vec![
+            field("l", Node::Literal(Literal::Str("x".into())), false),
+            field("y", Node::Bytes, true),
+            field(
+                "n",
+                Node::Int {
+                    min: None,
+                    max: None,
+                },
+                false,
+            ),
+        ])),
+        length: None,
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let rows: Vec<Value> = (0..5)
+        .map(|i| {
+            let mut row = vec![("l".to_owned(), Value::Str("x".into()))];
+            if i % 2 == 0 {
+                row.push(("y".to_owned(), Value::Bytes(vec![i as u8; i])));
+            }
+            row.push(("n".to_owned(), Value::Int(i as i64)));
+            Value::Object(row)
+        })
+        .collect();
+    let value = Value::Array(rows);
+    let body = codec.encode_body(&value).unwrap();
+    assert!(deep_eq(&codec.decode_body(&body).unwrap(), &value));
+    let truncated = codec.decode_body(&body[..body.len() - 1]).unwrap_err();
+    assert_eq!(truncated.code.as_str(), "truncated");
+}
