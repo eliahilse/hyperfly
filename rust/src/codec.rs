@@ -506,10 +506,13 @@ impl Codec {
     /// out-of-range integers, non-finite floats, or exceeded resource limits.
     pub fn encode_body(&self, value: &Value) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        let mut budget = ItemBudget::new(self.limits.max_total_items);
+        let mut budget = Budget::new(self.limits.max_total_items, self.limits.max_total_bytes);
         self.enc(&mut out, &self.ir, value, "$", 0, 0, &mut budget)?;
         if budget.total > self.limits.item_budget(out.len()) {
             return err(ErrorCode::Limit, "$: item budget exceeded");
+        }
+        if budget.total_bytes > self.limits.byte_budget(out.len()) {
+            return err(ErrorCode::Limit, "$: byte budget exceeded");
         }
         Ok(out)
     }
@@ -574,7 +577,7 @@ impl Codec {
         path: &str,
         depth: u32,
         column: usize,
-        budget: &mut ItemBudget,
+        budget: &mut Budget,
     ) -> Result<()> {
         if depth > self.limits.max_depth {
             return err(
@@ -611,6 +614,7 @@ impl Codec {
                             format!("{path}: string exceeds the codec limit"),
                         );
                     }
+                    budget.charge_bytes(len, path)?;
                     write_uleb(out, len)?;
                     out.extend_from_slice(s.as_bytes());
                     Ok(())
@@ -629,6 +633,7 @@ impl Codec {
                             format!("{path}: bytes exceed the codec limit"),
                         );
                     }
+                    budget.charge_bytes(len, path)?;
                     write_uleb(out, len)?;
                     out.extend_from_slice(b);
                     Ok(())
@@ -644,6 +649,9 @@ impl Codec {
                     _ => false,
                 };
                 if matches {
+                    if let Literal::Str(s) = lit {
+                        budget.charge_bytes(s.len() as u64, path)?;
+                    }
                     Ok(())
                 } else {
                     err(ErrorCode::Type, format!("{path}: literal mismatch"))
@@ -651,13 +659,18 @@ impl Codec {
             }
             Node::Enum(members) => match value {
                 Value::Str(s) => match members.iter().position(|m| m == s) {
-                    Some(i) => write_uleb(
-                        out,
-                        u64::try_from(i).map_err(|_| Error {
-                            code: ErrorCode::Range,
-                            message: format!("{path}: enum index exceeds the wire integer domain"),
-                        })?,
-                    ),
+                    Some(i) => {
+                        budget.charge_bytes(s.len() as u64, path)?;
+                        write_uleb(
+                            out,
+                            u64::try_from(i).map_err(|_| Error {
+                                code: ErrorCode::Range,
+                                message: format!(
+                                    "{path}: enum index exceeds the wire integer domain"
+                                ),
+                            })?,
+                        )
+                    }
                     None => err(ErrorCode::Type, format!("{path}: not an enum member")),
                 },
                 _ => err(
@@ -812,7 +825,7 @@ impl Codec {
         value: &Value,
         path: &str,
         depth: u32,
-        budget: &mut ItemBudget,
+        budget: &mut Budget,
     ) -> Result<()> {
         let Value::Array(rows) = value else {
             return err(ErrorCode::Type, format!("{path}: expected array"));
@@ -1008,6 +1021,7 @@ impl Codec {
                         ordinal_base,
                         &field_path,
                         &self.limits,
+                        budget,
                         self.pack,
                         self.codes_of(ordinal_base + leaf_index),
                         self.grammar_of(ordinal_base + leaf_index),
@@ -1016,7 +1030,7 @@ impl Codec {
                     )?;
                 }
                 Node::Enum(members) => {
-                    enc_enum_column(out, members, &input.participating, &field_path)?;
+                    enc_enum_column(out, members, &input.participating, &field_path, budget)?;
                 }
                 t => {
                     for (i, v) in input.participating.iter().enumerate() {
@@ -1087,6 +1101,7 @@ impl Codec {
                         format!("{path}: string length exceeds limit"),
                     );
                 }
+                r.charge_bytes(n, path)?;
                 let len = usize::try_from(n).map_err(|_| Error {
                     code: ErrorCode::Limit,
                     message: format!("{path}: string length exceeds the host size domain"),
@@ -1105,6 +1120,7 @@ impl Codec {
                         format!("{path}: bytes length exceeds limit"),
                     );
                 }
+                r.charge_bytes(n, path)?;
                 let len = usize::try_from(n).map_err(|_| Error {
                     code: ErrorCode::Limit,
                     message: format!("{path}: bytes length exceeds the host size domain"),
@@ -1115,7 +1131,10 @@ impl Codec {
                 Literal::Null => Value::Null,
                 Literal::Bool(b) => Value::Bool(*b),
                 Literal::Int(i) => Value::Int(*i),
-                Literal::Str(s) => Value::Str(s.clone()),
+                Literal::Str(s) => {
+                    r.charge_bytes(s.len() as u64, path)?;
+                    Value::Str(s.clone())
+                }
             }),
             Node::Enum(members) => {
                 let index = read_uleb(r)?;
@@ -1127,6 +1146,7 @@ impl Codec {
                     code: ErrorCode::Range,
                     message: format!("{path}: enum index {index} out of range"),
                 })?;
+                r.charge_bytes(member.len() as u64, path)?;
                 Ok(Value::Str(member.clone()))
             }
             Node::Nullable(inner) => match r.u8()? {
@@ -1475,6 +1495,18 @@ impl Codec {
                     dec_enum_column(r, members, slots.len(), &field_path)?,
                     members,
                 ),
+                Node::Literal(Literal::Str(s)) if !slots.is_empty() => {
+                    let total = (s.len() as u64)
+                        .checked_mul(slots.len() as u64)
+                        .ok_or_else(|| Error {
+                            code: ErrorCode::Limit,
+                            message: format!(
+                                "{field_path}: literal byte total overflows exact arithmetic"
+                            ),
+                        })?;
+                    r.charge_bytes(total, &field_path)?;
+                    LeafValues::Repeated(Value::Str(s.clone()), slots.len())
+                }
                 Node::Literal(_) => match slots.first() {
                     Some(row) => LeafValues::Repeated(
                         self.dec(
@@ -1652,6 +1684,7 @@ fn enc_enum_column(
     members: &[String],
     values: &[&Value],
     path: &str,
+    budget: &mut Budget,
 ) -> Result<()> {
     let width = enum_width(members.len())?;
     let mut indices = Vec::with_capacity(values.len());
@@ -1665,6 +1698,7 @@ fn enc_enum_column(
         let Some(index) = members.iter().position(|candidate| candidate == member) else {
             return err(ErrorCode::Type, format!("{path}[{i}]: not an enum member"));
         };
+        budget.charge_bytes(member.len() as u64, &format!("{path}[{i}]"))?;
         indices.push(u64::try_from(index).map_err(|_| Error {
             code: ErrorCode::Range,
             message: format!("{path}[{i}]: enum index exceeds the wire integer domain"),
@@ -1688,12 +1722,13 @@ fn dec_enum_column(
             code: ErrorCode::Range,
             message: format!("{path}[{i}]: enum index is outside the host size domain"),
         })?;
-        if members.get(index).is_none() {
+        let Some(member) = members.get(index) else {
             return err(
                 ErrorCode::Range,
                 format!("{path}[{i}]: enum index {index} out of range"),
             );
-        }
+        };
+        r.charge_bytes(member.len() as u64, &format!("{path}[{i}]"))?;
         out.push(index);
     }
     Ok(out)
@@ -2394,6 +2429,7 @@ fn enc_string_column(
     ordinal_base: usize,
     path: &str,
     limits: &Limits,
+    budget: &mut Budget,
     pack: bool,
     codes_index: Option<&HashMap<String, u64>>,
     grammar: Option<&[GrammarToken]>,
@@ -2415,6 +2451,7 @@ fn enc_string_column(
                 format!("{path}[{i}]: string length exceeds limit"),
             );
         }
+        budget.charge_bytes(len, &format!("{path}[{i}]"))?;
     }
 
     let mut candidates: Vec<(u8, Vec<u8>)> = Vec::new();
@@ -2590,6 +2627,7 @@ fn read_string_literal<'a>(
             format!("{path}[{index}]: string length exceeds limit"),
         );
     }
+    r.charge_bytes(len, &format!("{path}[{index}]"))?;
     let len = usize::try_from(len).map_err(|_| Error {
         code: ErrorCode::Limit,
         message: format!("{path}[{index}]: string length exceeds the host size domain"),
@@ -2598,6 +2636,7 @@ fn read_string_literal<'a>(
 }
 
 fn check_reconstructed_string<'a>(
+    r: &mut Reader,
     value: &'a str,
     limits: &Limits,
     path: &str,
@@ -2615,6 +2654,7 @@ fn check_reconstructed_string<'a>(
             format!("{path}[{index}]: reconstructed string length exceeds limit"),
         );
     }
+    r.charge_bytes(len, &format!("{path}[{index}]"))?;
     Ok(value)
 }
 
@@ -2723,7 +2763,7 @@ fn dec_string_column(
                 code: ErrorCode::Range,
                 message: format!("{path}[{i}]: dictionary code {code} out of range"),
             })?;
-            out.push(check_reconstructed_string(entry, limits, path, i)?);
+            out.push(check_reconstructed_string(r, entry, limits, path, i)?);
         }
         return Ok(out);
     }
@@ -2786,7 +2826,7 @@ fn dec_string_column(
                 })?);
             }
             let value = render_grammar(grammar, &values)?;
-            out.push(check_reconstructed_string(&value, limits, path, i)?);
+            out.push(check_reconstructed_string(r, &value, limits, path, i)?);
             matched += 1;
         }
         return Ok(out);
@@ -2835,7 +2875,7 @@ fn dec_string_column(
                 code: ErrorCode::Range,
                 message: format!("{path}[{i}]: derived dictionary code is outside the mapping"),
             })?;
-            out.push(check_reconstructed_string(value, limits, path, i)?);
+            out.push(check_reconstructed_string(r, value, limits, path, i)?);
         }
         return Ok(out);
     }
@@ -2865,6 +2905,7 @@ fn dec_string_column(
             message: format!("{path}[{i}]: string length exceeds the host size domain"),
         })?);
     }
+    r.charge_bytes(total, path)?;
     let blob_len = read_uleb(r)?;
     if blob_len > limits.max_byte_length {
         return err(

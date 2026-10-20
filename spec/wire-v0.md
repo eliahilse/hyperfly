@@ -294,5 +294,8 @@ partial values.
 canonical text → fingerprint, locking §5. `spec/vectors/limits.json` — each
 §6 limit just at and just past its bound, for decoders and encoders; its
 `decodeOnly` vectors are bodies a decoder MUST accept whose values an encoder
-MUST refuse (§6). `spec/vectors/ir.json` — invalid IR and valid near misses,
-locking §4 acceptance. Every implementation runs all four.
+MUST refuse (§6). `spec/vectors/bytes.json` — the §6 byte budget at and
+just past its bound, in the same format, with `packedDecode` vectors that
+decoders run alone because deflate output differs between libraries.
+`spec/vectors/ir.json` — invalid IR and valid near misses, locking §4
+acceptance. Every implementation runs all five.

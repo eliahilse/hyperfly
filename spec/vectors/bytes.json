@@ -1,0 +1,1053 @@
+{
+  "description": "Byte-budget vectors for wire-v0 section 6: the decoded bytes of every string and bytes value (including literals, enum members and dictionary, grammar and derived values) against min(maxTotalBytes, maxByteAmplification x (body length + 1)), just at and just past the bound, under the default limits unless a vector carries `limits` (merged over the defaults). Hex is body bytes only. `plan` selects row@1 or columnar@5; an optional `profile` has the same shape as the profiled vectors in columnar.json. Values of the form {\"$bytes\": \"<hex>\"} denote a bytes value. `valid` vectors round-trip; `invalidDecode` and `invalidEncode` fail with `error`. `packedDecode` vectors decode `hex` to `value` with packing enabled; encoders are not run because deflate output differs between libraries.",
+  "valid": [
+    {
+      "name": "byte-amplification-literal-at-bound",
+      "description": "8 x 16 = 128 decoded bytes equals 64 x (1 + 1) under the default limits",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "literal",
+          "value": "abcdefghijklmnop"
+        }
+      },
+      "value": [
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop"
+      ],
+      "hex": "08"
+    },
+    {
+      "name": "max-total-bytes-string-at-bound",
+      "description": "4 UTF-8 bytes equals maxTotalBytes 4",
+      "plan": "row",
+      "ir": {
+        "kind": "string"
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "value": "éé",
+      "hex": "04c3a9c3a9"
+    },
+    {
+      "name": "max-total-bytes-bytes-at-bound",
+      "description": "4 bytes equals maxTotalBytes 4",
+      "plan": "row",
+      "ir": {
+        "kind": "bytes"
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "value": {
+        "$bytes": "00010203"
+      },
+      "hex": "0400010203"
+    },
+    {
+      "name": "byte-budget-fields-at-bound",
+      "description": "2 + 3 = 5 decoded bytes equals maxTotalBytes 5; each value is within maxByteLength 4",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "string"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxTotalBytes": 5,
+        "maxByteLength": 4
+      },
+      "value": {
+        "a": "ab",
+        "b": "cde"
+      },
+      "hex": "02616203636465"
+    },
+    {
+      "name": "byte-amplification-override-at-bound",
+      "description": "16 decoded bytes equals maxByteAmplification 16 x (0 + 1)",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "abcdefghijklmnop"
+      },
+      "limits": {
+        "maxByteAmplification": 16
+      },
+      "value": "abcdefghijklmnop",
+      "hex": ""
+    },
+    {
+      "name": "col-byte-budget-sum-at-bound",
+      "description": "2 x (2 + 3) = 10 decoded bytes equals maxTotalBytes 10",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 10
+      },
+      "value": [
+        {
+          "a": "ab",
+          "b": "cde"
+        },
+        {
+          "a": "fg",
+          "b": "hij"
+        }
+      ],
+      "hex": "020002616202666700036364650368696a"
+    },
+    {
+      "name": "nested-col-byte-budget-at-bound",
+      "description": "2 x 2 x 2 = 8 decoded bytes in a row array of columnar arrays equals maxTotalBytes 8",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 8
+      },
+      "value": [
+        [
+          {
+            "s": "ab"
+          },
+          {
+            "s": "cd"
+          }
+        ],
+        [
+          {
+            "s": "ef"
+          },
+          {
+            "s": "gh"
+          }
+        ]
+      ],
+      "hex": "0202000261620263640200026566026768"
+    },
+    {
+      "name": "col-enum-byte-budget-at-bound",
+      "description": "2 x 16 = 32 decoded bytes from a width-zero enum equals maxTotalBytes 32",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "abcdefghijklmnop"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 32
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "abcdefghijklmnop"
+        }
+      ],
+      "hex": "02"
+    },
+    {
+      "name": "col-dict-byte-budget-at-bound",
+      "description": "2 dictionary hits x 16 = 32 decoded bytes equals maxTotalBytes 32",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 32
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "abcdefghijklmnop"
+        }
+      ],
+      "hex": "02010103"
+    },
+    {
+      "name": "col-bytes-byte-budget-at-bound",
+      "description": "2 + 2 = 4 decoded bytes equals maxTotalBytes 4",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "b",
+              "type": {
+                "kind": "bytes"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "value": [
+        {
+          "b": {
+            "$bytes": "0001"
+          }
+        },
+        {
+          "b": {
+            "$bytes": "0203"
+          }
+        }
+      ],
+      "hex": "02020001020203"
+    },
+    {
+      "name": "col-literal-byte-budget-at-bound",
+      "description": "2 participating rows x 16 = 32 decoded bytes equals maxTotalBytes 32; absent and null values charge zero",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "literal",
+                "value": "abcdefghijklmnop"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 32
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {},
+        {
+          "s": null
+        },
+        {
+          "s": "abcdefghijklmnop"
+        }
+      ],
+      "hex": "040d04"
+    },
+    {
+      "name": "row-enum-byte-budget-at-bound",
+      "description": "16 decoded member bytes equals maxTotalBytes 16",
+      "plan": "row",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "abcdefghijklmnop"
+        ]
+      },
+      "limits": {
+        "maxTotalBytes": 16
+      },
+      "value": "abcdefghijklmnop",
+      "hex": "00"
+    }
+  ],
+  "invalidDecode": [
+    {
+      "name": "byte-amplification-literal-over-bound",
+      "description": "9 x 16 = 144 decoded bytes exceeds 64 x (1 + 1) = 128; 9 items remains within the item bounds",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "literal",
+          "value": "abcdefghijklmnop"
+        }
+      },
+      "hex": "09",
+      "error": "limit"
+    },
+    {
+      "name": "max-total-bytes-string-over-bound",
+      "description": "5 UTF-8 bytes exceeds maxTotalBytes 4 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "string"
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "hex": "05c3a9c3a961",
+      "error": "limit"
+    },
+    {
+      "name": "max-total-bytes-bytes-over-bound",
+      "description": "5 bytes exceeds maxTotalBytes 4 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "bytes"
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "hex": "050001020304",
+      "error": "limit"
+    },
+    {
+      "name": "byte-budget-fields-over-bound",
+      "description": "2 + 4 = 6 decoded bytes exceeds maxTotalBytes 5 by 1; each value is within maxByteLength 4",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "string"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxTotalBytes": 5,
+        "maxByteLength": 4
+      },
+      "hex": "0261620463646566",
+      "error": "limit"
+    },
+    {
+      "name": "byte-amplification-override-over-bound",
+      "description": "16 decoded bytes exceeds maxByteAmplification 15 x (0 + 1) = 15 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "abcdefghijklmnop"
+      },
+      "limits": {
+        "maxByteAmplification": 15
+      },
+      "hex": "",
+      "error": "limit"
+    },
+    {
+      "name": "col-byte-budget-sum-over-bound",
+      "description": "2 + 2 + 3 + 4 = 11 decoded bytes across two columns exceeds maxTotalBytes 10 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 10
+      },
+      "hex": "020002616202666700036364650468696a6b",
+      "error": "limit"
+    },
+    {
+      "name": "nested-col-byte-budget-over-bound",
+      "description": "2 + 2 + 2 + 3 = 9 decoded bytes in a row array of columnar arrays exceeds maxTotalBytes 8 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 8
+      },
+      "hex": "020200026162026364020002656603676869",
+      "error": "limit"
+    },
+    {
+      "name": "col-enum-byte-budget-over-bound",
+      "description": "2 x 16 = 32 decoded bytes from a width-zero enum exceeds maxTotalBytes 31 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "abcdefghijklmnop"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "hex": "02",
+      "error": "limit"
+    },
+    {
+      "name": "col-dict-byte-budget-over-bound",
+      "description": "2 dictionary hits x 16 = 32 decoded bytes exceeds maxTotalBytes 31 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "hex": "02010103",
+      "error": "limit"
+    },
+    {
+      "name": "col-bytes-byte-budget-over-bound",
+      "description": "2 + 3 = 5 decoded bytes exceeds maxTotalBytes 4 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "b",
+              "type": {
+                "kind": "bytes"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "hex": "0202000103020304",
+      "error": "limit"
+    },
+    {
+      "name": "col-literal-byte-budget-over-bound",
+      "description": "2 participating rows x 16 = 32 decoded bytes exceeds maxTotalBytes 31 by 1; absent and null values charge zero",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "literal",
+                "value": "abcdefghijklmnop"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "hex": "040d04",
+      "error": "limit"
+    },
+    {
+      "name": "row-enum-byte-budget-over-bound",
+      "description": "16 decoded member bytes exceeds maxTotalBytes 15 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "abcdefghijklmnop"
+        ]
+      },
+      "limits": {
+        "maxTotalBytes": 15
+      },
+      "hex": "00",
+      "error": "limit"
+    },
+    {
+      "name": "packed-byte-budget-over-bound",
+      "description": "Declared total 16 + 16 = 32 decoded bytes exceeds maxTotalBytes 31 by 1 before inflating",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "hex": "0202101005aba8c00f00",
+      "error": "limit"
+    },
+    {
+      "name": "packed-byte-budget-before-truncated-blob",
+      "description": "Declared total 16 + 16 = 32 exceeds maxTotalBytes 31 by 1; the absent blob length and blob must not change limit to truncated",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "hex": "02021010",
+      "error": "limit"
+    }
+  ],
+  "invalidEncode": [
+    {
+      "name": "encode-byte-amplification-literal-over-bound",
+      "description": "9 x 16 = 144 decoded bytes exceeds 64 x (1 + 1) = 128; 9 items remains within the item bounds",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "literal",
+          "value": "abcdefghijklmnop"
+        }
+      },
+      "value": [
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop",
+        "abcdefghijklmnop"
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-max-total-bytes-string-over-bound",
+      "description": "5 UTF-8 bytes exceeds maxTotalBytes 4 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "string"
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "value": "ééa",
+      "error": "limit"
+    },
+    {
+      "name": "encode-max-total-bytes-bytes-over-bound",
+      "description": "5 bytes exceeds maxTotalBytes 4 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "bytes"
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "value": {
+        "$bytes": "0001020304"
+      },
+      "error": "limit"
+    },
+    {
+      "name": "encode-byte-budget-fields-over-bound",
+      "description": "2 + 4 = 6 decoded bytes exceeds maxTotalBytes 5 by 1; each value is within maxByteLength 4",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "string"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxTotalBytes": 5,
+        "maxByteLength": 4
+      },
+      "value": {
+        "a": "ab",
+        "b": "cdef"
+      },
+      "error": "limit"
+    },
+    {
+      "name": "encode-byte-amplification-override-over-bound",
+      "description": "16 decoded bytes exceeds maxByteAmplification 15 x (0 + 1) = 15 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "literal",
+        "value": "abcdefghijklmnop"
+      },
+      "limits": {
+        "maxByteAmplification": 15
+      },
+      "value": "abcdefghijklmnop",
+      "error": "limit"
+    },
+    {
+      "name": "encode-col-byte-budget-sum-over-bound",
+      "description": "2 + 2 + 3 + 4 = 11 decoded bytes across two columns exceeds maxTotalBytes 10 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 10
+      },
+      "value": [
+        {
+          "a": "ab",
+          "b": "cde"
+        },
+        {
+          "a": "fg",
+          "b": "hijk"
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-nested-col-byte-budget-over-bound",
+      "description": "2 + 2 + 2 + 3 = 9 decoded bytes in a row array of columnar arrays exceeds maxTotalBytes 8 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "s",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 8
+      },
+      "value": [
+        [
+          {
+            "s": "ab"
+          },
+          {
+            "s": "cd"
+          }
+        ],
+        [
+          {
+            "s": "ef"
+          },
+          {
+            "s": "ghi"
+          }
+        ]
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-col-enum-byte-budget-over-bound",
+      "description": "2 x 16 = 32 decoded bytes from a width-zero enum exceeds maxTotalBytes 31 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "abcdefghijklmnop"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "abcdefghijklmnop"
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-col-dict-byte-budget-over-bound",
+      "description": "2 dictionary hits x 16 = 32 decoded bytes exceeds maxTotalBytes 31 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "profile": {
+        "version": 1,
+        "shared": {
+          "columns": [
+            {
+              "leaf": 0,
+              "dict": [
+                "abcdefghijklmnop"
+              ]
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {
+          "s": "abcdefghijklmnop"
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-col-bytes-byte-budget-over-bound",
+      "description": "2 + 3 = 5 decoded bytes exceeds maxTotalBytes 4 by 1",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "b",
+              "type": {
+                "kind": "bytes"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 4
+      },
+      "value": [
+        {
+          "b": {
+            "$bytes": "0001"
+          }
+        },
+        {
+          "b": {
+            "$bytes": "020304"
+          }
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-col-literal-byte-budget-over-bound",
+      "description": "2 participating rows x 16 = 32 decoded bytes exceeds maxTotalBytes 31 by 1; absent and null values charge zero",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "literal",
+                "value": "abcdefghijklmnop"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 31
+      },
+      "value": [
+        {
+          "s": "abcdefghijklmnop"
+        },
+        {},
+        {
+          "s": null
+        },
+        {
+          "s": "abcdefghijklmnop"
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-row-enum-byte-budget-over-bound",
+      "description": "16 decoded member bytes exceeds maxTotalBytes 15 by 1",
+      "plan": "row",
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "abcdefghijklmnop"
+        ]
+      },
+      "limits": {
+        "maxTotalBytes": 15
+      },
+      "value": "abcdefghijklmnop",
+      "error": "limit"
+    }
+  ],
+  "packedDecode": [
+    {
+      "name": "packed-byte-budget-at-bound",
+      "description": "Declared total 16 + 16 = 32 decoded bytes equals maxTotalBytes 32",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 32
+      },
+      "value": [
+        {
+          "s": "xxxxxxxxxxxxxxxx"
+        },
+        {
+          "s": "xxxxxxxxxxxxxxxx"
+        }
+      ],
+      "hex": "0202101005aba8c00f00"
+    }
+  ]
+}

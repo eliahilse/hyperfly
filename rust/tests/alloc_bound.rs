@@ -81,7 +81,14 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
         }])),
         length: None,
     };
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), true).unwrap();
+    let default_codec =
+        Codec::compile(ir.clone(), Plan::Columnar, Limits::default(), true).unwrap();
+    let limits = Limits {
+        max_total_bytes: u64::MAX,
+        max_byte_amplification: u64::MAX,
+        ..Limits::default()
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, limits, true).unwrap();
 
     let mut expands_then_fails = miniz_oxide::deflate::compress_to_vec(&vec![0u8; 1 << 20], 6);
     expands_then_fails.pop();
@@ -92,6 +99,10 @@ fn packed_inflate_bounds_allocation_and_preserves_validation() {
         &expands_then_fails[..],
     ] {
         let body = packed_body((1 << 28) - 1, blob);
+        assert_eq!(
+            default_codec.decode_body(&body).unwrap_err().code.as_str(),
+            "limit"
+        );
         let baseline = CURRENT.load(Ordering::SeqCst);
         PEAK.store(baseline, Ordering::SeqCst);
         let result = codec.decode_body(&body);
