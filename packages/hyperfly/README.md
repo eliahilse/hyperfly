@@ -101,8 +101,8 @@ export default {
 
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
-For HEAD requests and status 204, 205 or 304, `respond` sends the negotiated headers without encoding the value or
-sending a body; `discovery` answers GET and HEAD and returns `undefined` for other methods.
+`respond` answers HEAD with the headers GET would get and no body, and status 204, 205 or 304 with the negotiated
+headers, no body and without encoding the value; `discovery` answers GET and HEAD and returns `undefined` otherwise.
 A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it advertises a matching fingerprint.
 
 ### JSON fallback

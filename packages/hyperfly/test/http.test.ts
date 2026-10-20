@@ -545,39 +545,41 @@ describe("fetch adapter", () => {
     }
   });
 
-  test("HEAD gets the headers of the GET response and no body", () => {
-    for (const accept of [codecA.fingerprint, null]) {
+  test("HEAD gets exactly the headers of the GET response and no body", () => {
+    const limited = compileIR({ kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] }, {
+      limits: { maxByteLength: 1 },
+    });
+    const cases = [
+      { registry, accept: codecA.fingerprint, value, type: HYPERFLY_MEDIA_TYPE },
+      { registry, accept: null, value, type: "application/json" },
+      { registry: new CodecRegistry([limited as never]), accept: limited.fingerprint, value: { s: "long" }, type: "application/json" },
+    ];
+    for (const { registry, accept, value, type } of cases) {
       const headers: Record<string, string> = accept ? { "Hyperfly-Accept": accept } : {};
       const get = respond(new Request(url, { headers }), value, registry);
       const head = respond(new Request(url, { method: "HEAD", headers }), value, registry);
+      expect(get.headers.get("content-type")).toBe(type);
       expect(head.status).toBe(200);
       expect(head.body).toBeNull();
-      expect(head.headers.get("content-type")).toBe(get.headers.get("content-type"));
-      expect(head.headers.get("vary")).toBe(get.headers.get("vary"));
-      expect(head.headers.get("hyperfly-codec")).toBe(get.headers.get("hyperfly-codec"));
-      expect(head.headers.get("hyperfly-offer")).toBe(get.headers.get("hyperfly-offer"));
+      expect([...head.headers]).toEqual([...get.headers]);
     }
   });
 
-  test("a bodyless response never encodes the value", () => {
+  test.each([204, 304])("status %d never encodes the value", (status) => {
     let encodes = 0;
     const spied = new CodecRegistry([{
       ...codecA,
       encode(input: never) { encodes++; return codecA.encode(input); },
     } as never]);
-    const binary = { headers: { "Hyperfly-Accept": codecA.fingerprint } };
-    const head = respond(new Request(url, { method: "HEAD", ...binary }), value, spied);
-    expect(head.body).toBeNull();
-    expect(head.headers.get("hyperfly-codec")).toBe(codecA.fingerprint);
-    expect(respond(new Request(url, binary), value, spied, { status: 304 }).body).toBeNull();
-    expect(encodes).toBe(0);
     const unencodable = { n: 1n, toJSON() { throw new Error("toJSON must not run"); } };
-    for (const [request, status] of [[new Request(url, { method: "HEAD" }), 200], [new Request(url), 204]] as const) {
-      const response = respond(request, unencodable, registry, { status });
+    for (const accept of [codecA.fingerprint, null]) {
+      const headers: Record<string, string> = accept ? { "Hyperfly-Accept": accept } : {};
+      const response = respond(new Request(url, { headers }), unencodable, spied, { status });
       expect(response.status).toBe(status);
       expect(response.body).toBeNull();
-      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(response.headers.get("content-type")).toBe(accept ? HYPERFLY_MEDIA_TYPE : "application/json");
     }
+    expect(encodes).toBe(0);
   });
 
   test.each([204, 205, 304])("status %d has no body and keeps the negotiated headers", (status) => {

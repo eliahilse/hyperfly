@@ -410,8 +410,8 @@ export function respond<T>(
     accept: options.accept === undefined ? request.headers.get("accept") : options.accept,
   });
   const status = options.status ?? 200;
-  const bodyless = request.method === "HEAD" || NULL_BODY_STATUSES.has(status);
-  const { body, headers } = bodyless ? { body: null, headers: decision.headers } : encodeFor(decision, value, options);
+  const nullBody = NULL_BODY_STATUSES.has(status);
+  const { body, headers } = nullBody ? { body: null, headers: decision.headers } : encodeFor(decision, value, options);
   const responseHeaders = new Headers(options.headers);
   for (const name of ["Content-Type", "Content-Length", "Hyperfly-Codec", "Hyperfly-Offer"]) {
     responseHeaders.delete(name);
@@ -423,7 +423,7 @@ export function respond<T>(
   }
   for (const [name, value] of Object.entries(headers)) responseHeaders.set(name, value);
   responseHeaders.set("Vary", [...vary.values()].join(", "));
-  return new Response(body as BodyInit | null, { status, headers: responseHeaders });
+  return new Response(request.method === "HEAD" ? null : body as BodyInit | null, { status, headers: responseHeaders });
 }
 
 /**
