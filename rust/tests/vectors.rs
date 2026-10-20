@@ -2,56 +2,88 @@ use hyperfly_core::ir::{
     Derivation, GrammarCase, GrammarNum, GrammarToken, Profile, ProfileColumn,
 };
 use hyperfly_core::{
-    fingerprint_of, serialize_artifact, Codec, Field, Limits, Literal, Node, Plan, Value,
+    fingerprint_of, serialize_artifact, Codec, ErrorCode, Field, Limits, Literal, Node, Plan, Value,
 };
 use serde_json::Value as Json;
 
-fn node_of(json: &Json) -> Node {
-    let kind = json["kind"].as_str().unwrap();
-    match kind {
+fn node_of(json: &Json) -> Result<Node, String> {
+    fn required<'a>(json: &'a Json, key: &str) -> Result<&'a Json, String> {
+        json.get(key).ok_or_else(|| format!("missing IR key {key}"))
+    }
+
+    fn string(json: &Json) -> Result<String, String> {
+        json.as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "IR string required (lone surrogates are unrepresentable)".to_owned())
+    }
+
+    fn flag(field: &Json, name: &str) -> Result<bool, String> {
+        field.get(name).map_or(Ok(false), |value| {
+            value.as_bool().ok_or_else(|| format!("{name} flag must be a boolean"))
+        })
+    }
+
+    fn integer(json: &Json) -> Result<i64, String> {
+        json.as_i64()
+            .ok_or_else(|| "IR integer required".to_owned())
+    }
+
+    let kind = required(json, "kind")?
+        .as_str()
+        .ok_or_else(|| "IR kind must be a string".to_owned())?;
+    Ok(match kind {
         "bool" => Node::Bool,
         "float64" => Node::Float64,
         "string" => Node::Str,
         "bytes" => Node::Bytes,
         "int" => Node::Int {
-            min: json.get("min").and_then(Json::as_i64),
-            max: json.get("max").and_then(Json::as_i64),
+            min: json.get("min").map(integer).transpose()?,
+            max: json.get("max").map(integer).transpose()?,
         },
-        "literal" => Node::Literal(match &json["value"] {
+        "literal" => Node::Literal(match required(json, "value")? {
             Json::Null => Literal::Null,
             Json::Bool(b) => Literal::Bool(*b),
-            Json::Number(n) => Literal::Int(n.as_i64().unwrap()),
+            Json::Number(_) => Literal::Int(integer(&json["value"])?),
             Json::String(s) => Literal::Str(s.clone()),
-            other => panic!("bad literal {other:?}"),
+            _ => return Err("literal must be a string, boolean, null, or integer".to_owned()),
         }),
         "enum" => Node::Enum(
-            json["members"]
+            required(json, "members")?
                 .as_array()
-                .unwrap()
+                .ok_or_else(|| "enum members must be an array".to_owned())?
                 .iter()
-                .map(|m| m.as_str().unwrap().to_owned())
-                .collect(),
+                .map(string)
+                .collect::<Result<_, _>>()?,
         ),
-        "nullable" => Node::Nullable(Box::new(node_of(&json["inner"]))),
+        "nullable" => Node::Nullable(Box::new(node_of(required(json, "inner")?)?)),
         "array" => Node::Array {
-            element: Box::new(node_of(&json["element"])),
-            length: json.get("length").and_then(Json::as_u64),
+            element: Box::new(node_of(required(json, "element")?)?),
+            length: json
+                .get("length")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .ok_or_else(|| "array length must be a non-negative integer".to_owned())
+                })
+                .transpose()?,
         },
         "struct" => Node::Struct(
-            json["fields"]
+            required(json, "fields")?
                 .as_array()
-                .unwrap()
+                .ok_or_else(|| "struct fields must be an array".to_owned())?
                 .iter()
-                .map(|f| Field {
-                    name: f["name"].as_str().unwrap().to_owned(),
-                    ty: node_of(&f["type"]),
-                    optional: f.get("optional").and_then(Json::as_bool).unwrap_or(false),
-                    nullable: f.get("nullable").and_then(Json::as_bool).unwrap_or(false),
+                .map(|f| {
+                    Ok(Field {
+                        name: string(required(f, "name")?)?,
+                        ty: node_of(required(f, "type")?)?,
+                        optional: flag(f, "optional")?,
+                        nullable: flag(f, "nullable")?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, String>>()?,
         ),
-        other => panic!("unknown kind {other}"),
-    }
+        other => return Err(format!("unknown IR kind {other}")),
+    })
 }
 
 fn value_of(json: &Json) -> Value {
@@ -109,7 +141,30 @@ fn load(name: &str) -> Json {
 }
 
 fn compile(ir: &Json, plan: Plan) -> Codec {
-    Codec::compile(node_of(ir), plan, Limits::default(), true).unwrap()
+    Codec::compile(node_of(ir).unwrap(), plan, Limits::default(), true).unwrap()
+}
+
+#[test]
+fn ir_vectors() {
+    let file = load("ir.json");
+    for v in file["invalid"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let code = match node_of(&v["ir"]) {
+            Err(_) => ErrorCode::Ir,
+            Ok(node) => match Codec::compile(node, Plan::Row, Limits::default(), false) {
+                Ok(_) => panic!("{name}: expected IR compilation failure"),
+                Err(error) => error.code,
+            },
+        };
+        assert_eq!(code, ErrorCode::Ir, "{name}");
+        assert_eq!(code.as_str(), v["error"].as_str().unwrap(), "{name}");
+    }
+    for v in file["valid"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let node = node_of(&v["ir"]).unwrap_or_else(|e| panic!("{name}: {e}"));
+        Codec::compile(node, Plan::Row, Limits::default(), false)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
 }
 
 fn run_valid(file: &Json, section: &str, plan: Plan) {
@@ -190,8 +245,13 @@ fn columnar_vectors() {
 fn packed_without_inflate_fails_closed() {
     let file = load("columnar.json");
     let v = &file["packedDecode"][0];
-    let codec =
-        Codec::compile(node_of(&v["ir"]), Plan::Columnar, Limits::default(), false).unwrap();
+    let codec = Codec::compile(
+        node_of(&v["ir"]).unwrap(),
+        Plan::Columnar,
+        Limits::default(),
+        false,
+    )
+    .unwrap();
     let e = codec
         .decode_body(&from_hex(v["hex"].as_str().unwrap()))
         .unwrap_err();
@@ -207,7 +267,7 @@ fn fingerprints() {
             _ => Plan::Columnar,
         };
         let profile = case.get("profile").map(profile_of).transpose().unwrap();
-        let canonical = serialize_artifact(&node_of(&case["ir"]), plan, profile.as_ref());
+        let canonical = serialize_artifact(&node_of(&case["ir"]).unwrap(), plan, profile.as_ref());
         assert_eq!(
             canonical,
             case["canonical"].as_str().unwrap(),
@@ -429,7 +489,7 @@ fn profiled_codec(v: &Json, with_profile: bool) -> Codec {
         None
     };
     Codec::compile_with_profile(
-        node_of(&v["ir"]),
+        node_of(&v["ir"]).unwrap(),
         Plan::Columnar,
         Limits::default(),
         false,
@@ -498,7 +558,7 @@ fn profiled_vectors() {
         let code = match profile_of(&v["profile"]) {
             Err(_) => "ir",
             Ok(profile) => match Codec::compile_with_profile(
-                node_of(&v["ir"]),
+                node_of(&v["ir"]).unwrap(),
                 Plan::Columnar,
                 Limits::default(),
                 false,

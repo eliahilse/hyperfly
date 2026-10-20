@@ -27,7 +27,7 @@ classifiers = [
 
 [project.optional-dependencies]
 pydantic = ["pydantic>=2.5"]
-test = ["pytest>=8", "pydantic>=2.5"]
+test = ["pytest>=8", "pydantic>=2.5", "hypothesis>=6"]
 
 [project.urls]
 Homepage = "https://hyperfly.dev"
