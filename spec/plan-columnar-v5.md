@@ -35,8 +35,9 @@ always agree.
    c. The column payload over **participating** rows (present and not
       bitmap-null), in row order.
 
-An eligible fixed-length array of length 0 MUST still write its column
-payload headers as specified in §3, even though no rows participate.
+An eligible fixed-length array of length 0 MUST still emit the bytes §3
+requires at `k = 0`: the `0x00` mode or flags byte for int, float64 and string
+columns; nothing for other columns.
 
 For each column, a decoder MUST read its presence bitmap and then its null
 bitmap, validating padding and rejecting null bits for absent rows with

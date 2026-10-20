@@ -661,6 +661,159 @@
         "$bytes": "00"
       },
       "error": "type"
+    },
+    {
+      "name": "encoder-row-later-required-beats-earlier-range",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "int",
+              "min": 0,
+              "max": 1
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "value": {
+        "a": 2
+      },
+      "error": "required"
+    },
+    {
+      "name": "encoder-nested-later-required-beats-earlier-range",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "n",
+            "type": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "name": "a",
+                  "type": {
+                    "kind": "int",
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                {
+                  "name": "b",
+                  "type": {
+                    "kind": "bool"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "value": {
+        "n": {
+          "a": 2
+        }
+      },
+      "error": "required"
+    },
+    {
+      "name": "encoder-array-row-later-required-beats-earlier-range",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 1
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 2
+        }
+      ],
+      "error": "required"
+    },
+    {
+      "name": "encoder-earlier-row-range-beats-later-row-required",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 1
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 2,
+          "b": true
+        },
+        {}
+      ],
+      "error": "range"
+    },
+    {
+      "name": "encoder-row-later-null-beats-earlier-range",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "int",
+              "min": 0,
+              "max": 1
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "value": {
+        "a": 2,
+        "b": null
+      },
+      "error": "type"
     }
   ]
 }

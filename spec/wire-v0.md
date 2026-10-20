@@ -143,8 +143,10 @@ field flag (§4.10), which uses the bitmap instead.
 
 Field order is declared order and is canonical.
 Field names MUST be non-empty strings and MUST be unique within a struct.
-An encoder MUST require a host object or map as a struct value; arrays and
-bytes values MUST NOT be accepted as structs.
+An encoder MUST reject with `type` a struct value that is null, an array, a
+bytes value, or a host collection type whose entries are not named fields
+(such as a JavaScript `Map` or `Set`, or a typed array). Which host record
+types carry named fields is the implementation's value model.
 
 **Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
 a decimal array index (`0`, or a digit string with no leading zero whose value
@@ -307,20 +309,58 @@ completing each value's checks and charge before examining the next, so the
 first failing value determines the error.
 
 An encoder applies `maxDepth`, `maxItems` and `maxByteLength` as a decoder
-does. It MUST report the first failure in wire order, the order in which a
-decoder would read the values: depth-first in declared order for row
-encoding; column by column in declared leaf order, with participating rows
-in row order within each column, for eligible columnar arrays. It applies
-the amplification bound to every array with, in place of
-remaining bytes, the number of bytes the array's own encoding occupies after
-its count (for a fixed-length array, all of its bytes), and the item and byte
-budgets with the final body length, counting values exactly as a decoder
-charges them. It applies the same one-bit floor as a decoder, to the same
-arrays, measured by those same bytes. An encoder that would violate any of
-these MUST refuse the value, with `depth` for `maxDepth` and `limit`
-otherwise. An encoder may therefore refuse a value whose body a decoder
-would accept (the decoder's remaining bytes include later siblings), never
-the reverse.
+does. It MUST report the first failure in the traversal below. Entry checks
+precede structural preflight, which precedes value checks; completion checks
+come last. These stages are local to the node being visited, not separate
+passes over the whole body.
+
+1. **Entry checks.** A node's `depth` check comes first. A struct's host
+   type check precedes its field preflight. For an array, its host type,
+   `maxItems`, fixed-length agreement and `maxTotalItems` charge are checked
+   in that order, before its preflight, elements or columns. Columnar
+   enclosing-struct and leaf depth checks occur per column, after the whole
+   array's preflight and before that column's values, with the participation
+   conditions in plan-columnar-v5 §2.
+2. **Structural preflight.** After a row-encoded struct's entry checks (1),
+   its fields' presence and nullability are checked in declared order,
+   before any field value is visited. A missing required field is
+   `required`; a null not admitted by the field's nullable flag or its type
+   is `type`. After an eligible columnar array's entry checks (1), all
+   top-level rows are checked to be struct values, in row order, before
+   examining any fields. Then, for each leaf in declared leaf order, the
+   nested-struct containers on its path are checked in row order, outermost
+   first within each row; a missing container is `required`, and a present
+   non-struct container is `type`. For that leaf, all these container checks
+   precede its presence and nullability checks, which follow row order and
+   use the same rules as row fields. Every leaf's preflight completes
+   before any column's depth or value checks. A later leaf's container
+   checks do not precede an earlier leaf's presence or nullability checks.
+3. **Value checks.** Values are visited depth-first in declared order for
+   row encoding; for eligible columnar arrays, column by column in declared
+   leaf order, participating rows in row order within each column. Each
+   value's checks and `maxTotalBytes` charge complete before the next value
+   is examined. `maxByteLength` applies to each string or bytes value after
+   its type and, for strings, Unicode checks, before its byte charge.
+   Literals and enum members are charged after their value checks;
+   `maxByteLength` does not apply to these schema constants.
+4. **Completion checks.** An array's amplification bound and one-bit floor
+   are applied after all of its elements or columns, before visiting a
+   later sibling. The item budget and then the byte budget against the
+   final body length are applied after the whole body. Thus any failure
+   encountered while visiting the array or body precedes its respective
+   completion checks. The `maxTotalItems` and `maxTotalBytes` charges above
+   can fail before the body is complete.
+
+The encoder applies the amplification bound to every array with, in place
+of remaining bytes, the number of bytes the array's own encoding occupies
+after its count (for a fixed-length array, all of its bytes). It applies
+the same one-bit floor as a decoder, to the same arrays, measured by those
+same bytes. The item and byte budgets use the final body length, counting
+values exactly as a decoder charges them. An encoder that would violate any
+of these limits MUST refuse the value, with `depth` for `maxDepth` and
+`limit` otherwise. An encoder may therefore refuse a value whose body a
+decoder would accept (the decoder's remaining bytes include later
+siblings), never the reverse.
 
 Limits are local to each peer and are not negotiated. A peer holding lower
 limits rejects a body its sender accepted; over HTTP, an encoder's refusal
