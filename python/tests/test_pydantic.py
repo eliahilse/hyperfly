@@ -1,3 +1,4 @@
+from copy import deepcopy
 from enum import Enum
 from typing import Annotated, Literal, Optional
 
@@ -7,7 +8,7 @@ from pydantic import (
     AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
     WrapValidator, confloat, conint, constr, create_model, field_validator,
 )
-from pydantic_core import core_schema
+from pydantic_core import SchemaError, core_schema
 
 from conftest import load
 from hyperfly import Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
@@ -122,6 +123,38 @@ class _FieldBounds(GroupedMetadata):
 class _IntChain:
     def __get_pydantic_core_schema__(self, source, handler):
         return core_schema.chain_schema([handler(source), core_schema.int_schema(ge=2, le=8)])
+
+
+def _shift(value):
+    if type(value) is not int:
+        raise ValueError("expected an integer")
+    return value - 100
+
+
+class _ShiftChain:
+    def __get_pydantic_core_schema__(self, source, handler):
+        return core_schema.chain_schema([handler(source), core_schema.no_info_plain_validator_function(_shift)])
+
+
+class _LastIntChain:
+    def __get_pydantic_core_schema__(self, source, handler):
+        return core_schema.chain_schema([
+            handler(source), core_schema.no_info_plain_validator_function(_shift),
+            core_schema.int_schema(ge=-100, le=-80),
+        ])
+
+
+class _ReferencedInt:
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source, handler):
+        return core_schema.int_schema(ge=10, ref="BoundedInt")
+
+
+class _RefChain:
+    def __get_pydantic_core_schema__(self, source, handler):
+        return core_schema.chain_schema([
+            handler.generate_schema(_ReferencedInt), handler.generate_schema(_ReferencedInt),
+        ])
 
 
 def _identity(value):
@@ -246,81 +279,108 @@ def test_optional_inner_metadata_merges_with_field_metadata():
     assert compile(Constrained).fingerprint == compile(FieldLevel).fingerprint
 
 
-@pytest.mark.parametrize("annotation,default,depth", [
-    pytest.param(Annotated[int, Ge(10), Ge(0)], ..., 0, id="ge-relaxed"),
-    pytest.param(Annotated[int, Gt(10), Gt(0)], ..., 0, id="gt-relaxed"),
-    pytest.param(Annotated[int, Le(0), Le(10)], ..., 0, id="le-relaxed"),
-    pytest.param(Annotated[int, Lt(0), Lt(10)], ..., 0, id="lt-relaxed"),
-    pytest.param(Annotated[int, Ge(0), Ge(10)], ..., 0, id="ge-tightened"),
-    pytest.param(Annotated[int, Le(10), Le(0)], ..., 0, id="le-tightened"),
-    pytest.param(Annotated[int, Ge(10), Gt(0)], ..., 0, id="mixed-lower"),
-    pytest.param(Annotated[int, Le(0), Lt(10)], ..., 0, id="mixed-upper"),
-    pytest.param(Annotated[int, Interval(ge=-1.0, gt=0.0, le=10.0, lt=9.0)], ..., 0,
+@pytest.mark.parametrize("annotation,default,depth,exact", [
+    pytest.param(Annotated[int, Ge(10), Ge(0)], ..., 0, True, id="ge-relaxed"),
+    pytest.param(Annotated[int, Gt(10), Gt(0)], ..., 0, True, id="gt-relaxed"),
+    pytest.param(Annotated[int, Le(0), Le(10)], ..., 0, True, id="le-relaxed"),
+    pytest.param(Annotated[int, Lt(0), Lt(10)], ..., 0, True, id="lt-relaxed"),
+    pytest.param(Annotated[int, Ge(0), Ge(10)], ..., 0, True, id="ge-tightened"),
+    pytest.param(Annotated[int, Le(10), Le(0)], ..., 0, True, id="le-tightened"),
+    pytest.param(Annotated[int, Ge(10), Gt(0)], ..., 0, True, id="mixed-lower"),
+    pytest.param(Annotated[int, Le(0), Lt(10)], ..., 0, True, id="mixed-upper"),
+    pytest.param(Annotated[int, Interval(ge=-1.0, gt=0.0, le=10.0, lt=9.0)], ..., 0, True,
                  id="integral-float-interval"),
-    pytest.param(Annotated[int, Interval(ge=10, le=10), Interval(ge=0, le=12)], ..., 0,
+    pytest.param(Annotated[int, Interval(ge=10, le=10), Interval(ge=0, le=12)], ..., 0, True,
                  id="repeated-interval"),
-    pytest.param(Annotated[int, Interval(ge=10, gt=-1, le=0, lt=11), Ge(0), Le(10)], ..., 0,
+    pytest.param(Annotated[int, Interval(ge=10, gt=-1, le=0, lt=11), Ge(0), Le(10)], ..., 0, True,
                  id="interval-before-bounds"),
-    pytest.param(Annotated[int, Ge(10), Le(0), Interval(ge=0, le=10)], ..., 0,
+    pytest.param(Annotated[int, Ge(10), Le(0), Interval(ge=0, le=10)], ..., 0, True,
                  id="interval-after-bounds"),
-    pytest.param(Annotated[int, Field(ge=10), Field(ge=0)], ..., 0, id="repeated-field"),
-    pytest.param(Annotated[int, Ge(10)], Field(ge=0), 0, id="field-before-type-tightened"),
-    pytest.param(Annotated[int, Field(ge=0)], Field(ge=10), 0, id="field-before-type-relaxed"),
-    pytest.param(Annotated[Annotated[int, Ge(10)], Ge(0)], ..., 0, id="nested-annotated"),
-    pytest.param(Annotated[Optional[Annotated[int, Ge(10)]], Ge(0)], ..., 0,
+    pytest.param(Annotated[int, Field(ge=10), Field(ge=0)], ..., 0, True, id="repeated-field"),
+    pytest.param(Annotated[int, Ge(10)], Field(ge=0), 0, True, id="field-before-type-tightened"),
+    pytest.param(Annotated[int, Field(ge=0)], Field(ge=10), 0, True, id="field-before-type-relaxed"),
+    pytest.param(Annotated[Annotated[int, Ge(10)], Ge(0)], ..., 0, True, id="nested-annotated"),
+    pytest.param(Annotated[Optional[Annotated[int, Ge(10)]], Ge(0)], ..., 0, True,
                  id="optional-outer-relaxed"),
-    pytest.param(Annotated[Optional[Annotated[int, Ge(0)]], Ge(10)], ..., 0,
+    pytest.param(Annotated[Optional[Annotated[int, Ge(0)]], Ge(10)], ..., 0, True,
                  id="optional-outer-tightened"),
-    pytest.param(Optional[Annotated[int, Ge(10)]], Field(ge=0), 0, id="optional-field-outer"),
-    pytest.param(Annotated[Optional[Annotated[int, Ge(10)]], Field(ge=5)], Field(ge=0), 0,
+    pytest.param(Optional[Annotated[int, Ge(10)]], Field(ge=0), 0, True, id="optional-field-outer"),
+    pytest.param(Annotated[Optional[Annotated[int, Ge(10)]], Field(ge=5)], Field(ge=0), 0, True,
                  id="optional-three-scopes"),
-    pytest.param(list[Annotated[int, Ge(10), Ge(0)]], ..., 1, id="list-repeated"),
-    pytest.param(list[Annotated[Optional[Annotated[int, Le(0)]], Le(10)]], ..., 1,
+    pytest.param(list[Annotated[int, Ge(10), Ge(0)]], ..., 1, True, id="list-repeated"),
+    pytest.param(list[Annotated[Optional[Annotated[int, Le(0)]], Le(10)]], ..., 1, True,
                  id="list-optional-scopes"),
-    pytest.param(Annotated[int, _RepeatedBounds()], ..., 0, id="grouped-repeated"),
-    pytest.param(list[Annotated[int, _RepeatedBounds()]], ..., 1, id="list-grouped-repeated"),
-    pytest.param(Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)], ..., 0,
+    pytest.param(Annotated[int, _RepeatedBounds()], ..., 0, True, id="grouped-repeated"),
+    pytest.param(list[Annotated[int, _RepeatedBounds()]], ..., 1, True, id="list-grouped-repeated"),
+    pytest.param(Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)], ..., 0, False,
                  id="validator-between-bounds"),
-    pytest.param(Annotated[int, Ge(10), BeforeValidator(_identity), Ge(0)], ..., 0,
+    pytest.param(Annotated[int, Ge(10), BeforeValidator(_identity), Ge(0)], ..., 0, False,
                  id="before-validator-between-bounds"),
-    pytest.param(Annotated[int, Ge(10), WrapValidator(lambda value, handler: handler(value)), Ge(0)], ..., 0,
+    pytest.param(Annotated[int, Ge(10), WrapValidator(lambda value, handler: handler(value)), Ge(0)], ..., 0, False,
                  id="wrap-validator-between-bounds"),
-    pytest.param(Annotated[int, _GeSubclass(10)], ..., 0, id="ge-subclass"),
-    pytest.param(Annotated[int, _NestedBounds()], ..., 0, id="nested-grouped"),
-    pytest.param(Annotated[int, _CustomInterval(ge=10, le=10)], ..., 0, id="custom-interval"),
-    pytest.param(Annotated[int, _FieldBounds()], ..., 0, id="grouped-field-info"),
-    pytest.param(list[Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)]], ..., 1,
+    pytest.param(Annotated[int, _GeSubclass(10)], ..., 0, True, id="ge-subclass"),
+    pytest.param(Annotated[int, _NestedBounds()], ..., 0, True, id="nested-grouped"),
+    pytest.param(Annotated[int, _CustomInterval(ge=10, le=10)], ..., 0, True, id="custom-interval"),
+    pytest.param(Annotated[int, _FieldBounds()], ..., 0, True, id="grouped-field-info"),
+    pytest.param(list[Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)]], ..., 1, False,
                  id="list-validator-between-bounds"),
-    pytest.param(Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Field(ge=0), 0,
+    pytest.param(Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Field(ge=0), 0, False,
                  id="optional-field-validator-between-bounds"),
-    pytest.param(Annotated[Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Ge(0)], ..., 0,
+    pytest.param(Annotated[Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Ge(0)], ..., 0, False,
                  id="optional-outer-validator-between-bounds"),
-    pytest.param(list[Annotated[Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Ge(0)]], ..., 1,
+    pytest.param(list[Annotated[Optional[Annotated[int, Ge(10), AfterValidator(_identity)]], Ge(0)]], ..., 1, False,
                  id="list-optional-validator-between-bounds"),
-    pytest.param(Annotated[int, Ge(0), Le(10), _IntChain()], ..., 0, id="multiple-int-schemas"),
+    pytest.param(Annotated[int, Ge(0), Le(10), _IntChain()], ..., 0, True, id="multiple-int-schemas"),
+    pytest.param(Annotated[int, Ge(10), AfterValidator(_shift)], ..., 0, False,
+                 id="after-shifts-value"),
+    pytest.param(Annotated[int, Ge(10), AfterValidator(_shift), Ge(0)], ..., 0, False,
+                 id="after-shifts-then-checks"),
+    pytest.param(Annotated[int, Ge(10), WrapValidator(lambda value, handler: _shift(value))], ..., 0, False,
+                 id="wrap-skips-handler-and-shifts"),
+    pytest.param(Annotated[int, Ge(10), BeforeValidator(_identity)], ..., 0, False,
+                 id="before-output-is-bounded"),
+    pytest.param(Annotated[int, Ge(10), BeforeValidator(_shift)], ..., 0, False,
+                 id="before-shifts-value"),
+    pytest.param(list[Annotated[int, Ge(10), AfterValidator(_shift)]], ..., 1, False,
+                 id="list-after-shifts-value"),
+    pytest.param(Optional[Annotated[int, Ge(10), AfterValidator(_shift)]], ..., 0, False,
+                 id="optional-after-shifts-value"),
+    pytest.param(Annotated[int, Ge(10), _ShiftChain()], ..., 0, False,
+                 id="chain-last-step-shifts-value"),
+    pytest.param(Annotated[int, Ge(10), _LastIntChain()], ..., 0, False,
+                 id="chain-last-int-defines-output-bounds"),
+    pytest.param(Annotated[int, _RefChain()], ..., 0, False, id="chain-definitions-and-refs"),
 ])
 @pytest.mark.parametrize("plan", ["row", "columnar"])
-def test_integer_bounds_accept_exactly_pydantic_values(annotation, default, depth, plan):
+def test_integer_bounds_accept_pydantic_held_values(annotation, default, depth, exact, plan):
     model = create_model("Constrained", x=(annotation, default))
     codec = compile(model, validate=False, plan=plan)
-    for candidate in [*range(-3, 14), None]:
+    accepted = 0
+    for candidate in [*range(-3, 14), *range(-200, -79), *range(97, 114), None]:
         value = candidate
         for _ in range(depth):
             value = [value]
         payload = {"x": value}
         try:
-            model.model_validate(payload)
-            model_accepts = True
+            instance = model.model_validate(payload)
         except ValidationError:
             model_accepts = False
-        try:
-            encoded = codec.encode(payload)
-            codec_accepts = True
-        except EncodeError:
-            codec_accepts = False
-        assert codec_accepts == model_accepts, payload
-        if codec_accepts:
-            assert codec.decode(encoded) == payload
+        else:
+            model_accepts = True
+            accepted += 1
+            held = instance.model_dump()
+            assert codec.decode(codec.encode(instance)) == held
+            assert codec.decode_body(codec.encode_body(instance)) == held
+        if exact:
+            try:
+                encoded = codec.encode(payload)
+                codec_accepts = True
+            except EncodeError:
+                codec_accepts = False
+            assert codec_accepts == model_accepts, payload
+            if codec_accepts:
+                assert codec.decode(encoded) == payload
+    assert accepted > 0
 
 
 @pytest.mark.parametrize("annotation,default,int_schema,node", [
@@ -331,7 +391,7 @@ def test_integer_bounds_accept_exactly_pydantic_values(annotation, default, dept
     (list[Annotated[Optional[Annotated[int, Ge(10)]], Ge(0)]], ...,
      {"type": "int", "ge": 0}, {"kind": "int", "min": 0}),
     (Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)], ...,
-     {"type": "int", "ge": 10}, {"kind": "int", "min": 10}),
+     {"type": "int", "ge": 10}, {"kind": "int"}),
     (Annotated[int, _GeSubclass(10)], ..., {"type": "int"}, {"kind": "int"}),
     (Annotated[int, _NestedBounds()], ..., {"type": "int"}, {"kind": "int"}),
     (Annotated[int, _CustomInterval(ge=10, le=10)], ...,
@@ -372,6 +432,62 @@ def test_plain_validator_does_not_use_serialization_schema_bounds():
     for value in (-1, 0, 10):
         payload = {"x": value}
         assert model.model_validate(payload).model_dump() == codec.decode(codec.encode(payload)) == payload
+
+
+@pytest.mark.parametrize("annotation,node", [
+    (Annotated[int, Ge(10), AfterValidator(_shift)], {"kind": "int"}),
+    (Annotated[int, Ge(10), AfterValidator(_shift), Ge(0)], {"kind": "int"}),
+    (Annotated[int, Ge(10), WrapValidator(lambda value, handler: _shift(value))], {"kind": "int"}),
+    (Annotated[int, Ge(10), BeforeValidator(_shift)], {"kind": "int", "min": 10}),
+    (Annotated[int, BeforeValidator(_identity), Ge(10)], {"kind": "int"}),
+    (Annotated[int, Ge(10), _ShiftChain()], {"kind": "int"}),
+    (Annotated[int, Ge(10), _LastIntChain()], {"kind": "int", "min": -100, "max": -80}),
+    (Annotated[int, _RefChain()], {"kind": "int"}),
+])
+def test_integer_bounds_only_follow_output_schema(annotation, node):
+    model = create_model("Constrained", x=(annotation, ...))
+    assert to_ir(model)["fields"][0]["type"] == node
+
+
+@pytest.mark.parametrize("schema", [
+    core_schema.lax_or_strict_schema(core_schema.int_schema(ge=10), core_schema.int_schema(le=0)),
+    core_schema.json_or_python_schema(core_schema.int_schema(ge=10), core_schema.int_schema(le=0)),
+    core_schema.union_schema([core_schema.int_schema(le=0), core_schema.int_schema(ge=10)]),
+    core_schema.with_default_schema(core_schema.int_schema(ge=10), default=-90),
+], ids=["lax-or-strict", "json-or-python", "union", "default"])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_integer_schema_branches_and_defaults_are_unbounded(schema, plan):
+    class OutputSchema:
+        def __get_pydantic_core_schema__(self, source, handler):
+            return deepcopy(schema)
+
+    model = create_model("Constrained", x=(Annotated[int, OutputSchema()], ...))
+    assert to_ir(model)["fields"][0]["type"] == {"kind": "int"}
+    codec = compile(model, validate=False, plan=plan)
+    accepted = 0
+    for payload in [{}, *({"x": value} for value in (-90, -3, 0, 10, 13))]:
+        try:
+            instance = model.model_validate(payload)
+        except ValidationError:
+            continue
+        accepted += 1
+        assert codec.decode(codec.encode(instance)) == instance.model_dump()
+    assert accepted > 0
+
+
+@pytest.mark.parametrize("convert", [to_ir, compile])
+def test_invalid_integer_metadata_is_unsupported_with_cause(convert):
+    annotation = list[Annotated[int, Ge("odd")]]
+    with pytest.raises(SchemaError):
+        create_model("Invalid", x=(annotation, ...))
+    model = create_model("Deferred", __config__=ConfigDict(defer_build=True), x=(annotation, ...))
+    with pytest.raises(SchemaError):
+        model.model_rebuild(_types_namespace={})
+    with pytest.raises(UnsupportedSchemaError) as err:
+        convert(model)
+    assert err.value.code == "unsupported"
+    assert err.value.path == "$.x[]"
+    assert isinstance(err.value.__cause__, SchemaError)
 
 
 def test_unconstrained_integer_leaves_do_not_build_type_adapters(monkeypatch):

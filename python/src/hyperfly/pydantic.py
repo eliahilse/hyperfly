@@ -24,30 +24,30 @@ def _unsupported(path: str, message: str) -> NoReturn:
 def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]:
     if not metadata:
         return None, None
-    schema = TypeAdapter[Any](typing.Annotated[(int, *metadata)]).core_schema
-    pending: list[Any] = [schema]
+    try:
+        schema = TypeAdapter[Any](typing.Annotated[(int, *metadata)]).core_schema
+        # Only follow schemas whose output is the value stored on the model.
+        while True:
+            if schema["type"] == "function-before":
+                schema = schema["schema"]
+            elif schema["type"] == "chain":
+                schema = schema["steps"][-1]
+            elif schema["type"] == "int":
+                break
+            else:
+                return None, None
+    except Exception as error:
+        raise UnsupportedSchemaError(path, f"cannot build integer validation schema: {error}") from error
     lower: list[int] = []
     upper: list[int] = []
-    while pending:
-        current = pending.pop()
-        if isinstance(current, dict):
-            if current.get("type") == "int":
-                if "ge" in current:
-                    lower.append(_ceil_int(current["ge"], path))
-                if "gt" in current:
-                    lower.append(_floor_int(current["gt"], path) + 1)
-                if "le" in current:
-                    upper.append(_floor_int(current["le"], path))
-                if "lt" in current:
-                    upper.append(_ceil_int(current["lt"], path) - 1)
-            else:
-                # Only validation schemas contribute bounds, not metadata or serialization.
-                pending.extend(
-                    value for key, value in current.items()
-                    if key not in ("metadata", "serialization", "function", "json_schema_input_schema")
-                )
-        elif isinstance(current, (list, tuple)):
-            pending.extend(current)
+    if "ge" in schema:
+        lower.append(_ceil_int(schema["ge"], path))
+    if "gt" in schema:
+        lower.append(_floor_int(schema["gt"], path) + 1)
+    if "le" in schema:
+        upper.append(_floor_int(schema["le"], path))
+    if "lt" in schema:
+        upper.append(_ceil_int(schema["lt"], path) - 1)
     return max(lower, default=None), min(upper, default=None)
 
 
