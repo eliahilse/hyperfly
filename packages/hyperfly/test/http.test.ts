@@ -751,6 +751,8 @@ describe("request body limits", () => {
   test.each([
     ["Uint8Array", () => new Uint8Array(1)],
     ["Buffer", () => Buffer.alloc(1)],
+    ["Uint8Array view", () => new Uint8Array(16).subarray(5, 6)],
+    ["Buffer view", () => Buffer.alloc(16).subarray(8, 9)],
   ])("copies each %s chunk before the stream reuses its buffer", async (_, alloc) => {
     const buffer = alloc();
     const digits = new TextEncoder().encode("12");
@@ -763,6 +765,22 @@ describe("request body limits", () => {
       },
     }, { highWaterMark: 0 });
     expect(await readBody(new Request(url, { method: "POST", body }), registry)).toEqual({ ok: true, value: 12 });
+  });
+
+  test.each([
+    ["ArrayBuffer", () => new Uint8Array([0x31]).buffer],
+    ["Uint16Array", () => new Uint16Array([0x31])],
+    ["string", () => "1"],
+  ])("refuses a %s chunk with 400", async (_, chunk) => {
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunk());
+        controller.close();
+      },
+    });
+    const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.response.status).toBe(400);
   });
 
   test.each(["-1", "1.5", "1x"])("ignores invalid Content-Length %s", async (contentLength) => {

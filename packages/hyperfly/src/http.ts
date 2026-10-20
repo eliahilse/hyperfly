@@ -502,6 +502,7 @@ async function readLimited(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (!(value instanceof Uint8Array)) return { ok: false, status: 400 };
         length += value.byteLength;
         if (length > maxBytes) {
           try {
