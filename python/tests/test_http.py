@@ -6,8 +6,8 @@ import tracemalloc
 from enum import Enum, IntEnum
 
 import pytest
-from conftest import load, serializer_warnings, warning_details
-from pydantic import VERSION, BaseModel
+from conftest import load, pydantic_version, serializer_warnings, warning_details
+from pydantic import BaseModel
 
 from hyperfly import HEADER_SIZE, WIRE_VERSION, CodecRegistry, DecodeError, EncodeError, HyperflyError, Limits, compile_ir
 from hyperfly.http import (
@@ -27,7 +27,7 @@ from hyperfly.http import (
 from hyperfly.pydantic import compile as compile_model
 
 IR = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}]}
-PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:2])
+PYDANTIC_VERSION = pydantic_version()
 IR_B = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}, {"name": "n", "type": {"kind": "int"}}]}
 CODEC_A = compile_ir(IR)
 CODEC_B = compile_ir(IR_B)

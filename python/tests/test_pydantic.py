@@ -6,13 +6,13 @@ from typing import Annotated, Generic, Literal, Optional, TypeVar, get_args, get
 import pytest
 from annotated_types import Ge, GroupedMetadata, Gt, Interval, Le, Lt
 from pydantic import (
-    VERSION, AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
+    AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
     WrapValidator, confloat, conint, constr, create_model, field_validator, model_validator,
 )
 from pydantic_core import SchemaError, core_schema
 from pydantic.fields import FieldInfo
 
-from conftest import load, serializer_warnings, warning_details
+from conftest import load, pydantic_version, serializer_warnings, warning_details
 from hyperfly import (
     INT_MAX, INT_MIN, Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError,
     UnsupportedSchemaError, compile_ir,
@@ -21,7 +21,7 @@ from hyperfly.pydantic import ModelCodec, compile, to_ir
 from hyperfly.pydantic import _same_schema, _SchemaMismatch
 
 
-PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:3])
+PYDANTIC_VERSION = pydantic_version()
 
 
 class _EqualFloat(float):

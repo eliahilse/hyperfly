@@ -1,11 +1,23 @@
 import json
 import pathlib
+import re
 import sys
 import warnings
 from contextlib import contextmanager
 
 
 VECTOR_DIR = pathlib.Path(__file__).resolve().parents[2] / "spec" / "vectors"
+
+
+def pydantic_version() -> tuple[int, int, int]:
+    """Compare prereleases using their numeric release version."""
+    from pydantic import VERSION
+
+    major, minor, patch = (
+        int(re.split(r"\D", part, maxsplit=1)[0])
+        for part in VERSION.split(".")[:3]
+    )
+    return major, minor, patch
 
 
 def load(name: str):
