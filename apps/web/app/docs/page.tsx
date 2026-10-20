@@ -180,9 +180,12 @@ export default {
           <p className="docs-prose">
             A client with no codec gets JSON plus <code>Hyperfly-Offer</code>. After fetching and
             registering that artifact, it advertises the fingerprint and can receive binary on
-            the next request. Responses carry <code>Vary: Hyperfly-Accept, Accept</code>; if the
-            encoder refuses a value under its limits, <code>respond</code> falls back to JSON and
-            calls <code>onFallback(error)</code>.
+            the next request. Responses carry <code>Vary: Hyperfly-Accept, Accept</code>. If the
+            encoder refuses a value under its limits (code <code>limit</code> or <code>depth</code>),
+            {" "}<code>respond</code> sends it as JSON instead and calls <code>onFallback(error)</code>;
+            any other encode error is thrown. See the <a href={`${README}#json-fallback`}>JSON
+            fallback</a> and, for Node and Express servers, the{" "}
+            <a href={`${README}#node-and-express`}>Express example</a>.
           </p>
           <p className="docs-prose">
             Put discovery behind the same authorization as the route and use a separate registry
@@ -200,7 +203,7 @@ export default {
               returned error response when <code>ok</code> is false.
             </p>
           </div>
-          <CodeBlock label="TypeScript · request body">{`import { readBody } from "hyperfly/http";
+          <CodeBlock label="TypeScript · request body">{`import { readBody, respond } from "hyperfly/http";
 
 async function receive(request: Request) {
   const result = await readBody(request, registry, { maxBytes: 1 << 20 });
@@ -238,7 +241,7 @@ async function getEvents(url: string) {
   const decoded = decodeResponse(result.headers.get("content-type"), bytes, registry);
   if (decoded.kind === "unknown-codec") throw new Error("Unadvertised codec");
   const offer = result.headers.get("hyperfly-offer");
-  if (decoded.kind === "json" && offer) {
+  if (decoded.kind === "json" && offer && !registry.has(offer)) {
     const codec = await fetchArtifact(new URL(url).origin, offer);
     if (codec) registry.add(codec);
   }
@@ -258,12 +261,19 @@ async function getEvents(url: string) {
             <h2 className="section-title" id="limits-title">Limits</h2>
           </div>
           <p className="docs-prose">
-            Limits are local to each peer, are not negotiated, and are not part of the fingerprint.
-            For dense routes such as width-zero telemetry or arrays of literals, raise
-            {" "}<code>maxAmplification</code> and <code>maxTotalItems</code> on both peers as needed;
-            see the <a href={`${README}#limits`}>README limits reference</a> and
-            {" "}<a href={`${GITHUB}/blob/main/spec/wire-v0.md#6-limits`}>wire v0 §6</a> for defaults
-            and configuration.
+            A decoder bounds nesting, array counts, value lengths, and two per-body budgets: the
+            sum of all array counts and the sum of all decoded string and bytes lengths, each
+            scaled to the body&apos;s length. Encoders apply the same limits; over HTTP, a value past them
+            falls back to JSON. Limits are local to each peer, are not negotiated, and are not
+            part of the fingerprint.
+          </p>
+          <p className="docs-prose">
+            For dense routes, such as long runs of constant columns, arrays of literals, or strings
+            that are mostly dictionary hits, raise them on both peers: <code>maxAmplification</code>
+            {" "}for items and <code>maxByteAmplification</code> for bytes, with the{" "}
+            <code>limits</code> option to <code>compile</code> and <code>fetchArtifact</code>. See the{" "}
+            <a href={`${README}#limits`}>README limits reference</a> for defaults and{" "}
+            <a href={`${GITHUB}/blob/main/spec/wire-v0.md#6-limits`}>wire v0 §6</a> for the rules.
           </p>
         </section>
 
@@ -274,6 +284,8 @@ async function getEvents(url: string) {
           </div>
           <ul className="docs-list">
             <li><a href={`${README}#readme`}>Package README</a>: API, limits, errors, and runtime support.</li>
+            <li><a href={`${README}#errors`}>Error codes</a>: every <code>HyperflyError</code> code and its <code>cause</code>.</li>
+            <li><a href={`${README}#runtime-support`}>Runtime support</a>: Node, Bun, Deno, Workers, and browsers.</li>
             <li><a href={`${GITHUB}/blob/main/python/README.md`}>Python README</a>: Pydantic and Python HTTP helpers.</li>
             <li><a href={`${GITHUB}/blob/main/rust/README.md`}>Rust crate README</a>: the Rust codec.</li>
             <li><a href={`${GITHUB}/blob/main/spec/wire-v0.md`}>wire-v0</a>: envelope, primitives, and limits.</li>
