@@ -1,62 +1,43 @@
 # @hyperfly/bench
 
-Private benchmark harness. Compares the v0 schema-compiled row codec against
-JSON and generic compression on three deterministic synthetic corpora.
+Private benchmark harness with timing and corpus/profile suites on deterministic
+synthetic data.
 
 ```bash
 bun run build        # from the repo root, builds hyperfly first
 cd apps/bench && bun run bench
 ```
 
-## Corpora
+## Timing suite
 
-| corpus | shape | expectation |
-|---|---|---|
-| candles | numeric OHLCV rows, f64-heavy | weak under plan `row`; the flagship under plan `columnar` (delta timestamps, scaled-decimal prices) |
-| devices | enums, bounded ints, booleans | favorable for schema-only encoding under either plan |
-| feed | prose bodies, ids, names | thinnest margin — text columns deflate inside the codec (packed string mode), nested authors flatten into leaf columns |
+`src/run.ts` measures candles (100/1,000 rows), devices (50/500 records), and feed
+(10/50 posts). Contenders are `json`, `json+gzip6`, `json+br4`, `json+br6`,
+`json+br11`, `protobuf`, `msgpack`, `cbor`, `hf-row`, and `hf-col`. Each binary
+contender also has a `+br4` variant. MessagePack and CBOR are schemaless.
 
-## Fairness rules
+Each contender round-trips the same payload before timing. The suite reports wire
+bytes and encode/decode p50/p95 after warmup, including serialization and
+compression in each pipeline. Hyperfly bytes include the 19-byte envelope. Brotli
+uses TEXT mode for JSON and GENERIC for binary, with a size hint for both.
+Results are written to `results/results.json`.
 
-- Deterministic seeds; payloads identical across contenders, verified by
-  round-trip deep-equality before any timing.
-- gzip level 6 (zlib/Express default). Brotli q4 — what edges actually run on
-  dynamic responses (Cloudflare's documented dynamic level) and the primary
-  baseline for any realistic claim; q6 (ngx_brotli's default) for
-  origin-compression setups; q11 is the offline ceiling for pre-compressed
-  static assets — report it, never present it as a dynamic choice. TEXT mode
-  + size hint for JSON inputs, GENERIC for binary.
-- `hyperfly+br4` is included because transport compression exists in real
-  deployments; it is a valid configuration, not an admission of failure.
-- Encode/decode timed as complete pipelines (stringify+compress vs
-  encode+compress), warmup before sampling, p50/p95 reported, outputs
-  consumed to defeat dead-code elimination. Codec compile time reported
-  separately (steady-state assumption: both peers hold the artifact).
-- Wire bytes include hyperfly's full 19-byte envelope.
-- Protobuf gets a fair schema, not a strawman: proper proto enums (identifier
-  mapping applied both ways inside the timed pipeline), `sint32` for
-  negative-heavy fields, `int64` for timestamps (decoded as Number — all
-  corpus values sit inside 2^53). proto3 cannot represent null, so nullable
-  fields map null↔unset; the corpora never emit empty strings on those
-  fields, which keeps the inverse mapping lossless, and round-trips are
-  verified against the original payload.
-- MessagePack and CBOR run schemaless (their default mode — field names on
-  the wire), which is the honest comparison: schema-aware is precisely the
-  thing being measured against.
-- Every binary contender gets the same +br4 stacking option hyperfly gets.
-- Two known minor biases, disclosed rather than hidden: the route discriminator
-  is a schema literal Hyperfly erases to zero bytes but Protobuf sends as a
-  field (≈6–9 B/message in Hyperfly's favour), and the reported "codec compile"
-  time covers both Hyperfly plan compilations while Protobuf's `Root.fromJSON`
-  runs during suite construction outside the timer. Neither moves the byte
-  ranking; both are why these numbers stay private until a fresh-process,
-  matched-setup harness replaces them.
+## Corpus/profile suite
 
-## What these numbers are NOT
+`src/profiles.ts` averages bytes per message over 500 responses per route:
+candles, devices, feed, audit events, and single orders. It measures JSON, JSON
+with gzip6 or Brotli q4, Protobuf, columnar Hyperfly, and profiled columnar
+Hyperfly, including Brotli q4 variants of both Hyperfly codecs. The printed table
+omits gzip. Profiled messages are checked for round-trip equality.
 
-In-process, single-machine, synthetic-corpus results. They exist to guide
-development, not to be published. Public claims need: real-world frozen
-payload snapshots, Protobuf (non-negotiable) plus MessagePack/CBOR baselines,
-fresh-process runs with randomized contender order, and cold-start /
-break-even reporting alongside steady-state. That harness lands with the
-first public benchmark, not before.
+Profiles are trained and evaluated on the same synthetic corpus, with no held-out
+data. Dictionary size is an approximation: UTF-8 dictionary and derived values
+plus one byte per entry, and JSON-serialized grammar sizes. It excludes the full
+artifact overhead. The reported request break-even uses this estimate and the
+rounded average byte savings over unprofiled columnar Hyperfly.
+
+## Limits
+
+Timings are in-process on one machine, with fixed contender order. The reported
+compile time includes both Hyperfly plans; Protobuf setup runs outside that timer.
+Hyperfly omits the schema-literal route discriminator that Protobuf sends. These
+synthetic results do not measure production traffic, cold starts, or network cost.
