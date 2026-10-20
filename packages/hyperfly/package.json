@@ -3,6 +3,10 @@
   "version": "1.0.0-alpha.0",
   "description": "Binary compression for typed APIs. Schema-compiled codecs with a fingerprinted wire format and transparent JSON fallback.",
   "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ._ir import (
     LEAF_KINDS,
+    _fail,
     column_count,
     fingerprint_of,
     has_payload,
@@ -1599,11 +1600,17 @@ class Codec:
 
 
 def compile_ir(
-    ir: dict[str, Any],
+    ir: Any,
     *,
     plan: str = "row",
     limits: Limits | None = None,
     pack=None,
-    profile: dict[str, Any] | None = None,
+    profile: Any = None,
 ) -> Codec:
-    return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)
+    try:
+        return Codec(ir, plan, limits or DEFAULT_LIMITS, pack, profile)
+    except RecursionError:
+        # TS has no schema depth limit. Python's recursive validation, copying,
+        # serialization and profile column walk share an interpreter limit;
+        # report it as invalid IR rather than leaking an interpreter exception.
+        _fail("$", "IR or profile nesting exceeds Python's recursion limit")
