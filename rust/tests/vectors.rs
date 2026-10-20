@@ -67,6 +67,9 @@ fn value_of(json: &Json) -> Value {
         }
         Json::String(s) => Value::Str(s.clone()),
         Json::Array(items) => Value::Array(items.iter().map(value_of).collect()),
+        Json::Object(entries) if entries.len() == 1 && entries.contains_key("$bytes") => {
+            Value::Bytes(from_hex(entries["$bytes"].as_str().unwrap()))
+        }
         Json::Object(entries) => Value::Object(
             entries
                 .iter()
@@ -184,6 +187,129 @@ fn columnar_vectors() {
             .unwrap();
         assert!(deep_eq(&decoded, &value_of(&v["value"])), "{}", v["name"]);
     }
+}
+
+fn limits_codec(vector: &Json) -> Codec {
+    let plan = match vector["plan"].as_str().unwrap() {
+        "row" => Plan::Row,
+        "columnar" => Plan::Columnar,
+        other => panic!("unknown plan {other}"),
+    };
+    let mut limits = Limits::default();
+    if let Some(overrides) = vector.get("limits") {
+        for (key, value) in overrides.as_object().unwrap() {
+            let value = value.as_u64().unwrap();
+            match key.as_str() {
+                "maxDepth" => limits.max_depth = u32::try_from(value).unwrap(),
+                "maxItems" => limits.max_items = value,
+                "maxByteLength" => limits.max_byte_length = value,
+                "maxAmplification" => limits.max_amplification = value,
+                "maxTotalItems" => limits.max_total_items = value,
+                other => panic!("unknown limit {other}"),
+            }
+        }
+    }
+    Codec::compile(node_of(&vector["ir"]), plan, limits, true).unwrap()
+}
+
+#[test]
+fn limits_vectors() {
+    let file = load("limits.json");
+    for section in ["valid", "invalidDecode", "invalidEncode", "decodeOnly"] {
+        for vector in file[section].as_array().unwrap() {
+            let name = vector["name"].as_str().unwrap();
+            let codec = limits_codec(vector);
+            match section {
+                "valid" => {
+                    let value = value_of(&vector["value"]);
+                    let body = from_hex(vector["hex"].as_str().unwrap());
+                    assert_eq!(
+                        codec
+                            .encode_body(&value)
+                            .unwrap_or_else(|e| panic!("{name}: {e}")),
+                        body,
+                        "{name}: bytes"
+                    );
+                    let decoded = codec
+                        .decode_body(&body)
+                        .unwrap_or_else(|e| panic!("{name}: {e}"));
+                    assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
+                }
+                "invalidDecode" => {
+                    let error = codec
+                        .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
+                        .expect_err(name);
+                    assert_eq!(
+                        error.code.as_str(),
+                        vector["error"].as_str().unwrap(),
+                        "{name}"
+                    );
+                }
+                "invalidEncode" => {
+                    let value = value_of(&vector["value"]);
+                    let expected = vector["error"].as_str().unwrap();
+                    assert_eq!(
+                        codec.encode_body(&value).expect_err(name).code.as_str(),
+                        expected,
+                        "{name}"
+                    );
+                    assert_eq!(
+                        codec.encode(&value).expect_err(name).code.as_str(),
+                        expected,
+                        "{name}"
+                    );
+                }
+                "decodeOnly" => {
+                    let value = value_of(&vector["value"]);
+                    let decoded = codec
+                        .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
+                        .unwrap_or_else(|e| panic!("{name}: {e}"));
+                    assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
+                    assert_eq!(
+                        codec.encode_body(&value).expect_err(name).code.as_str(),
+                        "limit",
+                        "{name}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn columnar_hostile_count_fails_before_decoding_columns() {
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(
+            ["a", "b"]
+                .into_iter()
+                .map(|name| Field {
+                    name: name.into(),
+                    ty: Node::Int {
+                        min: None,
+                        max: None,
+                    },
+                    optional: false,
+                    nullable: false,
+                })
+                .collect(),
+        )),
+        length: None,
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let rem = 2042 - 4;
+    let count = 4096 * (rem + 1);
+    let mut body = Vec::new();
+    let mut rest = count;
+    while rest >= 0x80 {
+        body.push((rest & 0x7f) as u8 | 0x80);
+        rest >>= 7;
+    }
+    body.push(rest as u8);
+    assert_eq!(body.len(), 4);
+    body.extend_from_slice(&[0x02, 0x00, 0x00, 0xff]);
+    body.resize(2042, 0);
+    assert_eq!(codec.decode_body(&body).unwrap_err().code.as_str(), "limit");
 }
 
 #[test]
