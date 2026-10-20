@@ -1,18 +1,58 @@
 from copy import deepcopy
 from enum import Enum
+from math import ceil, floor
 from typing import Annotated, Literal, Optional
 
 import pytest
 from annotated_types import Ge, GroupedMetadata, Gt, Interval, Le, Lt
 from pydantic import (
-    AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
+    VERSION, AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, PlainValidator, ValidationError,
     WrapValidator, confloat, conint, constr, create_model, field_validator,
 )
 from pydantic_core import SchemaError, core_schema
 
 from conftest import load
-from hyperfly import Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
+from hyperfly import (
+    INT_MAX, INT_MIN, Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError,
+    UnsupportedSchemaError, compile_ir,
+)
 from hyperfly.pydantic import ModelCodec, compile, to_ir
+
+
+PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:2])
+
+
+def _assert_integer_leaf_matches_model_output(model):
+    schema = model.__pydantic_core_schema__
+    if schema["type"] == "definitions":
+        schema = schema["schema"]
+    schema = schema["schema"]["fields"]["x"]["schema"]
+    while schema["type"] in ("list", "nullable", "function-before", "chain"):
+        if schema["type"] == "list":
+            schema = schema["items_schema"]
+        elif schema["type"] == "chain":
+            schema = schema["steps"][-1]
+        else:
+            schema = schema["schema"]
+    expected = {"kind": "int"}
+    if schema["type"] == "int":
+        lower, upper = [INT_MIN], [INT_MAX]
+        if "ge" in schema:
+            lower.append(ceil(schema["ge"]))
+        if "gt" in schema:
+            lower.append(floor(schema["gt"]) + 1)
+        if "le" in schema:
+            upper.append(floor(schema["le"]))
+        if "lt" in schema:
+            upper.append(ceil(schema["lt"]) - 1)
+        if max(lower) != INT_MIN:
+            expected["min"] = max(lower)
+        if min(upper) != INT_MAX:
+            expected["max"] = min(upper)
+    actual = to_ir(model)["fields"][0]["type"]
+    while actual["kind"] in ("array", "nullable"):
+        actual = actual["element"] if actual["kind"] == "array" else actual["inner"]
+    assert actual == expected
 
 
 class Candle(BaseModel):
@@ -354,6 +394,7 @@ def test_optional_inner_metadata_merges_with_field_metadata():
 @pytest.mark.parametrize("plan", ["row", "columnar"])
 def test_integer_bounds_accept_pydantic_held_values(annotation, default, depth, exact, plan):
     model = create_model("Constrained", x=(annotation, default))
+    _assert_integer_leaf_matches_model_output(model)
     codec = compile(model, validate=False, plan=plan)
     accepted = 0
     for candidate in [*range(-3, 14), *range(-200, -79), *range(97, 114), None]:
@@ -383,32 +424,31 @@ def test_integer_bounds_accept_pydantic_held_values(annotation, default, depth, 
     assert accepted > 0
 
 
-@pytest.mark.parametrize("annotation,default,int_schema,node", [
-    (Annotated[int, Ge(10)], Field(ge=0), {"type": "int", "ge": 10}, {"kind": "int", "min": 10}),
-    (Annotated[int, Field(ge=0)], Field(ge=10), {"type": "int", "ge": 0}, {"kind": "int", "min": 0}),
+@pytest.mark.parametrize("annotation,default,int_schema", [
+    (Annotated[int, Ge(10)], Field(ge=0), {"type": "int", "ge": 10}),
+    (Annotated[int, Field(ge=0)], Field(ge=10),
+     {"type": "int", "ge": 10 if PYDANTIC_VERSION < (2, 12) else 0}),
     (Annotated[Optional[Annotated[int, Ge(10)]], Field(ge=5)], Field(ge=0),
-     {"type": "int", "ge": 5}, {"kind": "int", "min": 5}),
+     {"type": "int", "ge": 0 if PYDANTIC_VERSION < (2, 12) else 5}),
     (list[Annotated[Optional[Annotated[int, Ge(10)]], Ge(0)]], ...,
-     {"type": "int", "ge": 0}, {"kind": "int", "min": 0}),
+     {"type": "int", "ge": 0}),
     (Annotated[int, Ge(10), AfterValidator(_identity), Ge(0)], ...,
-     {"type": "int", "ge": 10}, {"kind": "int"}),
-    (Annotated[int, _GeSubclass(10)], ..., {"type": "int"}, {"kind": "int"}),
-    (Annotated[int, _NestedBounds()], ..., {"type": "int"}, {"kind": "int"}),
+     {"type": "int", "ge": 10}),
+    (Annotated[int, _GeSubclass(10)], ...,
+     {"type": "int", "ge": 10} if PYDANTIC_VERSION < (2, 9) else {"type": "int"}),
+    (Annotated[int, _NestedBounds()], ..., {"type": "int"}),
     (Annotated[int, _CustomInterval(ge=10, le=10)], ...,
-     {"type": "int", "ge": 2, "le": 8}, {"kind": "int", "min": 2, "max": 8}),
+     {"type": "int", "ge": 2, "le": 8}),
     (Annotated[int, _FieldBounds()], ...,
-     {"type": "int", "ge": 2, "le": 8, "metadata": {}}, {"kind": "int", "min": 2, "max": 8}),
+     {"type": "int", "ge": 2, "le": 8}),
 ])
-def test_integer_leaf_matches_models_own_core_schema(annotation, default, int_schema, node):
+def test_integer_leaf_matches_models_own_core_schema(annotation, default, int_schema):
     model = create_model("Constrained", x=(annotation, default))
     schema = model.__pydantic_core_schema__["schema"]["fields"]["x"]["schema"]
     while schema["type"] != "int":
         schema = schema["items_schema"] if schema["type"] == "list" else schema["schema"]
-    assert schema == int_schema
-    actual = to_ir(model)["fields"][0]["type"]
-    while actual["kind"] in ("array", "nullable"):
-        actual = actual["element"] if actual["kind"] == "array" else actual["inner"]
-    assert actual == node
+    assert {key: value for key, value in schema.items() if key != "metadata"} == int_schema
+    _assert_integer_leaf_matches_model_output(model)
 
 
 @pytest.mark.parametrize("validator", [
@@ -561,16 +601,22 @@ def test_nonportable_nested_field_name_keeps_adapter_path():
     assert err.value.path == "$.rows[].x"
 
 
-@pytest.mark.parametrize("annotation,node", [
-    (list[Annotated[float, Ge(0)]], {"kind": "array", "element": {"kind": "float64"}}),
-    (list[Annotated[str, Ge(0)]], {"kind": "array", "element": {"kind": "string"}}),
-    (list[Annotated[list[int], Ge(0)]], {"kind": "array", "element": {"kind": "array", "element": {"kind": "int"}}}),
+@pytest.mark.parametrize("annotation,node,rejects_constraint", [
+    (list[Annotated[float, Ge(0)]], {"kind": "array", "element": {"kind": "float64"}}, False),
+    (list[Annotated[str, Ge(0)]], {"kind": "array", "element": {"kind": "string"}}, False),
+    (list[Annotated[list[int], Ge(0)]],
+     {"kind": "array", "element": {"kind": "array", "element": {"kind": "int"}}}, PYDANTIC_VERSION < (2, 9)),
     (list[Annotated[_Nested, Ge(0)]],
-     {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "n", "type": {"kind": "int"}}]}}),
-    (list[Annotated[_Tag, Ge(0)]], {"kind": "array", "element": {"kind": "enum", "members": ["a", "b"]}}),
+     {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "n", "type": {"kind": "int"}}]}}, False),
+    (list[Annotated[_Tag, Ge(0)]], {"kind": "array", "element": {"kind": "enum", "members": ["a", "b"]}}, False),
 ])
-def test_nested_bounds_only_apply_to_int_nodes(annotation, node):
-    model = create_model("Constrained", x=(annotation, ...))
+def test_nested_bounds_only_apply_to_int_nodes(annotation, node, rejects_constraint):
+    if rejects_constraint:
+        with pytest.raises(TypeError, match=r"constraints cannot be applied to list\[int\]: 'ge'"):
+            create_model("Constrained", x=(annotation, ...))
+        model = create_model("Constrained", __config__=ConfigDict(defer_build=True), x=(annotation, ...))
+    else:
+        model = create_model("Constrained", x=(annotation, ...))
     assert to_ir(model) == {"kind": "struct", "fields": [{"name": "x", "type": node}]}
 
 
