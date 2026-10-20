@@ -583,11 +583,83 @@ def test_json_fallback_rejects_circular_values():
 
 
 @pytest.mark.parametrize("factory", [bytes, bytearray])
-def test_json_fallback_writes_bytes_without_a_codec(factory):
+@pytest.mark.parametrize("nested", [False, True])
+def test_json_fallback_writes_bytes_without_a_codec(factory, nested):
     value = factory(b"\xfb\xff\xff\x00")
-    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
-    assert json.loads(body) == "+///AA=="
+    body, _ = encode_for(negotiate(None, CodecRegistry()), {"chunks": [value]} if nested else value)
+    assert json.loads(body) == ({"chunks": ["+///AA=="]} if nested else "+///AA==")
     assert value == factory(b"\xfb\xff\xff\x00")
+
+
+@pytest.mark.parametrize("payload,expected", [(b"ab", "YWI="), (b"\x00\xff", "AP8=")])
+def test_json_fallback_plain_codec_writes_declared_bytes(payload, expected):
+    codec = compile_ir({"kind": "struct", "fields": [
+        {"name": "b", "type": {"kind": "bytes"}},
+        {"name": "l", "type": {"kind": "array", "element": {"kind": "bytes"}}},
+    ]})
+    registry = CodecRegistry([codec])
+    value = {"b": payload, "l": [b"ab"]}
+    body, headers = encode_for(negotiate("application/json", registry), value)
+    assert json.loads(body) == {"b": expected, "l": ["YWI="]}
+    assert headers["Content-Type"] == "application/json"
+    assert decode_response(headers["Content-Type"], body, registry) == ("json", value)
+
+
+@pytest.mark.parametrize("subclasses", [False, True])
+def test_json_fallback_plain_containers_use_the_model_declared_overlay(subclasses):
+    from typing import Any
+    from pydantic import ConfigDict, Field, field_serializer
+
+    class Mapping(dict):
+        pass
+
+    class Sequence(list):
+        pass
+
+    class Tuple(tuple):
+        pass
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="hex", extra="allow")
+        payload: bytes = Field(serialization_alias="data")
+        raw: Any
+        secret: str
+
+        @field_serializer("secret", when_used="json")
+        def redact(self, value):
+            return "REDACTED"
+
+    mapping, sequence, pair = (Mapping, Sequence, Tuple) if subclasses else (dict, list, tuple)
+    model = Response(payload=b"\x00\xff", raw=b"ab", secret="secret", extra=b"ab")
+    value = mapping({b"key": sequence([pair((b"ab", bytearray(b"\x00\xff"))), sequence([model])])})
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"key": [["YWI=", "AP8="], [{
+        "data": "AP8=", "raw": "6162", "secret": "REDACTED", "extra": "6162",
+    }]]}
+    assert value[b"key"][0] == (b"ab", bytearray(b"\x00\xff"))
+    assert value[b"key"][1][0] is model
+
+
+def test_json_fallback_plain_container_walk_is_iterative():
+    from hyperfly.http import _json_value
+
+    value = b"\x00\xff"
+    for _ in range(2000):
+        value = {"items": (value,)}
+    converted = _json_value(value)
+    for _ in range(2000):
+        converted = converted["items"][0]
+    assert converted == "AP8="
+    with pytest.raises(EncodeError, match="circular or nested too deeply") as raised:
+        encode_for(negotiate(None, CodecRegistry()), value)
+    assert raised.value.code == "json"
+
+
+def test_json_fallback_plain_container_walk_allows_shared_values():
+    shared = {"payload": b"ab"}
+    body, _ = encode_for(negotiate(None, CodecRegistry()), [shared, shared])
+    assert json.loads(body) == [{"payload": "YWI="}, {"payload": "YWI="}]
+    assert shared == {"payload": b"ab"}
 
 
 def test_encoder_limit_falls_back_to_base64_bytes():
@@ -1852,6 +1924,10 @@ def test_json_fallback_untyped_non_utf8_errors_are_not_retried(placement):
         "any": Response(data=b"\xff"), "extra": Response(extra=b"\xff"),
         "dict": Response(mapping={"data": b"\xff"}), "plain": {"data": b"\xff"},
     }[placement]
+    if placement == "plain":
+        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == {"data": "/w=="}
+        assert calls == []
+        return
     with pytest.raises(EncodeError) as raised:
         encode_for(negotiate(None, CodecRegistry()), value)
     assert raised.value.code == "json"
@@ -1859,7 +1935,8 @@ def test_json_fallback_untyped_non_utf8_errors_are_not_retried(placement):
     assert len(calls) <= 1
 
 
-def test_json_fallback_non_model_values_follow_pydantic_json_mode():
+@pytest.mark.parametrize("nested", [False, True])
+def test_json_fallback_non_model_values_follow_pydantic_json_mode(nested):
     from dataclasses import dataclass
     from pydantic_core import to_jsonable_python
 
@@ -1867,5 +1944,9 @@ def test_json_fallback_non_model_values_follow_pydantic_json_mode():
     class Data:
         data: bytes
 
-    value = {"data": Data(b"test"), "items": [b"test", bytearray(b"second")]}
-    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == to_jsonable_python(value)
+    value = Data(b"test")
+    expected = to_jsonable_python(value)
+    if nested:
+        value = {"data": value, "items": [b"test", bytearray(b"second")]}
+        expected = {"data": expected, "items": ["dGVzdA==", "c2Vjb25k"]}
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected

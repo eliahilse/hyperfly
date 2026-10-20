@@ -394,9 +394,44 @@ def _json_value(value: Any) -> Any:
         return model_dump(mode="json", by_alias=True)
     if isinstance(value, (bytes, bytearray)):
         return _base64(value)
+    if isinstance(value, (dict, list, tuple)):
+        return _json_container(value)
     from pydantic_core import to_jsonable_python
 
     return to_jsonable_python(value)
+
+
+def _json_container(value: Any) -> Any:
+    from pydantic_core import to_jsonable_python
+
+    root: list[Any] = []
+    active: set[int] = set()
+    stack: list[tuple[Iterator[tuple[Any, Any]], Any, int | None]] = [(iter(((0, value),)), root, None)]
+    while stack:
+        children, parent, identity = stack[-1]
+        try:
+            key, item = next(children)
+        except StopIteration:
+            stack.pop()
+            if identity is not None:
+                active.remove(identity)
+            continue
+        if isinstance(item, (dict, list, tuple)) and not callable(getattr(item, "model_dump", None)):
+            if id(item) in active:
+                raise ValueError("Circular reference detected")
+            active.add(id(item))
+            converted: Any = {} if isinstance(item, dict) else []
+            entries = iter(item.items()) if isinstance(item, dict) else iter(enumerate(item))
+            stack.append((entries, converted, id(item)))
+        else:
+            converted = _json_value(item)
+        if isinstance(parent, dict):
+            # Keys retain pydantic's JSON spelling, including bytes and enums.
+            json_key = next(iter(to_jsonable_python({key: None})))
+            parent[json_key] = converted
+        else:
+            parent.append(converted)
+    return root[0]
 
 
 def _finite_json(value: Any) -> Any:
@@ -436,8 +471,9 @@ def encode_for(
 
     A value the codec refuses under its limits is answered in JSON, never an error
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
-    Bytes at declared bytes positions are standard padded base64; values in untyped
-    positions (Any, extras) follow pydantic's JSON mode.
+    In JSON fallback, plain dicts, lists and tuples write bytes as standard padded
+    base64. Pydantic models write base64 at declared bytes positions and follow
+    JSON mode elsewhere, including Any and extras. Dict keys keep their JSON spelling.
     Serialization failures raise EncodeError with code ``json``.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:
