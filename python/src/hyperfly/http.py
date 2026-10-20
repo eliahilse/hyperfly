@@ -17,7 +17,8 @@ import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Literal, NamedTuple, cast
+from types import UnionType
+from typing import Annotated, Any, Callable, Literal, NamedTuple, Union, cast, get_args, get_origin
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError
@@ -243,6 +244,45 @@ def _serialize_model_bytes(value: Any, handler: Callable[[Any], Any]) -> Any:
     return _base64(value) if isinstance(value, (bytes, bytearray)) else handler(value)
 
 
+def _declared_json_schema(annotation: Any, *, models: bool = False) -> dict[str, Any] | None:
+    """Recover bytes-only shapes, or model shapes with dynamic non-model leaves."""
+    while get_origin(annotation) is Annotated:
+        if models:
+            from pydantic import PlainSerializer, WrapSerializer
+
+            if any(isinstance(item, (PlainSerializer, WrapSerializer)) for item in get_args(annotation)[1:]):
+                # Older pydantic plain validators discard their inner schema.
+                # Leave serializer-owned positions to that original handler.
+                return {"type": "any"}
+        annotation = get_args(annotation)[0]
+    origin = get_origin(annotation)
+    if models and isinstance(annotation, type) and hasattr(annotation, "__pydantic_core_schema__"):
+        return cast(dict[str, Any], annotation.__pydantic_core_schema__)
+    if annotation is bytes and not models:
+        return {"type": "bytes"}
+    if origin in (Union, UnionType):
+        args = get_args(annotation)
+        inner = [item for item in args if item is not type(None)]
+        if len(args) == 2 and len(inner) == 1:
+            schema = _declared_json_schema(inner[0], models=models)
+            return {"type": "nullable", "schema": schema} if schema is not None else None
+    if origin is list:
+        args = get_args(annotation)
+        schema = _declared_json_schema(args[0], models=models) if args else None
+        return {"type": "list", "items_schema": schema} if schema is not None else None
+    if origin is tuple:
+        from pydantic_core import core_schema
+
+        args = get_args(annotation)
+        if len(args) == 2 and args[1] is Ellipsis:
+            schema = _declared_json_schema(args[0], models=models)
+            return dict(core_schema.tuple_variable_schema(schema)) if schema is not None else None
+        items = [_declared_json_schema(item, models=models) for item in args]
+        if items and (any(item is not None for item in items) if models else all(item is not None for item in items)):
+            return dict(core_schema.tuple_positional_schema([item or {"type": "any"} for item in items]))
+    return None
+
+
 def _build_model_json(cls: type[Any]) -> _ModelJSON:
     from pydantic_core import SchemaSerializer
 
@@ -260,8 +300,20 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
     children: dict[int, list[int]] = {}
     references: dict[str, dict[str, Any]] = {}
     active: set[int] = set()
+    plain: dict[int, dict[str, Any]] = {}
+    plain_models: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
 
-    def visit(node: dict[str, Any]) -> dict[str, Any]:
+    def has_custom_serializer(node: dict[str, Any]) -> bool:
+        serialization = node.get("serialization", {})
+        return serialization.get("type") in ("function-plain", "function-wrap") and not (
+            node["type"] == "function-plain" and serialization.get("type") == "function-wrap"
+            and serialization.get("schema") is not None
+        )
+
+    def visit(node: dict[str, Any], annotation: Any = None) -> dict[str, Any]:
+        declared_annotation = annotation
+        while get_origin(annotation) is Annotated:
+            annotation = get_args(annotation)[0]
         identity = id(node)
         if identity in copies:
             return copies[identity]
@@ -270,13 +322,20 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
         originals[identity] = node
         children[identity] = []
         kind = node["type"]
-        if node.get("serialization", {}).get("type") in ("function-plain", "function-wrap"):
+        serialization = node.get("serialization", {})
+        # PlainValidator can supply an identity wrap serializer around its
+        # original schema. User serializers have no such schema entry.
+        plain_inner = (
+            serialization.get("schema")
+            if kind == "function-plain" and serialization.get("type") == "function-wrap" else None
+        )
+        if has_custom_serializer(node):
             # Custom serializers own their whole output. Keep their original
             # subtree and config, including bytes passed through a wrap handler.
             return copied
 
-        def child(item: dict[str, Any]) -> dict[str, Any]:
-            result = visit(item)
+        def child(item: dict[str, Any], declared: Any = annotation) -> dict[str, Any]:
+            result = visit(item, declared)
             children[identity].append(id(item))
             return result
 
@@ -293,20 +352,52 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
                 active.add(identity)
         elif kind == "definition-ref":
             copied["schema_ref"] = child(definitions[node["schema_ref"]])["ref"]
-        elif kind in ("definitions", "model", "nullable", "default", "function-before"):
-            copied["schema"] = child(node["schema"])
+        elif kind == "function-plain":
+            model_schema = _declared_json_schema(declared_annotation, models=True)
+            declared_schema = _declared_json_schema(annotation)
+            if model_schema is not None:
+                if plain_inner is not None:
+                    # The retained schema includes serializers on Annotated
+                    # containers and items that model annotations alone lose.
+                    model_schema = plain_inner
+                plain_models[identity] = (model_schema, child(model_schema))
+            elif declared_schema is not None:
+                inner = child(plain_inner if plain_inner is not None else declared_schema)
+                plain[identity] = {
+                    "type": "function-wrap", "function": lambda value, handler: handler(value),
+                    "schema": inner, "when_used": "json",
+                }
+        elif kind in ("definitions", "model", "nullable", "default", "function-before", "function-after", "function-wrap"):
+            declared = annotation
+            if kind == "definitions":
+                definitions.update((item["ref"], item) for item in node["definitions"])
             if kind == "model":
+                declared = node["cls"]
+                if node.get("root_model"):
+                    declared = declared.model_fields["root"].annotation
                 copied["cls"] = _JSONModel
+            elif kind == "nullable" and get_origin(annotation) in (Union, UnionType):
+                declared = next(item for item in get_args(annotation) if item is not type(None))
+            copied["schema"] = child(node["schema"], declared)
         elif kind == "model-fields":
+            fields = getattr(annotation, "model_fields", {})
             copied["fields"] = {
-                name: item if item.get("serialization_exclude") else {**item, "schema": child(item["schema"])}
+                name: item if item.get("serialization_exclude") else {
+                    **item, "schema": child(item["schema"], fields[name].rebuild_annotation() if name in fields else None),
+                }
                 for name, item in node["fields"].items()
             }
         elif kind == "list":
-            copied["items_schema"] = child(node["items_schema"])
+            args = get_args(annotation) if get_origin(annotation) is list else ()
+            copied["items_schema"] = child(node["items_schema"], args[0] if args else None)
         elif kind in ("tuple", "tuple-positional", "tuple-variable"):
             items = node.get("items_schema", [])
-            copied["items_schema"] = child(items) if isinstance(items, dict) else [child(item) for item in items]
+            args = get_args(annotation) if get_origin(annotation) is tuple else ()
+            copied["items_schema"] = (
+                child(items, args[0] if args else None) if isinstance(items, dict) else [
+                    child(item, args[index] if index < len(args) else None) for index, item in enumerate(items)
+                ]
+            )
             if node.get("extras_schema") is not None:
                 copied["extras_schema"] = child(node["extras_schema"])
         return copied
@@ -323,6 +414,96 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
             break
     if id(schema) not in active:
         return _ModelJSON(None)
+    for identity, serialization in plain.items():
+        if identity in active:
+            copies[identity]["serialization"] = serialization
+
+    def serialize_with_info(serializer: Any, value: Any, info: Any) -> Any:
+        options = {"context": info.context} if hasattr(info, "context") else {}
+        return serializer.to_python(
+            value, mode=info.mode, by_alias=info.by_alias, include=info.include, exclude=info.exclude,
+            exclude_unset=info.exclude_unset, exclude_defaults=info.exclude_defaults,
+            exclude_none=info.exclude_none, round_trip=info.round_trip, **options,
+        )
+
+    def needs_declared_serializer(value: Any, declared: dict[str, Any]) -> bool:
+        if has_custom_serializer(declared):
+            # select_models keeps this original serializer, including its handler.
+            return True
+        kind = declared["type"]
+        if kind == "function-plain" and declared.get("serialization", {}).get("schema") is not None:
+            return needs_declared_serializer(value, declared["serialization"]["schema"])
+        if kind in ("definitions", "nullable", "function-before", "function-after", "function-wrap"):
+            return needs_declared_serializer(value, declared["schema"])
+        if kind == "definition-ref":
+            return needs_declared_serializer(value, definitions[declared["schema_ref"]])
+        if kind == "model":
+            return type(value) is declared["cls"]
+        if kind == "list" and isinstance(value, list):
+            return any(needs_declared_serializer(item, declared["items_schema"]) for item in value)
+        if kind in ("tuple", "tuple-positional", "tuple-variable") and isinstance(value, tuple):
+            items = declared["items_schema"]
+            if isinstance(items, dict):
+                return any(needs_declared_serializer(item, items) for item in value)
+            variadic = declared.get("variadic_item_index")
+            return any(
+                needs_declared_serializer(item, items[variadic if variadic is not None and index >= variadic else index])
+                for index, item in enumerate(value) if variadic is not None or index < len(items)
+            )
+        return False
+
+    def select_models(original: dict[str, Any], copied: dict[str, Any]) -> dict[str, Any]:
+        if has_custom_serializer(original):
+            return original
+        kind = original["type"]
+        if kind == "definitions":
+            return select_models(original["schema"], copied["schema"])
+        if kind == "definition-ref":
+            return select_models(definitions[original["schema_ref"]], references[copied["schema_ref"]])
+        if kind == "nullable":
+            return {"type": "nullable", "schema": select_models(original["schema"], copied["schema"])}
+        if kind == "any":
+            return original
+        selected = dict(copied)
+        if kind == "list":
+            selected["items_schema"] = select_models(original["items_schema"], copied["items_schema"])
+        elif kind in ("tuple", "tuple-positional", "tuple-variable"):
+            items = original["items_schema"]
+            selected["items_schema"] = (
+                select_models(items, copied["items_schema"]) if isinstance(items, dict) else [
+                    select_models(item, changed) for item, changed in zip(items, copied["items_schema"])
+                ]
+            )
+        # The dynamic handler owns subclasses and unexpected runtime values.
+        # Each container element chooses independently, preserving mixed lists.
+        serializer: Any = None
+
+        def serialize(value: Any, handler: Callable[[Any], Any], info: Any) -> Any:
+            nonlocal serializer
+            try:
+                if not needs_declared_serializer(value, original):
+                    return handler(value)
+                if serializer is None:
+                    serializer = SchemaSerializer({
+                        "type": "definitions", "schema": selected,
+                        "definitions": list(definitions.values()) + list(references.values()),
+                    }, config)
+                return serialize_with_info(serializer, value, info)
+            except Exception as error:
+                raise _JSONSerializerError(error) from error
+
+        return {"type": "any", "serialization": {
+            "type": "function-wrap", "function": serialize, "info_arg": True, "when_used": "json",
+        }}
+
+    for identity, (original, inner) in plain_models.items():
+        if identity in active:
+            selection = select_models(original, inner)
+            # Keep the original plain validator as the outer fallback handler.
+            # Nullable roots also need a wrap serializer rather than a schema node.
+            if selection["type"] == "nullable":
+                selection = selection["schema"]
+            copies[identity]["serialization"] = {**selection["serialization"], "schema": originals[identity]}
 
     def guard(original: dict[str, Any], copied: dict[str, Any]) -> None:
         kind = original["type"]
@@ -339,12 +520,7 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
                 serializer = SchemaSerializer({
                     "type": "definitions", "schema": original, "definitions": list(definitions.values()),
                 }, config)
-            options = {"context": info.context} if hasattr(info, "context") else {}
-            return serializer.to_python(
-                value, mode=info.mode, by_alias=info.by_alias, include=info.include, exclude=info.exclude,
-                exclude_unset=info.exclude_unset, exclude_defaults=info.exclude_defaults,
-                exclude_none=info.exclude_none, round_trip=info.round_trip, **options,
-            )
+            return serialize_with_info(serializer, value, info)
 
         def serialize(value: Any, handler: Callable[[Any], Any], info: Any) -> Any:
             try:
