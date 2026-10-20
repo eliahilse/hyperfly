@@ -9,6 +9,8 @@ unmatched codecs, or encoder limits that trigger JSON fallback.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import math
 import re
@@ -188,6 +190,7 @@ def negotiate(
 
     Vary is always set: the same URL yields either representation, and a shared cache
     would otherwise hand one peer's binary to a peer that cannot read it.
+    offer=None advertises the first registered codec; offer="" suppresses the offer.
     """
     vary = {"Vary": _VARY}
 
@@ -204,7 +207,7 @@ def negotiate(
         )
 
     reason: FallbackReason = "accept-refused" if refused else "no-match" if accept else "no-hyperfly-accept"
-    chosen = offer or (registry.fingerprints[0] if registry.fingerprints else None)
+    chosen = offer if offer is not None else (registry.fingerprints[0] if registry.fingerprints else None)
     headers = {**vary, "Content-Type": "application/json"}
     if chosen:
         headers["Hyperfly-Offer"] = chosen
@@ -222,9 +225,19 @@ def _json_key(key: Any) -> Any:
 def _json_value(value: Any) -> Any:
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
+        try:
+            from pydantic import BaseModel
+            from pydantic_core import to_jsonable_python
+        except ImportError:
+            pass
+        else:
+            if isinstance(value, BaseModel):
+                return to_jsonable_python(_json_value(model_dump(mode="python", by_alias=True)))
         value = model_dump(mode="json", by_alias=True)
     if isinstance(value, Enum):
         value = value.value
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(value).decode("ascii")
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, dict):
@@ -254,6 +267,8 @@ def encode_for(
 
     A value the codec refuses under its limits is answered in JSON, never an error
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
+    JSON fallback writes bytes and bytearray values as standard padded base64,
+    including model fields, without requiring a codec.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:
         try:
@@ -348,15 +363,53 @@ def _loads(body: bytes | str) -> Any:
         raise DecodeError("json", f"malformed JSON body: {error}") from error
 
 
+def _json_bytes(value: Any, registry: CodecRegistry) -> Any:
+    fingerprints = registry.fingerprints
+    codec = registry.get(fingerprints[0]) if fingerprints else None
+    if codec is None:
+        return value
+    root = [value]
+    stack: list[tuple[dict[str, Any], Any, str | int]] = [(codec.ir, root, 0)]
+    while stack:
+        node, parent, key = stack.pop()
+        item = parent[key]
+        kind = node["kind"]
+        if kind == "bytes":
+            try:
+                if not isinstance(item, str):
+                    raise ValueError("expected a base64 string")
+                decoded = base64.b64decode(item, validate=True)
+                if base64.b64encode(decoded).decode("ascii") != item:
+                    raise ValueError("expected canonical padded base64")
+            except (ValueError, binascii.Error) as error:
+                raise DecodeError("json", f"malformed JSON bytes: {error}") from error
+            parent[key] = decoded
+        elif kind == "nullable" and item is not None:
+            stack.append((node["inner"], parent, key))
+        elif kind == "array" and isinstance(item, list):
+            stack.extend((node["element"], item, index) for index in range(len(item)))
+        elif kind == "struct" and isinstance(item, dict):
+            for field in node["fields"]:
+                name = field["name"]
+                if name in item and not (field.get("nullable") and item[name] is None):
+                    stack.append((field["type"], item, name))
+    return root[0]
+
+
 def decode_response(content_type: str | None, body: bytes | str, registry: CodecRegistry) -> tuple[str, Any]:
     """Returns (kind, value) where kind is 'json', 'hyperfly', or 'unknown-codec'.
 
     A codec the client does not hold is not something it can recover from by guessing,
     so it is reported rather than attempted. Malformed JSON raises code ``json``;
     malformed binary raises the codec's decode errors.
+    JSON uses the first registered codec's bytes positions to restore canonical
+    padded base64 strings to bytes; invalid bytes values also raise ``json``.
+    Other JSON values stay plain, even for a validating model codec. An empty
+    registry leaves parsed JSON unchanged.
     """
     if _essence(content_type) != HYPERFLY_MEDIA_TYPE:
-        return "json", _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
+        value = _loads(bytes(body) if isinstance(body, (bytearray, memoryview)) else body)
+        return "json", _json_bytes(value, registry)
     data = _utf8(body) if isinstance(body, str) else bytes(body)
     fingerprint = _envelope_fingerprint(data)
     codec = registry.get(fingerprint)
@@ -498,6 +551,10 @@ def decode_request(
     a Hyperfly-Codec header that contradicts it, 415 with Hyperfly-Offer for an
     unknown fingerprint, 400 for a body that fails to decode. Invalid max_bytes
     raises HyperflyError with code ``options``.
+    JSON uses the first registered codec to restore bytes from canonical padded
+    base64; invalid bytes values raise 400 with reason malformed-json. Other JSON
+    values stay plain, even for a validating model codec. An empty registry leaves
+    parsed JSON unchanged.
     """
     max_bytes = _checked_max_bytes(max_bytes)
     essence = _essence(content_type)
@@ -507,7 +564,7 @@ def decode_request(
     data = read_body(body, max_bytes=max_bytes, content_length=content_length)
     if not hyperfly:
         try:
-            return DecodedRequest("json", _loads(data))
+            return DecodedRequest("json", _json_bytes(_loads(data), registry))
         except DecodeError as error:
             raise RequestError(400, "malformed-json") from error
     try:

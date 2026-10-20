@@ -131,6 +131,15 @@ def test_json_fallback_offers_an_upgrade():
     assert decision.headers["Hyperfly-Offer"] == CODEC_A.fingerprint
 
 
+@pytest.mark.parametrize("offer,expected", [(None, CODEC_A.fingerprint), ("", None), (CODEC_B.fingerprint, CODEC_B.fingerprint)])
+@pytest.mark.parametrize("http_accept", [None, "application/vnd.hyperfly;q=0"])
+def test_json_fallback_offer_can_be_defaulted_or_suppressed(offer, expected, http_accept):
+    decision = negotiate(None, CodecRegistry([CODEC_A, CODEC_B]), offer=offer, http_accept=http_accept)
+    assert decision.kind == "json"
+    assert decision.headers.get("Hyperfly-Offer") == expected
+    assert ("Hyperfly-Offer" in decision.headers) == (expected is not None)
+
+
 def test_every_response_varies_so_caches_cannot_cross_serve():
     registry = CodecRegistry([CODEC_A])
     for accept in (accept_header([CODEC_A.fingerprint]), None):
@@ -222,6 +231,20 @@ def test_json_fallback_serializes_models_in_json_mode():
     assert headers["Content-Type"] == "application/json"
 
 
+def test_json_fallback_preserves_model_json_types_alongside_bytes():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    class Response(BaseModel):
+        time: datetime
+        amount: Decimal
+        payload: bytes
+
+    value = Response(time=datetime(2026, 1, 1, tzinfo=timezone.utc), amount=Decimal("1.25"), payload=b"\xff")
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"time": "2026-01-01T00:00:00Z", "amount": "1.25", "payload": "/w=="}
+
+
 def test_json_fallback_uses_model_dump_without_pydantic():
     class Response:
         def model_dump(self, *, mode, by_alias):
@@ -261,6 +284,115 @@ def test_json_fallback_rejects_circular_values():
     circular.append(circular)
     with pytest.raises(ValueError):
         encode_for(negotiate(None, CodecRegistry()), circular)
+
+
+@pytest.mark.parametrize("factory", [bytes, bytearray])
+@pytest.mark.parametrize("nested", [False, True])
+def test_json_fallback_writes_bytes_without_a_codec(factory, nested):
+    value = factory(b"\xfb\xff\xff\x00")
+    body, _ = encode_for(negotiate(None, CodecRegistry()), {"chunks": [value]} if nested else value)
+    assert json.loads(body) == ({"chunks": ["+///AA=="]} if nested else "+///AA==")
+    assert value == factory(b"\xfb\xff\xff\x00")
+
+
+def test_encoder_limit_falls_back_to_base64_bytes():
+    codec = compile_ir({"kind": "bytes"}, limits=Limits(max_byte_length=0))
+    registry = CodecRegistry([codec])
+    failures = []
+    body, headers = encode_for(
+        negotiate(codec.fingerprint, registry), b"\xff",
+        on_fallback=lambda reason, error: failures.append((reason, error.code)),
+    )
+    assert failures == [("encoder-limit", "limit")]
+    assert body == b'"/w=="'
+    assert headers["Content-Type"] == "application/json"
+    assert decode_response(headers["Content-Type"], body, registry) == ("json", b"\xff")
+
+
+def _decode_json_pair(body, registry):
+    return [decode_response("application/json", body, registry), _request(body, registry=registry)]
+
+
+@pytest.mark.parametrize("value", [None, False, 1, {}, [], "é", "\ud800", "AA== ", "=AA=", "===="])
+def test_json_bytes_positions_reject_invalid_values(value):
+    registry = CodecRegistry([compile_ir({"kind": "bytes"})])
+    body = json.dumps(value).encode("utf-8")
+    with pytest.raises(DecodeError) as raised:
+        decode_response("application/json", body, registry)
+    assert raised.value.code == "json"
+    error = _refusal(body, registry=registry)
+    assert (error.status, error.reason, error.__cause__.code) == (400, "malformed-json", "json")
+
+
+def test_json_uses_the_first_registry_codec_for_bytes_positions():
+    binary = compile_ir({"kind": "bytes"})
+    text = compile_ir({"kind": "string"})
+    assert accept_header(CodecRegistry([binary, text]).fingerprints).startswith(binary.fingerprint)
+    for registry, expected in [
+        (CodecRegistry([binary, text]), b"\x00"),
+        (CodecRegistry([text, binary]), "AA=="),
+        (CodecRegistry(), "AA=="),
+    ]:
+        assert _decode_json_pair(b'"AA=="', registry) == [("json", expected)] * 2
+    assert _decode_json_pair(b'"not base64"', CodecRegistry()) == [("json", "not base64")] * 2
+
+
+def test_json_bytes_walk_preserves_nonmatching_shapes_and_other_values():
+    ir = {"kind": "struct", "fields": [
+        {"name": "missing", "type": {"kind": "bytes"}},
+        {"name": "optional", "type": {"kind": "bytes"}, "optional": True},
+        {"name": "nullable", "type": {"kind": "bytes"}, "nullable": True},
+        {"name": "array", "type": {"kind": "array", "element": {"kind": "bytes"}}},
+        {"name": "child", "type": {"kind": "struct", "fields": [{"name": "data", "type": {"kind": "bytes"}}]}},
+        {"name": "text", "type": {"kind": "string"}},
+        {"name": "wrapped", "type": {"kind": "nullable", "inner": {"kind": "bytes"}}},
+    ]}
+    registry = CodecRegistry([compile_ir(ir)])
+    for value in [42, [], None, {"nullable": None, "array": "bad shape", "child": ["AA=="], "text": 12, "extra": "AA==", "wrapped": None}]:
+        assert _decode_json_pair(json.dumps(value).encode(), registry) == [("json", value)] * 2
+    body = b'{"optional":"AA==","nullable":"/w==","array":["AAE="],"child":{"data":""},"text":"AA==","wrapped":"AA=="}'
+    expected = {"optional": b"\x00", "nullable": b"\xff", "array": [b"\x00\x01"], "child": {"data": b""}, "text": "AA==", "wrapped": b"\x00"}
+    assert _decode_json_pair(body, registry) == [("json", expected)] * 2
+
+
+def test_json_bytes_walk_handles_deep_arrays():
+    ir = {"kind": "bytes"}
+    expected = b"\x00"
+    for _ in range(200):
+        ir = {"kind": "array", "element": ir}
+        expected = [expected]
+    registry = CodecRegistry([compile_ir(ir)])
+    body = b"[" * 200 + b'"AA=="' + b"]" * 200
+    assert _decode_json_pair(body, registry) == [("json", expected)] * 2
+
+
+@pytest.mark.parametrize("validate", [False, True])
+@pytest.mark.parametrize("limited", [False, True])
+def test_json_model_bytes_fallback_and_plain_decoding(validate, limited):
+    from pydantic import ConfigDict, Field, field_validator
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="hex")
+        payload: bytes = Field(alias="data")
+        chunks: list[bytes | None]
+
+        @field_validator("payload")
+        @classmethod
+        def nonempty(cls, value):
+            if not value:
+                raise ValueError("empty payload")
+            return value
+
+    codec = compile_model(Response, validate=validate, limits=Limits(max_byte_length=0) if limited else None)
+    registry = CodecRegistry([codec])
+    model = Response(data=b"\xff", chunks=[b"\xfb\xff\xff", None])
+    decision = negotiate(codec.fingerprint if limited else None, registry)
+    body, headers = encode_for(decision, model)
+    assert json.loads(body) == {"data": "/w==", "chunks": ["+///", None]}
+    assert headers["Content-Type"] == "application/json"
+    expected = {"data": b"\xff", "chunks": [b"\xfb\xff\xff", None]}
+    assert _decode_json_pair(body, registry) == [("json", expected)] * 2
+    assert _decode_json_pair(b'{"data":"","chunks":[]}', registry) == [("json", {"data": b"", "chunks": []})] * 2
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
