@@ -108,8 +108,10 @@ as `1.0` and decodes it as an int. The integer domain is checked before the boun
 | `T \| None`, `Optional[T]` | `nullable` (a nullable field) |
 | a `BaseModel` subclass | `struct` |
 
-Constraints inside `Annotated` apply at any level: `list[Annotated[int, Field(ge=1)]]`
-bounds the elements. A field with a default is still required on the wire. A field
+Integer bounds inside `Annotated` apply at any level: `list[Annotated[int, Field(ge=1)]]`
+bounds the elements. String and list length constraints are not part of the IR, so a
+codec without `validate=True` does not check them. A field with a default is still
+required on the wire. A field
 needs one wire name, so use `alias=`; differing serialization and validation names
 or `AliasChoices`/`AliasPath` are refused. Everything else (`dict`, `tuple`, `set`,
 `Any`, `datetime`, `Decimal`, other unions, `extra="allow"`, `RootModel`, recursive
@@ -174,8 +176,10 @@ body, headers = encode_for(decision, payload, on_fallback=lambda reason, error: 
 `Accept: application/vnd.hyperfly;q=0` opts a client out of binary whatever it
 advertises. A value the codec refuses under its limits is answered in JSON with the
 same headers a fallback gets, and `on_fallback` hears about it. Every decision
-carries `Vary: Hyperfly-Accept, Accept`. A JSON answer offers the first registered
-codec in `Hyperfly-Offer`; `offer=` names another, and `offer=""` sends none.
+carries `Vary: Hyperfly-Accept, Accept`. A JSON answer from `negotiate` offers the
+first registered codec in `Hyperfly-Offer`; `offer=` names another, `offer=""` sends
+none, and `enabled=False` never offers. An encoder-limit fallback always offers the
+selected codec, whatever `offer` was.
 
 Request bodies go through `decode_request`, which takes a `bytes` body or an
 iterable of chunks and stops reading once the body passes `max_bytes` (1 MiB by
@@ -239,10 +243,11 @@ from a codec the registry does not hold, with the envelope's fingerprint as `val
 JSON bodies, here and in `decode_request`, are converted and checked against the
 registry's first codec: booleans, ints (integral numbers, within bounds), finite
 float64 numbers, strings, enum members, literals, canonical padded base64 into
-`bytes`, `null` only where nullable, fixed array lengths and required fields. Unknown
-keys are dropped and results stay plain, even for a validating codec. A mismatch
-raises `DecodeError` code `json` with the path (400 `malformed-json` from
-`decode_request`). An empty registry returns the parsed JSON unchanged.
+`bytes`, `null` only where nullable or a `null` literal (`Literal[None]`), fixed array
+lengths and required fields. Unknown keys are dropped and results stay plain, even
+for a validating codec. A mismatch raises `DecodeError` code `json` with the path
+(400 `malformed-json` from `decode_request`). An empty registry returns the parsed
+JSON unchanged.
 
 ## API
 
