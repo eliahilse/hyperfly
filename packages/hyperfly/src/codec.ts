@@ -45,13 +45,48 @@ function deepFreeze<T>(value: T): T {
 }
 
 export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {}): Codec<T> {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
+    throw new HyperflyError("options", "options: must be an object");
+  }
+  const limits: DecodeLimits = { ...DEFAULT_LIMITS };
+  if (options.limits !== undefined) {
+    if (typeof options.limits !== "object" || options.limits === null || Array.isArray(options.limits)) {
+      throw new HyperflyError("options", "limits: must be an object");
+    }
+    const allowed = new Set(Object.keys(DEFAULT_LIMITS));
+    for (const key of Reflect.ownKeys(options.limits)) {
+      if (!Object.prototype.propertyIsEnumerable.call(options.limits, key)) continue;
+      if (typeof key !== "string" || !allowed.has(key)) {
+        throw new HyperflyError("options", `limits.${String(key)}: unknown limit`);
+      }
+      const value = options.limits[key as keyof DecodeLimits];
+      if (value === undefined) continue;
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new HyperflyError("options", `limits.${key}: must be a non-negative safe integer`);
+      }
+      limits[key as keyof DecodeLimits] = value;
+    }
+  }
+  if (options.plan !== undefined && options.plan !== "row" && options.plan !== "columnar") {
+    throw new HyperflyError("options", "plan: must be row or columnar");
+  }
+  if (options.pack !== undefined && options.pack !== false) {
+    if (typeof options.pack !== "object" || options.pack === null) {
+      throw new HyperflyError("options", "pack: must be false or an object");
+    }
+    for (const key of ["deflate", "inflate"] as const) {
+      if (options.pack[key] !== undefined && typeof options.pack[key] !== "function") {
+        throw new HyperflyError("options", `pack.${key}: must be a function`);
+      }
+    }
+  }
   validateIR(ir);
   // isolate from later mutation, caller-side or through codec.ir: the fingerprint is
   // fixed at compile time and the schema behind it must not drift
   ir = deepFreeze(structuredClone(ir));
   const plan: PlanLayout = options.plan ?? "row";
   const profile = options.profile;
-  if (profile) {
+  if (profile !== undefined) {
     if (plan !== "columnar") {
       throw new HyperflyError("ir", "profiles apply to the columnar plan only");
     }
@@ -63,7 +98,6 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
   const artifact = serializeArtifact(ir, plan, frozenProfile);
   const fingerprintBytes = fingerprintOf(artifact);
   const fingerprint = toHex(fingerprintBytes);
-  const limits: DecodeLimits = { ...DEFAULT_LIMITS, ...options.limits };
   const columnar = plan === "columnar";
   const pack = options.pack === false ? {} : (options.pack ?? defaultPackHooks());
 

@@ -104,6 +104,100 @@ describe("limits", () => {
   });
 });
 
+describe("compile options", () => {
+  test.each([null, false, true, 0, "row", [], () => {}].map((value) => [value] as const))("rejects non-object options %p", (options) => {
+    expect(() => compileIR(STRUCT, options as never)).toThrow(HyperflyError);
+    expect(() => compileIR(STRUCT, options as never)).toThrow(expect.objectContaining({
+      code: "options", message: "options: must be an object",
+    }));
+  });
+
+  test.each([
+    [{ limits: null }, "limits"],
+    [{ limits: [] }, "limits"],
+    [{ limits: false }, "limits"],
+    [{ limits: 1 }, "limits"],
+    [{ limits: "default" }, "limits"],
+    [{ limits: { maxDeph: 1 } }, "limits.maxDeph: unknown limit"],
+    [{ limits: { maxDeph: undefined } }, "limits.maxDeph: unknown limit"],
+    [{ limits: JSON.parse('{"__proto__":0}') }, "limits.__proto__: unknown limit"],
+    [{ limits: { constructor: 0 } }, "limits.constructor: unknown limit"],
+    [{ limits: { [Symbol("maxDepth")]: 0 } }, "limits.Symbol(maxDepth): unknown limit"],
+    ...[null, false, 1, "rows", {}, []].map((plan) => [{ plan }, "plan"]),
+    ...[null, true, 1, "default", () => {}].map((pack) => [{ pack }, "pack"]),
+    ...["deflate", "inflate"].flatMap((key) =>
+      [null, false, 1, "function", {}].map((value) => [{ pack: { [key]: value } }, `pack.${key}`]),
+    ),
+  ] as [unknown, string][])("rejects invalid options %p", (options, path) => {
+    expect(() => compileIR(STRUCT, options as never)).toThrow(HyperflyError);
+    expect(() => compileIR(STRUCT, options as never)).toThrow(expect.objectContaining({
+      code: "options", message: expect.stringContaining(path),
+    }));
+  });
+
+  for (const key of Object.keys(DEFAULT_LIMITS)) {
+    test.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, null, true, "1", {}, []].map((value) => [value] as const))(
+      `rejects invalid limits.${key} %p`, (value) => {
+        const run = () => compileIR(STRUCT, { limits: { [key]: value } } as never);
+        expect(run).toThrow(HyperflyError);
+        expect(run).toThrow(expect.objectContaining({
+          code: "options", message: `limits.${key}: must be a non-negative safe integer`,
+        }));
+      },
+    );
+  }
+
+  test("checks options before the IR", () => {
+    expect(() => compileIR(null as never, { plan: "bad" } as never)).toThrow(expect.objectContaining({ code: "options" }));
+  });
+
+  test("accepts safe integer limits including zero", () => {
+    for (const value of [0, 1, Number.MAX_SAFE_INTEGER]) {
+      const limits = Object.fromEntries(Object.keys(DEFAULT_LIMITS).map((key) => [key, value]));
+      expect(() => compileIR(STRUCT, { limits })).not.toThrow();
+    }
+  });
+
+  test("undefined limits preserve defaults and inherited limits are ignored", () => {
+    const limits = Object.fromEntries(Object.keys(DEFAULT_LIMITS).map((key) => [key, undefined]));
+    const codec = compileIR(STRUCT, { limits });
+    const value = { a: 1, b: "hello" };
+    expect(codec.decode(codec.encode(value))).toEqual(value);
+    const inherited = Object.create({ maxByteLength: 0, unknown: 0 }) as object;
+    expect(compileIR(STRUCT, { limits: inherited }).encode(value)).toEqual(codec.encode(value));
+    const hidden = Object.defineProperty({}, "unknown", { value: -1 });
+    expect(compileIR(STRUCT, { limits: hidden }).encode(value)).toEqual(codec.encode(value));
+    let ir: IRNode = { kind: "bool" };
+    let nested: unknown = true;
+    for (let i = 0; i <= DEFAULT_LIMITS.maxDepth; i++) {
+      ir = { kind: "array", element: ir };
+      nested = [nested];
+    }
+    expect(() => compileIR(ir, { limits }).encodeBody(nested)).toThrow(expect.objectContaining({ code: "depth" }));
+  });
+
+  test("accepts optional pack hooks and undefined options", () => {
+    for (const pack of [undefined, false, {}, { deflate: undefined, inflate: undefined }, {
+      deflate: (bytes: Uint8Array) => bytes,
+      inflate: (bytes: Uint8Array) => bytes,
+    }] as const) {
+      expect(() => compileIR(STRUCT, { plan: undefined, limits: undefined, pack })).not.toThrow();
+    }
+    expect(() => compileIR(STRUCT, undefined)).not.toThrow();
+  });
+
+  test.each([null, false, 0, "", { version: { toString: null }, shared: { columns: [] } }].map((profile) => [profile] as const))(
+    "rejects malformed profiles with an ir error: %p", (profile) => {
+      const ir: IRNode = {
+        kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+      };
+      const run = () => compileIR(ir, { plan: "columnar", profile: profile as never });
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "ir" }));
+    },
+  );
+});
+
 describe("retro hardening", () => {
   test("array-index and __proto__ field names are rejected", () => {
     expect(() => compileIR({ kind: "struct", fields: [{ name: "0", type: { kind: "int" } }] })).toThrow();

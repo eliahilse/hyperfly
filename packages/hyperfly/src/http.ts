@@ -206,7 +206,7 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    if (error instanceof SyntaxError) throw new HyperflyError("ir", `artifact is not JSON: ${error.message}`);
+    if (error instanceof SyntaxError) throw new HyperflyError("json", `artifact is not JSON: ${error.message}`, { cause: error });
     throw error;
   }
   checkNesting(parsed);
@@ -357,7 +357,12 @@ export function decodeResponse<T>(
 ): { kind: "json"; value: T } | { kind: "hyperfly"; value: T } | { kind: "unknown-codec"; fingerprint: string } {
   if (mediaType(contentType) !== HYPERFLY_MEDIA_TYPE) {
     const text = typeof body === "string" ? body : new TextDecoder().decode(body);
-    return { kind: "json", value: JSON.parse(text) as T };
+    try {
+      return { kind: "json", value: JSON.parse(text) as T };
+    } catch (cause) {
+      if (cause instanceof SyntaxError) throw new DecodeError("json", `$: ${cause.message}`, { cause });
+      throw cause;
+    }
   }
   const bytes = typeof body === "string" ? new TextEncoder().encode(body) : body;
   const fingerprint = peekFingerprint(bytes);

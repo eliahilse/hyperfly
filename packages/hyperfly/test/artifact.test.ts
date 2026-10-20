@@ -64,9 +64,9 @@ describe("loadArtifact", () => {
     expect(loadArtifact(codec.artifact, codec.fingerprint.toUpperCase()).fingerprint).toBe(codec.fingerprint);
   });
 
-  test("rejects non-JSON with an ir error", () => {
+  test("rejects non-JSON with a json error", () => {
     expect(() => loadArtifact("{", codec.fingerprint)).toThrow(HyperflyError);
-    expect(() => loadArtifact("{", codec.fingerprint)).toThrow(expect.objectContaining({ code: "ir", message: expect.stringContaining("artifact is not JSON") }));
+    expect(() => loadArtifact("{", codec.fingerprint)).toThrow(expect.objectContaining({ code: "json", message: expect.stringContaining("artifact is not JSON"), cause: expect.any(SyntaxError) }));
   });
 
   test.each([
@@ -267,7 +267,7 @@ describe("fetchArtifact", () => {
 
   test("rejects an empty body", async () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(null)) }))
-      .rejects.toThrow(expect.objectContaining({ code: "ir" }));
+      .rejects.toThrow(expect.objectContaining({ code: "json", cause: expect.any(SyntaxError) }));
   });
 
   test("verifies the fetched artifact and forwards codec options", async () => {
