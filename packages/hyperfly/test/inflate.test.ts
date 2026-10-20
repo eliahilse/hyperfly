@@ -278,6 +278,24 @@ describe("inflateRaw: valid streams match node:zlib", () => {
     expect(() => inflateRaw(stream, input.length - 1)).toThrow(DecodeError);
     expect(inflateRaw(Uint8Array.of(3, 0), 0).length).toBe(0);
   });
+
+  test("a nonsensical cap is a DecodeError", () => {
+    for (const cap of [-1, Number.NaN, 1.5, Infinity]) {
+      expect(() => inflateRaw(Uint8Array.of(3, 0), cap)).toThrow(DecodeError);
+    }
+  });
+
+  test("output grows across buffer boundaries without losing bytes", () => {
+    const rng = mulberry32(11);
+    for (const size of [4095, 4096, 4097, 8193, 100_003, 1_000_000]) {
+      const input = new Uint8Array(size).map((_, i) => (i % 7 === 0 ? Math.floor(rng() * 256) : 0x61));
+      const stream = deflate(input);
+      for (const cap of [size, size + 12_345]) {
+        expect(Buffer.from(inflateRaw(stream, cap)).equals(Buffer.from(input))).toBe(true);
+      }
+      expect(() => inflateRaw(stream, size - 1)).toThrow(DecodeError);
+    }
+  });
 });
 
 describe("inflateRaw: hostile streams get zlib's verdict", () => {

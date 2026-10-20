@@ -227,11 +227,10 @@ Two capabilities scope that obligation:
 
 - **Packing.** Deflate output is not canonical across libraries, so
   byte-identical re-encode holds within an implementation+version; any
-  spec-valid stream decodes everywhere. An encoder without a deflate
-  capability emits string columns in plain mode (`0x00`) — its output is
-  canonical *for that capability*, and a peer that packs still decodes it. A
-  decoder without an inflate capability rejects packed input as unsupported
-  (§3); one that can inflate decodes it whether or not it can deflate. The fingerprint identifies the schema and
+  spec-valid stream decodes everywhere. Encoding and decoding capabilities
+  are separate: an encoder without deflate emits string columns in plain
+  mode (`0x00`), and its output is canonical *for that capability*; a decoder
+  rejects packed input as unsupported (§3) only if it lacks inflate. The fingerprint identifies the schema and
   plan, not the packing capability; peers with different packing capabilities
   interoperate because every decoder accepts both string modes.
 - **Inflater strictness.** A decoder's inflater MUST require the declared blob

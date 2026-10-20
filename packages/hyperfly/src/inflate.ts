@@ -14,7 +14,8 @@ const CLEN_ORDER = Uint8Array.of(16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3,
 const LIT_ROOT = 10;
 const DIST_ROOT = 8;
 const CLEN_ROOT = 7;
-// bit positions stay below 2^32 so unsigned shifts can index bytes
+// bit positions stay below 2^32 so unsigned shifts can index bytes; above the default
+// maxByteLength (2^28), so only raised limits can reach it
 const MAX_INPUT = 2 ** 29 - 64;
 const PAD = 16;
 
@@ -53,6 +54,13 @@ function fail(message: string): never {
 
 function overflow(max: number): never {
   fail(`output exceeds ${max} bytes`);
+}
+
+/** Output grows with what the stream has actually produced, so a stream that fails early allocates little. */
+function grow(out: Uint8Array<ArrayBuffer>, used: number, need: number, cap: number): Uint8Array<ArrayBuffer> {
+  const next = new Uint8Array(Math.min(cap, Math.max(need, out.length * 2)));
+  next.set(out.subarray(0, used));
+  return next;
 }
 
 /** zlib's inftrees rules: no over-subscription; incomplete only for a lone 1-bit literal/length or distance code. */
@@ -148,14 +156,15 @@ const symbolLengths = new Uint8Array(286 + 30);
  * after the final block) and fails as soon as output would pass `maxOutputLength`.
  */
 export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Array {
+  if (!Number.isSafeInteger(maxOutputLength) || maxOutputLength < 0) fail("invalid output limit");
   const n = data.length;
   if (n > MAX_INPUT) fail("input too large");
   const buf = new Uint8Array(n + PAD);
   buf.set(data);
   const tbits = n * 8;
   // a 258-byte match costs at least two bits, so no stream expands past 1032:1
-  const out = new Uint8Array(Math.min(maxOutputLength, n * 1032));
-  const cap = out.length;
+  const cap = Math.min(maxOutputLength, n * 1032);
+  let out = new Uint8Array(Math.min(cap, Math.max(4096, n * 4)));
   let o = 0;
   let pos = 0;
   let last = 0;
@@ -173,6 +182,7 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
       p += 4;
       if (p + len > n) fail("truncated stored block");
       if (o + len > cap) overflow(maxOutputLength);
+      if (o + len > out.length) out = grow(out, o, o + len, cap);
       out.set(data.subarray(p, p + len), o);
       o += len;
       pos = (p + len) * 8;
@@ -252,7 +262,10 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
       pos += elen;
       const sym = e >>> 4;
       if (sym < 256) {
-        if (o === cap) overflow(maxOutputLength);
+        if (o === out.length) {
+          if (o === cap) overflow(maxOutputLength);
+          out = grow(out, o, o + 1, cap);
+        }
         out[o++] = sym;
         continue;
       }
@@ -276,7 +289,10 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
       pos += dx;
       if (distance > o) fail("distance too far back");
       const end = o + len;
-      if (end > cap) overflow(maxOutputLength);
+      if (end > out.length) {
+        if (end > cap) overflow(maxOutputLength);
+        out = grow(out, o, end, cap);
+      }
       let from = o - distance;
       if (len <= 32) {
         while (o < end) out[o++] = out[from++]!;
@@ -295,5 +311,5 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
   }
   if (pos > tbits) fail("truncated");
   if ((pos + 7) >>> 3 !== n) fail("trailing bytes after the final block");
-  return o === cap ? out : out.slice(0, o);
+  return o === out.length ? out : out.subarray(0, o);
 }
