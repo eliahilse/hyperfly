@@ -100,6 +100,14 @@ A server that offers binary responses SHOULD expose its artifacts:
 GET /.well-known/hyperfly/a65108e20d19c19ff525ddf4789d5ba1
 ```
 
+The pathname prefix `/.well-known/hyperfly/` is case-sensitive. Its entire
+remaining segment MUST be exactly 32 ASCII hex characters, in any case; the
+server MUST lowercase it before artifact lookup. Any other suffix, including
+surrounding whitespace or a trailing slash, MUST yield `404`; no trimming or
+percent-decoding is performed by the lookup. A query string is not part of
+the pathname: HTTP routing excludes it before lookup. A literal `?` and
+query text passed as part of the pathname fail the segment check.
+
 ```
 200 OK
 Content-Type: application/json

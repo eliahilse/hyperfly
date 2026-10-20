@@ -3824,6 +3824,79 @@
       },
       "hex": "0561",
       "error": "limit"
+    },
+    {
+      "name": "col-presence-padding-before-struct-depth",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "0102",
+      "error": "bitmap"
+    },
+    {
+      "name": "col-orphan-null-before-struct-depth",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "010001",
+      "error": "bitmap"
+    },
+    {
+      "name": "col-struct-depth-before-column-payload",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "0101",
+      "error": "depth"
     }
   ],
   "invalidEncode": [
