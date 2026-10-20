@@ -3,7 +3,7 @@ import vectors from "../../../spec/vectors/columnar.json" with { type: "json" };
 import { z } from "zod";
 import { compileIR, FingerprintMismatchError, train, type IRNode } from "../src/index.js";
 import { toHex } from "../src/canonical.js";
-import { HyperflyError } from "../src/errors.js";
+import { EncodeError, HyperflyError } from "../src/errors.js";
 import { compile } from "../src/zod.js";
 
 function fromHex(hex: string): Uint8Array {
@@ -91,6 +91,31 @@ describe("packed string columns", () => {
     expect(plainCodec.decodeBody(plain)).toEqual(prose);
     const again = packedCodec.encodeBody(packedCodec.decodeBody(packed));
     expect(Buffer.from(again).equals(Buffer.from(packed))).toBe(true);
+  });
+
+  test("a throwing deflate hook is EncodeError packed with the hook's error as cause", () => {
+    const failure = new Error("deflate failed");
+    const codec = compileIR(IR, {
+      plan: "columnar",
+      pack: { deflate: () => { throw failure; }, inflate: (bytes) => bytes },
+    });
+    let caught: unknown;
+    try {
+      codec.encodeBody(prose);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EncodeError);
+    expect(caught).toMatchObject({ code: "packed", cause: failure });
+  });
+
+  test("a deflate hook returning a non-Uint8Array is EncodeError packed", () => {
+    const codec = compileIR(IR, {
+      plan: "columnar",
+      pack: { deflate: () => [1, 2, 3] as never, inflate: (bytes) => bytes },
+    });
+    expect(() => codec.encodeBody(prose)).toThrow(EncodeError);
+    expect(() => codec.encodeBody(prose)).toThrow(expect.objectContaining({ code: "packed" }));
   });
 
   test("tiny strings stay plain even with hooks available", () => {

@@ -752,7 +752,14 @@ function encodeStringColumn(
       concat.set(value, offset);
       offset += value.length;
     }
-    packed = ctx.deflate(concat);
+    try {
+      packed = ctx.deflate(concat);
+    } catch (err) {
+      throw new EncodeError("packed", `${path}: string column failed to deflate`, { cause: err });
+    }
+    if (!(packed instanceof Uint8Array)) {
+      throw new EncodeError("packed", `${path}: deflate hook must return a Uint8Array`);
+    }
     packedCost =
       bytes.reduce((n, value) => n + ulebLen(BigInt(value.length)), 0) +
       ulebLen(BigInt(packed.length)) +

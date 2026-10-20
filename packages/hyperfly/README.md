@@ -331,7 +331,7 @@ default to artifact downloads and throws code `limit` past it.
 Compiling, encoding, decoding and loading artifacts throw `HyperflyError` with a `code`; match on `code`, not on the
 message. `EncodeError` and `DecodeError` say which direction failed, `FingerprintMismatchError` is a `DecodeError`
 with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `path`. When an underlying error caused
-it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate hook, that error is the standard
+it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate or deflate hook, that error is the standard
 `cause`; an error that describes the input itself has none. A `maxBytes` that is not a non-negative safe integer is
 code `options`. In `fetchArtifact`, a rejected `fetch` and an abort propagate unchanged; a failure while reading the
 artifact body is code `ir`.
@@ -365,7 +365,7 @@ try {
 | `header` | Envelope is too short, has bad magic or an unsupported wire major. |
 | `fingerprint` | Fingerprint mismatch, invalid artifact fingerprint or failed artifact HTTP status other than 404. |
 | `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
-| `packed` | Invalid compressed stream or decompressed length mismatch. |
+| `packed` | Invalid compressed stream, decompressed length mismatch, or a failing or invalid deflate hook. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
 | `json` | Malformed JSON or UTF-8 in `decodeResponse`, malformed artifact text, or a value the JSON fallback cannot encode; the underlying error is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
