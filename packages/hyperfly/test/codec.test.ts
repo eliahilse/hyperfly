@@ -398,6 +398,34 @@ describe("allocation and limit safety", () => {
     expect(() => codec.encodeBody("ab")).toThrow("limit");
   });
 
+  test("a row array of columnar elements that pack to nothing still meets the one-bit floor", () => {
+    // a single-member enum column packs to width zero, yet the element is not zero-bit
+    const inner: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "e", type: { kind: "enum", members: ["a"] } }] },
+      length: 2,
+    };
+    const codec = compileIR({ kind: "array", element: inner }, { plan: "columnar" });
+    const value = Array.from({ length: 10 }, () => [{ e: "a" }, { e: "a" }]);
+    expect(() => codec.decodeBody(new Uint8Array([10]))).toThrow("remain");
+    expect(() => codec.encodeBody(value)).toThrow("one-bit floor");
+  });
+
+  test("a malformed later column fails before a width-zero column expands", () => {
+    const ir: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "a", type: { kind: "int" } }, { name: "b", type: { kind: "int" } }] },
+    };
+    const codec = compileIR(ir, { plan: "columnar", limits: { maxAmplification: 4096 } });
+    // 8 million rows: a is a constant frame, b claims raw values it does not carry
+    const rows = 4096 * 1990;
+    const body = new Uint8Array(2000);
+    body.set([0x80 | (rows & 0x7f), 0x80 | ((rows >> 7) & 0x7f), 0x80 | ((rows >> 14) & 0x7f), rows >> 21, 0x02, 0x00, 0x00, 0x00]);
+    const start = performance.now();
+    expect(() => codec.decodeBody(body)).toThrow("unexpected end of input");
+    expect(performance.now() - start).toBeLessThan(100);
+  });
+
   test("a codec that cannot inflate does not emit packed columns", () => {
     const ir: IRNode = { kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] } };
     const rows = Array.from({ length: 20 }, () => ({ s: "a".repeat(24) }));
