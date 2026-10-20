@@ -445,6 +445,182 @@ def test_json_fallback_unvalidated_binary_bytes_positions_use_base64(annotation,
     assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == {"payload": expected}
 
 
+@pytest.mark.parametrize("construction", ["construct", "assign"])
+@pytest.mark.parametrize("bytes_mode", ["utf8", "hex", "base64"])
+@pytest.mark.parametrize("position", ["model", "nullable", "list-item", "tuple-item", "root-model"])
+@pytest.mark.parametrize("payload", [
+    "dict", "bytes-dict", "binary-dict", "none", "wrong-model", "binary-model", "other-model", "str", "list", "tuple",
+])
+def test_json_fallback_unvalidated_model_subtrees_follow_json_mode(construction, bytes_mode, position, payload):
+    from pydantic import ConfigDict, Field, RootModel
+
+    class Child(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        payload: bytes
+
+    class Wrong(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        payload: bytes
+
+    class Other(BaseModel):
+        message: str = "other fields"
+
+    annotation = {
+        "model": Child, "nullable": Child | None, "list-item": list[Child],
+        "tuple-item": tuple[Child, ...], "root-model": RootModel[bytes],
+    }[position]
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode, validate_assignment=False)
+        child: annotation = Field(serialization_alias="data")
+        sibling: bytes = b"test"
+
+    data = {
+        "dict": {"payload": "already text"}, "bytes-dict": {"payload": b"test"},
+        "binary-dict": {"payload": b"\xff"}, "none": None, "wrong-model": Wrong(payload=b"test"),
+        "binary-model": Wrong(payload=b"\xff"),
+        "other-model": Other(), "str": "already text", "list": [{"payload": b"test"}],
+        "tuple": ({"payload": b"test"},),
+    }[payload]
+    if position == "list-item":
+        data = [data]
+    elif position == "tuple-item":
+        data = (data,)
+    value = Response.model_construct(**({"child": data} if construction == "construct" else {}))
+    if construction == "assign":
+        value.child = data
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            expected = value.model_dump(mode="json", by_alias=True)
+        except Exception as original:
+            with pytest.raises(EncodeError) as raised:
+                encode_for(negotiate(None, CodecRegistry()), value)
+            assert raised.value.code == "json"
+            assert str(original) in str(raised.value)
+        else:
+            expected["sibling"] = "dGVzdA=="
+            body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+            assert json.loads(body) == expected
+
+
+@pytest.mark.parametrize("construction", ["construct", "assign"])
+@pytest.mark.parametrize("bytes_mode", ["utf8", "hex", "base64"])
+@pytest.mark.parametrize("position", ["list", "tuple", "fixed-tuple", "nested-list", "list-model", "tuple-model"])
+@pytest.mark.parametrize("payload", ["dict", "none", "wrong-model", "str", "wrong-sequence"])
+def test_json_fallback_unvalidated_sequence_subtrees_follow_json_mode(construction, bytes_mode, position, payload):
+    from pydantic import ConfigDict, Field
+
+    class Child(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        payload: bytes
+
+    annotation = {
+        "list": list[bytes], "tuple": tuple[bytes, ...], "fixed-tuple": tuple[bytes],
+        "nested-list": list[list[bytes]], "list-model": list[Child], "tuple-model": tuple[Child, ...],
+    }[position]
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode, validate_assignment=False)
+        child: annotation = Field(serialization_alias="data")
+        sibling: bytes = b"test"
+
+    item = Child(payload=b"test") if position.endswith("model") else b"test"
+    data = {
+        "dict": {"payload": b"test"}, "none": None, "wrong-model": Child(payload=b"test"),
+        "str": "already text", "wrong-sequence": [item] if "tuple" in position else (item,),
+    }[payload]
+    if position == "nested-list":
+        data = [data]
+    value = Response.model_construct(**({"child": data} if construction == "construct" else {}))
+    if construction == "assign":
+        value.child = data
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = value.model_dump(mode="json", by_alias=True)
+        expected["sibling"] = "dGVzdA=="
+        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+
+
+@pytest.mark.parametrize("payload", ["already text", {"payload": "already text"}, None])
+def test_json_fallback_unvalidated_fixed_tuple_extra_items_keep_json_mode(payload):
+    class Response(BaseModel):
+        children: tuple[bytes]
+
+    value = Response.model_construct(children=("already text", payload))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = value.model_dump(mode="json", by_alias=True)
+        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+
+
+@pytest.mark.parametrize("position", ["list", "tuple", "model"])
+def test_json_fallback_unvalidated_subtrees_keep_enclosing_model_config_and_exclusions(position):
+    from pydantic import ConfigDict, Field
+
+    class Row(BaseModel):
+        payload: bytes
+        secret: str = Field("hidden", exclude=True)
+
+    annotation = {"list": list[bytes], "tuple": tuple[bytes, ...], "model": Row}[position]
+
+    class Child(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="hex")
+        data: annotation
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="base64")
+        child: Child
+
+        def model_dump(self, **kwargs):
+            return super().model_dump(exclude={"child": {"data": {1}}} if position != "model" else None, **kwargs)
+
+    data = {"list": (b"test", b"hidden"), "tuple": [b"test", b"hidden"], "model": {"payload": b"test"}}[position]
+    value = Response(child=Child.model_construct(data=data))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = value.model_dump(mode="json", by_alias=True)
+        assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
+
+
+def test_json_fallback_model_and_sequence_subclasses_still_overlay_bytes():
+    class Child(BaseModel):
+        payload: bytes
+
+    class Subclass(Child):
+        pass
+
+    class Sequence(list):
+        pass
+
+    class Pair(tuple):
+        pass
+
+    class Response(BaseModel):
+        child: Child
+        items: list[Child]
+        pair: tuple[Child, ...]
+
+    child = Subclass(payload=b"\xff")
+    value = Response.model_construct(child=child, items=Sequence([child]), pair=Pair([child]))
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == {
+        "child": {"payload": "/w=="}, "items": [{"payload": "/w=="}], "pair": [{"payload": "/w=="}],
+    }
+
+
+def test_json_fallback_model_dump_added_missing_field_keeps_json_mode():
+    class Response(BaseModel):
+        payload: bytes
+
+        def model_dump(self, **kwargs):
+            return {**super().model_dump(**kwargs), "payload": "already text"}
+
+    value = Response.model_construct()
+    assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == {"payload": "already text"}
+
+
 def test_json_fallback_overlays_root_model_bytes():
     from pydantic import ConfigDict, RootModel
 
