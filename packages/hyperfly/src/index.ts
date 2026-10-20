@@ -15,7 +15,7 @@ export {
   type SharedProfile,
 } from "./profile.js";
 export { validateIR, type IRField, type IRNode, type LiteralValue } from "./ir.js";
-export { DEFAULT_LIMITS, type DecodeLimits } from "./reader.js";
+export { DEFAULT_LIMITS, type Limits } from "./reader.js";
 export {
   DecodeError,
   EncodeError,

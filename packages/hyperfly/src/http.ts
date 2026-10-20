@@ -3,7 +3,7 @@ import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } fro
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
-import type { DecodeLimits } from "./reader.js";
+import type { Limits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
 
 export const HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly";
@@ -159,7 +159,7 @@ export function serveArtifact(pathname: string, registry: CodecRegistry): WellKn
 }
 
 export interface LoadArtifactOptions {
-  limits?: Partial<DecodeLimits>;
+  limits?: Partial<Limits>;
   pack?: PackHooks | false;
 }
 

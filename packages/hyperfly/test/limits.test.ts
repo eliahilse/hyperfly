@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/limits.json" with { type: "json" };
-import { compileIR, type DecodeLimits, type IRNode } from "../src/index.js";
+import { compileIR, type Limits, type IRNode } from "../src/index.js";
 import { toHex } from "../src/canonical.js";
 import { HyperflyError } from "../src/errors.js";
 
@@ -8,7 +8,7 @@ interface LimitVector {
   name: string;
   plan: string;
   ir: unknown;
-  limits?: Partial<DecodeLimits>;
+  limits?: Partial<Limits>;
   value?: unknown;
   hex?: string;
   error?: string;

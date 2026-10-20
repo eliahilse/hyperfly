@@ -19,6 +19,8 @@ expect breaking changes before 1.0.
 Zod and Pydantic are needed only for the schema adapters; the codec and HTTP layers
 run without them.
 
+The npm package requires Node.js 22 or later and is ESM only.
+
 ## What it costs on the wire
 
 Bytes per message, averaged over 500-message corpora (`bun run build --filter=hyperfly`, then
@@ -57,7 +59,7 @@ implementation ports against [the golden vectors](spec/vectors), not against thi
 code.
 
 - [wire v0](spec/wire-v0.md) — envelope, varints, bitmaps, node encodings, canonical
-  artifacts, decoder limits
+  artifacts, limits
 - [plan columnar v5](spec/plan-columnar-v5.md) — column layout, frame-of-reference
   bit packing, scaled-decimal and XOR numerics, packed text, trained dictionaries,
   grammar lanes, derived columns
