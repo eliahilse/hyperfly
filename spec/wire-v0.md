@@ -139,7 +139,8 @@ and MUST be rejected at IR validation.
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
 value two wire encodings. Each field has `optional` and
-`nullable` flags. Layout:
+`nullable` flags. When present, each flag MUST be a JSON boolean; any other
+value is invalid IR. Layout:
 
 1. **Presence bitmap** over the optional fields, in field order. Bit set =
    present.
@@ -265,4 +266,5 @@ partial values.
 canonical text → fingerprint, locking §5. `spec/vectors/limits.json` — each
 §6 limit just at and just past its bound, for decoders and encoders; its
 `decodeOnly` vectors are bodies a decoder MUST accept whose values an encoder
-MUST refuse (§6). Every implementation runs all three.
+MUST refuse (§6). `spec/vectors/ir.json` — invalid IR and valid near misses,
+locking §4 acceptance. Every implementation runs all four.
