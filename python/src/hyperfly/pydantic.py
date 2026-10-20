@@ -8,6 +8,7 @@ import typing
 from typing import Any, Literal, NoReturn, cast
 
 from ._codec import Codec, PackHooks, checked_options
+from ._ir import _check_field_name, _check_string
 from ._wire import INT_MAX, INT_MIN, DecodeError, EncodeError, HyperflyError, Limits, UnsupportedSchemaError
 
 try:
@@ -19,12 +20,25 @@ except ImportError:  # pragma: no cover
 
 try:
     from pydantic import BaseModel, ValidationError
+    from pydantic.fields import FieldInfo
 except ImportError as _err:  # pragma: no cover
     raise ImportError("hyperfly.pydantic requires pydantic >= 2.5") from _err
 
 
 def _unsupported(path: str, message: str) -> NoReturn:
     raise UnsupportedSchemaError(path, message)
+
+
+def _flatten_metadata(metadata: typing.Iterable[Any]) -> list[Any]:
+    flattened = []
+    for item in metadata:
+        if isinstance(item, FieldInfo):
+            flattened.extend(_flatten_metadata(item.metadata))
+        elif _at is not None and isinstance(item, _at.GroupedMetadata):
+            flattened.extend(_flatten_metadata(item))
+        elif item is not None:
+            flattened.append(item)
+    return flattened
 
 
 def _int_bounds(metadata: list[Any], path: str) -> tuple[int | None, int | None]:
@@ -91,6 +105,10 @@ def _floor_int(v: Any, path: str) -> int:
 def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
     origin = typing.get_origin(annotation)
 
+    if origin is typing.Annotated:
+        base, *inner_metadata = typing.get_args(annotation)
+        return _node_of(base, _flatten_metadata([*metadata, *inner_metadata]), path)
+
     if origin in (typing.Union, types.UnionType):
         args = [a for a in typing.get_args(annotation) if a is not type(None)]
         if len(args) != 1 or len(typing.get_args(annotation)) != 2:
@@ -121,7 +139,7 @@ def _node_of(annotation: Any, metadata: list[Any], path: str) -> dict[str, Any]:
     if annotation is bool:
         return {"kind": "bool"}
     if annotation is int:
-        lo, hi = _int_bounds(metadata, path)
+        lo, hi = _int_bounds(_flatten_metadata(metadata), path)
         node: dict[str, Any] = {"kind": "int"}
         if lo is not None and lo != INT_MIN:
             node["min"] = lo
@@ -150,18 +168,19 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
     if model.model_config.get("extra") == "allow":
         _unsupported(path, "models with extra='allow' cannot be represented — the wire has no room for undeclared fields")
     fields = []
+    seen: set[str] = set()
     for name, info in model.model_fields.items():
         field_path = f"{path}.{name}"
-        node = _node_of(info.annotation, list(info.metadata), field_path)
         # the wire name must be what model_dump(by_alias=True) emits AND what
         # model_validate accepts; anything that splits those has no single wire name
-        ser_name = info.serialization_alias or info.alias or name
+        alias = info.alias if info.alias is not None else name
+        ser_name = info.serialization_alias if info.serialization_alias is not None else alias
         if info.validation_alias is not None and not isinstance(info.validation_alias, str):
             _unsupported(
                 field_path,
                 "AliasChoices/AliasPath validation aliases have no single wire name; use alias=...",
             )
-        val_name = info.validation_alias or info.alias or name
+        val_name = info.validation_alias if info.validation_alias is not None else alias
         if ser_name != val_name:
             _unsupported(
                 field_path,
@@ -169,6 +188,17 @@ def _struct_of(model: type[BaseModel], path: str) -> dict[str, Any]:
                 "use a single alias=... so the wire has one portable field name",
             )
         wire_name = ser_name
+        if type(wire_name) is not str or not wire_name:
+            _unsupported(field_path, "field names must be non-empty strings")
+        try:
+            _check_string(wire_name, field_path, "field name")
+            _check_field_name(wire_name, field_path)
+        except HyperflyError as error:
+            _unsupported(field_path, str(error).removeprefix(f"{field_path}: "))
+        if wire_name in seen:
+            _unsupported(field_path, f'duplicate field "{wire_name}"')
+        seen.add(wire_name)
+        node = _node_of(info.annotation, list(info.metadata), field_path)
         field: dict[str, Any] = {"name": wire_name, "type": node}
         if node["kind"] == "nullable":
             field["type"] = node["inner"]

@@ -1,7 +1,9 @@
-from typing import Literal, Optional
+from enum import Enum
+from typing import Annotated, Literal, Optional
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from annotated_types import Ge, GroupedMetadata, Gt, Interval, Le, Lt
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, confloat, conint, constr, create_model, field_validator
 
 from conftest import load
 from hyperfly import Codec, CodecRegistry, DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError, compile_ir
@@ -68,6 +70,198 @@ def test_cross_language_fingerprint_for_shared_schema():
 
     ir = to_ir(Shared)
     assert ir == {"kind": "struct", "fields": [{"name": "pct", "type": {"kind": "int", "min": 0, "max": 100}}]}
+
+
+class _Tag(str, Enum):
+    A = "a"
+    B = "b"
+
+
+class _Nested(BaseModel):
+    n: int
+
+
+class _Bounds(GroupedMetadata):
+    def __iter__(self):
+        yield Interval(ge=0, le=10)
+        yield Gt(1)
+        yield Lt(9)
+
+
+class _WireName(str):
+    pass
+
+
+@pytest.mark.parametrize("annotation,node,value", [
+    (list[Annotated[int, Field(ge=0)]],
+     {"kind": "array", "element": {"kind": "int", "min": 0}}, [0, 2]),
+    (list[conint(ge=0)],
+     {"kind": "array", "element": {"kind": "int", "min": 0}}, [0, 2]),
+    (Annotated[int, Field(ge=0)] | None, {"kind": "nullable", "inner": {"kind": "int", "min": 0}}, 2),
+    (Optional[conint(ge=0)], {"kind": "nullable", "inner": {"kind": "int", "min": 0}}, 2),
+    (Annotated[int | None, Field(ge=0)], {"kind": "nullable", "inner": {"kind": "int", "min": 0}}, 2),
+    (list[list[Annotated[int, Field(ge=0)]]],
+     {"kind": "array", "element": {"kind": "array", "element": {"kind": "int", "min": 0}}}, [[0, 2], []]),
+    (list[Annotated[int, Ge(0)] | None],
+     {"kind": "array", "element": {"kind": "nullable", "inner": {"kind": "int", "min": 0}}}, [None, 0, 2]),
+    (list[Annotated[int | None, Field(ge=0)]],
+     {"kind": "array", "element": {"kind": "nullable", "inner": {"kind": "int", "min": 0}}}, [None, 0, 2]),
+    (list[Annotated[list[int], Field(max_length=3)]],
+     {"kind": "array", "element": {"kind": "array", "element": {"kind": "int"}}}, [[0, 2], []]),
+    (list[Annotated[_Nested, Field(description="nested model")]],
+     {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "n", "type": {"kind": "int"}}]}},
+     [{"n": 2}]),
+    (list[Annotated[_Tag, Field(description="nested enum")]],
+     {"kind": "array", "element": {"kind": "enum", "members": ["a", "b"]}}, ["a", "b"]),
+    (list[conint(ge=0, le=10, strict=True, multiple_of=2)],
+     {"kind": "array", "element": {"kind": "int", "min": 0, "max": 10}}, [0, 2, 10]),
+    (list[confloat(ge=0, le=10)],
+     {"kind": "array", "element": {"kind": "float64"}}, [0.0, 2.5]),
+    (list[constr(max_length=3)],
+     {"kind": "array", "element": {"kind": "string"}}, ["a", "abc"]),
+    (list[Annotated[int, None, Field(ge=0), object(), Le(10)]],
+     {"kind": "array", "element": {"kind": "int", "min": 0, "max": 10}}, [0, 10]),
+    (list[Annotated[int, _Bounds()]],
+     {"kind": "array", "element": {"kind": "int", "min": 2, "max": 8}}, [2, 8]),
+], ids=["field-list", "conint-list", "nullable-field", "optional-conint", "annotated-optional",
+        "nested-list", "nullable-element", "annotated-nullable-element", "annotated-list",
+        "annotated-model", "annotated-enum", "ignored-int-metadata", "confloat-list", "constr-list",
+        "mixed-metadata", "grouped-metadata"])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_nested_annotated_constraints(annotation, node, value, plan):
+    model = create_model("Constrained", x=(annotation, ...))
+    field = {"name": "x", "type": node}
+    if node["kind"] == "nullable":
+        field["type"] = node["inner"]
+        field["nullable"] = True
+    assert to_ir(model) == {"kind": "struct", "fields": [field]}
+    codec = compile(model, validate=True, plan=plan)
+    values = [value, None] if field.get("nullable") else [value]
+    for item in values:
+        payload = {"x": item}
+        expected = model.model_validate(payload)
+        assert codec.decode(codec.encode(payload)) == expected
+        assert codec.decode_body(codec.encode_body(expected)) == expected
+
+
+@pytest.mark.parametrize("annotation,value", [
+    (list[Annotated[int, Field(ge=0)]], [-1]),
+    (list[conint(ge=0)], [-1]),
+    (Annotated[int, Field(ge=0)] | None, -1),
+    (Optional[conint(ge=0)], -1),
+    (Annotated[int | None, Field(ge=0)], -1),
+    (list[list[Annotated[int, Ge(0)]]], [[-1]]),
+    (list[Annotated[int, Ge(0)] | None], [None, -1]),
+    (list[Annotated[int | None, Field(ge=0)]], [None, -1]),
+])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+@pytest.mark.parametrize("method", ["encode", "encode_body"])
+def test_nested_annotated_bounds_enforced_without_validation(annotation, value, plan, method):
+    model = create_model("Constrained", x=(annotation, ...))
+    codec = compile(model, validate=False, plan=plan)
+    with pytest.raises(EncodeError) as err:
+        getattr(codec, method)({"x": value})
+    assert err.value.code == "range"
+
+
+def test_optional_inner_metadata_merges_with_field_metadata():
+    class Constrained(BaseModel):
+        x: Annotated[int, Field(ge=0)] | None = Field(None, le=10)
+
+    class FieldLevel(BaseModel):
+        x: int | None = Field(None, ge=0, le=10)
+
+    expected = {"kind": "struct", "fields": [
+        {"name": "x", "type": {"kind": "int", "min": 0, "max": 10}, "nullable": True},
+    ]}
+    assert to_ir(Constrained) == to_ir(FieldLevel) == expected
+    assert compile(Constrained).artifact == compile(FieldLevel).artifact
+    assert compile(Constrained).fingerprint == compile(FieldLevel).fingerprint
+
+
+@pytest.mark.parametrize("annotation,path", [
+    (list[Annotated[dict[str, int], Field(description="unsupported")]], "$.x[]"),
+    (list[list[Annotated[dict[str, int], Field(description="unsupported")]]], "$.x[][]"),
+])
+def test_annotated_unsupported_inner_type_keeps_path(annotation, path):
+    model = create_model("Unsupported", x=(annotation, ...))
+    with pytest.raises(UnsupportedSchemaError) as err:
+        to_ir(model)
+    assert err.value.code == "unsupported"
+    assert err.value.path == path
+
+
+@pytest.mark.parametrize("wire_name,message", [
+    ("", "field names must be non-empty strings"),
+    (_WireName("wire"), "field names must be non-empty strings"),
+    ("__proto__", 'field name "__proto__" is not portable'),
+    ("0", 'field name "0" is an array index and would reorder as an object key'),
+    ("4294967294", 'field name "4294967294" is an array index and would reorder as an object key'),
+    ("\ud800", "field name contains a lone surrogate and has no portable encoding"),
+    ("\udfff", "field name contains a lone surrogate and has no portable encoding"),
+])
+@pytest.mark.parametrize("convert", [to_ir, compile])
+def test_nonportable_field_names_fail_with_adapter_path(wire_name, message, convert):
+    model = create_model("BadName", __config__=ConfigDict(defer_build=True), x=(int, Field(alias=wire_name)))
+    with pytest.raises(UnsupportedSchemaError) as err:
+        convert(model)
+    assert err.value.code == "unsupported"
+    assert err.value.path == "$.x"
+    assert str(err.value) == f"$.x: {message}"
+
+
+def test_nonportable_nested_field_name_keeps_adapter_path():
+    class Inner(BaseModel):
+        x: int = Field(alias="0")
+
+    class Outer(BaseModel):
+        rows: list[Inner]
+
+    with pytest.raises(UnsupportedSchemaError) as err:
+        to_ir(Outer)
+    assert err.value.path == "$.rows[].x"
+
+
+@pytest.mark.parametrize("annotation,node", [
+    (list[Annotated[float, Ge(0)]], {"kind": "array", "element": {"kind": "float64"}}),
+    (list[Annotated[str, Ge(0)]], {"kind": "array", "element": {"kind": "string"}}),
+    (list[Annotated[list[int], Ge(0)]], {"kind": "array", "element": {"kind": "array", "element": {"kind": "int"}}}),
+    (list[Annotated[_Nested, Ge(0)]],
+     {"kind": "array", "element": {"kind": "struct", "fields": [{"name": "n", "type": {"kind": "int"}}]}}),
+    (list[Annotated[_Tag, Ge(0)]], {"kind": "array", "element": {"kind": "enum", "members": ["a", "b"]}}),
+])
+def test_nested_bounds_only_apply_to_int_nodes(annotation, node):
+    model = create_model("Constrained", x=(annotation, ...))
+    assert to_ir(model) == {"kind": "struct", "fields": [{"name": "x", "type": node}]}
+
+
+@pytest.mark.parametrize("convert", [to_ir, compile])
+def test_duplicate_wire_names_fail_with_adapter_path(convert):
+    class Duplicate(BaseModel):
+        x: int = Field(alias="wire")
+        y: int = Field(alias="wire")
+
+    class Outer(BaseModel):
+        nested: Duplicate
+
+    with pytest.raises(UnsupportedSchemaError) as err:
+        convert(Outer)
+    assert err.value.code == "unsupported"
+    assert err.value.path == "$.nested.y"
+    assert str(err.value) == '$.nested.y: duplicate field "wire"'
+
+
+@pytest.mark.parametrize("wire_name", ["00", "01", "-1", "1.0", "4294967295", "9" * 5000, "١", "😀", "constructor"])
+def test_portable_wire_names_keep_ir_and_artifacts(wire_name):
+    model = create_model("Portable", x=(int, Field(alias=wire_name)))
+    expected = {"kind": "struct", "fields": [{"name": wire_name, "type": {"kind": "int"}}]}
+    assert to_ir(model) == expected
+    codec = compile(model, validate=True)
+    reference = compile_ir(expected)
+    assert codec.artifact == reference.artifact
+    assert codec.fingerprint == reference.fingerprint
+    assert codec.encode({wire_name: 2}) == reference.encode({wire_name: 2})
+    assert codec.decode(codec.encode({wire_name: 2})).x == 2
 
 
 @pytest.mark.parametrize("validate", [False, True])
