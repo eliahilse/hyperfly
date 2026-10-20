@@ -166,3 +166,50 @@ fn byte_amplification_arithmetic_saturates() {
     assert_eq!(codec.encode_body(&value).unwrap(), [1, b'a']);
     assert_eq!(codec.decode_body(&[1, b'a']).unwrap(), value);
 }
+
+#[test]
+fn grammar_lane_out_of_range_reports_lane_and_row() {
+    let codec = |base, len| {
+        Codec::compile_with_profile(
+            column(Node::Str),
+            Plan::Columnar,
+            Limits::default(),
+            false,
+            Some(Profile {
+                version: 2,
+                columns: vec![ProfileColumn {
+                    leaf: 0,
+                    dict: None,
+                    grammar: Some(vec![
+                        GrammarToken::Lit("id".into()),
+                        GrammarToken::Num(GrammarNum {
+                            base,
+                            len,
+                            case: GrammarCase::Lower,
+                        }),
+                    ]),
+                    derived: None,
+                }],
+            }),
+        )
+        .unwrap()
+    };
+    for (codec, body, message) in [
+        (
+            codec(16, 1),
+            vec![2, 3, 0, 0, 0, 16],
+            "$[].v.lane[0][1]: above declared max",
+        ),
+        (
+            codec(10, 15),
+            vec![
+                2, 3, 0, 0, 0, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10,
+            ],
+            "$[].v.lane[0][1]: decoded integer outside the v0 domain",
+        ),
+    ] {
+        let error = codec.decode_body(&body).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Range);
+        assert_eq!(error.message, message);
+    }
+}
