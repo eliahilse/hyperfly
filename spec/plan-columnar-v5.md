@@ -36,12 +36,13 @@ always agree.
 The row count is bounded by `maxItems`, the `maxAmplification` policy and the
 item budget of wire-v0 §6 — deliberately not by the remaining input: a
 width-zero column (§3.1) encodes any number of rows in a handful of bytes,
-and that is the point of the plan, not an attack. Implementations SHOULD also
-defer row materialization until every column payload has decoded, so
-truncated input fails before any allocation proportional to the count, and
-SHOULD hold decoded columns in packed or typed form until then, so a
-malformed later column fails before earlier ones are expanded into per-row
-values.
+and that is the point of the plan, not an attack. The array is charged
+against the budget once, with `n`; its leaves and their participating-row
+counts are not charged. Implementations SHOULD also defer row
+materialization until every column payload has decoded, so truncated input
+fails before any allocation proportional to the count, and SHOULD hold
+decoded columns in packed or typed form until then, so a malformed later
+column fails before earlier ones are expanded into per-row values.
 
 ## 3. Column payloads
 
