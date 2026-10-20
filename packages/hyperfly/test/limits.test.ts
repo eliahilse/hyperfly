@@ -80,3 +80,32 @@ describe("limit vectors: decode only", () => {
     });
   }
 });
+
+describe("the encoder's one-bit floor counts only the array's own bytes", () => {
+  test("a body whose floor a later sibling pays decodes, and its value is refused on encode", () => {
+    const ir: IRNode = {
+      kind: "struct",
+      fields: [
+        {
+          name: "a",
+          type: {
+            kind: "array",
+            element: {
+              kind: "array",
+              length: 2,
+              element: { kind: "struct", fields: [{ name: "e", type: { kind: "enum", members: ["a"] } }] },
+            },
+          },
+        },
+        { name: "b", type: { kind: "bytes" } },
+      ],
+    };
+    const codec = compileIR(ir, { plan: "columnar" });
+    const value = codec.decodeBody(fromHex(`0a64${"00".repeat(100)}`));
+    expect(value).toEqual({
+      a: Array.from({ length: 10 }, () => [{ e: "a" }, { e: "a" }]),
+      b: new Uint8Array(100),
+    });
+    expectCode(() => codec.encodeBody(value), "limit");
+  });
+});
