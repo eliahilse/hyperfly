@@ -1671,11 +1671,14 @@ def _settle(
     path: str,
     bound: int | None = None,
     total: Callable[[], int] | None = None,
+    quick: Callable[[], int | None] | None = None,
 ) -> None:
     """Charge a column's value lengths, given in participating-row order, as if value
     by value: the first value whose own checks fail or whose charge passes the byte
     budget decides the error. A column with no failure whose `bound` on the sum of its
-    lengths fits defers the exact sum, `total` or else the lengths summed."""
+    lengths fits defers the exact sum, `total` or else the lengths summed. One that does
+    not fit sums its lengths in runs, stopping at the run that passes the budget, unless
+    `quick` gives its exact sum without reading its rows."""
     budget = r.budget
     exact = total or (lambda: sum(make()))
     if failure is None and bound is not None:
@@ -1689,19 +1692,37 @@ def _settle(
     budget.settle()
     remaining = budget.byte_cap - budget.bytes
     lengths = make
-    if failure is None:
-        charge = exact()
-        if charge <= remaining:
-            budget.bytes += charge
-            return
-    else:
+    if failure is not None:
         stop = failure[0] + failure[1]
         lengths = lambda: islice(make(), stop)
+    else:
+        charge = quick() if quick is not None else None
+        if charge is None:
+            charge = _run_sums(lengths(), remaining)
+        if charge is not None and charge <= remaining:
+            budget.bytes += charge
+            return
     index = next(compress(itertools.count(), map(remaining.__lt__, accumulate(lengths()))), None)
     if index is not None:
         _dfail("limit", f"{path}[{index}]", f"decoded bytes exceed the byte budget of {budget.byte_cap}")
     assert failure is not None
     raise failure[2]
+
+
+_RUN = 4096
+
+
+def _run_sums(lengths: Iterable[int], remaining: int) -> int | None:
+    """The sum of the lengths, or None once a run of them takes it past `remaining`."""
+    lengths = iter(lengths)
+    total = 0
+    while True:
+        run = list(islice(lengths, _RUN))
+        if not run:
+            return total
+        total += sum(run)
+        if total > remaining:
+            return None
 
 
 def _settle_uniform(r: Reader, length: int, count: int, failure: _Failure | None, path: str) -> None:
@@ -1842,6 +1863,7 @@ def _dictionary_column(r: Reader, count: int, path: str, ctx: _Ctx, ordinal: int
             (count - escaped) * sizes[1] if ordinal in ctx.uniform_entries else sum(map(sizes.__getitem__, codes))
         )
         + sum(escape_lengths()),
+        (lambda: (count - escaped) * sizes[1] + sum(escape_lengths())) if ordinal in ctx.uniform_entries else None,
     )
     table = ctx.tables[ordinal]
 
@@ -1908,6 +1930,7 @@ def _grammar_column(r: Reader, count: int, path: str, ctx: _Ctx, ordinal: int) -
             escape_failure or failure,
             path,
             length * matched + _span(starts, ends),
+            lambda: length * matched + sum(escape_lengths()),
             lambda: length * matched + sum(escape_lengths()),
         )
     render = ctx.renderers[ordinal]
@@ -1977,18 +2000,31 @@ def _derived_column(
     else:
         make = derived_lengths
     def derived_total() -> int:
+        total = quick_total(False)
+        assert total is not None
+        return total
+
+    def quick_total(quick: bool = True) -> int | None:
+        """The column's decoded bytes; when `quick`, None unless they follow without
+        reading its rows (from equal lengths or a tally of its source already taken)."""
         if isinstance(source, int) or ordinal in ctx.uniform_derived:
             conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
         elif not escaped and 4 * count >= len(sizes):
             assert source_codes is not None
-            tally = source_codes(derivation["source"], counts=True)
+            tally = source_codes(derivation["source"], counts=True, cached=quick)
+            if tally is None:
+                return None
             conformed = sum(sizes[code] * times for code, times in tally.items() if times)
+        elif quick:
+            return None
         else:
             conformed = sum(derived_lengths())
         return conformed + sum(escape_lengths())
 
     bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
-    _settle(r, make, escape_failure or failure, path, bound, derived_total)
+    _settle(
+        r, make, escape_failure or failure, path, bound, derived_total, quick_total
+    )
     table = ctx.derived_tables[ordinal]
 
     if isinstance(source, int) and not escaped:
@@ -2325,15 +2361,17 @@ def _source_codes(
     part: int | None,
     ordinal: int,
     counts: bool = False,
+    cached: bool = False,
 ) -> Any:
     """A derivation source's dictionary codes at the rows a derived column with
     participation `part` covers: 0 outside the dictionary, _NOT_PARTICIPATING where
-    the source is absent; with `counts`, how often each code occurs there. Every derived
+    the source is absent; with `counts`, how often each code occurs there (None with
+    `cached` when that is not yet known). Every derived
     column that reads one source with the same participation shares one result, held
     in `found`."""
     if counts:
         tally = found.get(("counts", ordinal, part))
-        if tally is None:
+        if tally is None and not cached:
             source = _source_codes(ctx, columns, ordinal_base, count, found, part, ordinal)
             tally = found[("counts", ordinal, part)] = _tally(source, len(ctx.codes[ordinal]))
         return tally
@@ -2361,10 +2399,14 @@ def _source_codes(
     return result
 
 
+# a byte count per code beats one Counter pass up to about 60 codes
+_COUNT_EACH = 32
+
+
 def _tally(codes: array, entries: int) -> dict[int, int]:
     """How often each code occurs: by one byte count per code for byte codes of a small
     dictionary when they outnumber its codes fourfold, else in one pass."""
-    if codes.typecode == "B" and entries < 256 and len(codes) >= 4 * (entries + 1):
+    if codes.typecode == "B" and entries < _COUNT_EACH and len(codes) >= 4 * (entries + 1):
         data = codes.tobytes()
         return {code: data.count(code) for code in range(entries + 1)}
     return Counter(codes)

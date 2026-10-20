@@ -1,13 +1,10 @@
-import time
 import tracemalloc
 from array import array
 
 import pytest
 
-import hyperfly._codec
 from conftest import calls, load
-from hyperfly import HyperflyError, Limits, compile_ir
-from hyperfly._codec import _constant, _derived_code, _lane_codes, _recode, _Values
+from hyperfly import HyperflyError, Limits, _codec, compile_ir
 from test_limits import codec_for, revive
 from test_vectors import deep_eq
 
@@ -300,7 +297,7 @@ def _assert_fast_limit(codec, body):
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(body)
     # each body declares far more rows than it has bytes: a step per row would show here
-    assert calls(lambda: codec.decode_body(body)) < 4 * len(body)
+    assert calls(_rejects(codec, body, "limit")) < 4 * len(body)
     tracemalloc.start()
     try:
         with pytest.raises(HyperflyError):
@@ -407,7 +404,7 @@ def _derived_fanout(k):
     return ir, profile, ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * k + "ff"
 
 
-def _chain(fillers):
+def _chain(fillers, lanes="00"):
     names = [f"filler{i}" for i in range(fillers)]
     return (
         _array(*(_field(f"s{i}", "string") for i in range(7)), _field("n", "int")),
@@ -418,7 +415,7 @@ def _chain(fillers):
                 for i in range(1, 7)
             ),
         ),
-        ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * 6 + "ff",
+        ROWS_400K + "0300020001" + lanes * 50000 + "020000" + "0400" * 6 + "ff",
     )
 
 
@@ -426,6 +423,8 @@ FILLERS = [f"filler{i}" for i in range(298)]
 # codes 299 and 300 need two bytes; codes 99 and 100 fit one
 TWO_BYTE_CHAIN = _chain(298)
 ONE_BYTE_CHAIN = _chain(98)
+# rows alternate 00 and 10, codes 255 and 256 at every link
+STRADDLING_CHAIN = _chain(254, "aa")
 
 
 def _nested_derived(values):
@@ -438,71 +437,131 @@ def _nested_derived(values):
     return ir, profile, "a01f" + "010101010400" * 4000 + "ff"
 
 # bodies whose cost could scale with a profile's dictionary or grammar domain, or with
-# the number of derived columns, rather than with the body. Each of 4,000 nested arrays
-# holds its columns until the body has decoded, hence their larger peak.
-DOMAIN = [
-    ("derived from a 16,383-entry dictionary, one row per nested array", *_derived_table(16383), 24),
-    ("a 4-digit hex grammar, one row per nested array", *_lane_table(4), 24),
-    ("six derived columns of one grammar source", *_derived_fanout(6), 8),
-    ("a chain of six derivations over two-byte codes", *TWO_BYTE_CHAIN, 8),
-]
-
-
-def _decode_seconds(codec, body, code):
-    times = []
-    for _ in range(5):
-        start = time.perf_counter()
-        with pytest.raises(HyperflyError) as err:
-            codec.decode_body(body)
-        times.append(time.perf_counter() - start)
-        assert err.value.code == code
-    return sorted(times)[2]
-
-
-@pytest.mark.parametrize("ir, profile, body, mib", [case[1:] for case in DOMAIN], ids=[case[0] for case in DOMAIN])
-def test_profile_domains_and_fanout_stay_cheap(ir, profile, body, mib):
-    codec = compile_ir(ir, plan="columnar", profile=profile)
-    body = bytes.fromhex(body)
-    assert len(body) < 64 * 1024
-    with pytest.raises(HyperflyError) as err:
-        codec.decode_body(body)
-    assert err.value.code == "marker"
-    tracemalloc.start()
-    try:
-        with pytest.raises(HyperflyError):
-            codec.decode_body(body)
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    assert peak < mib << 20
-
-
+# the number of derived columns, rather than with the body, each against the same body
+# under a small profile: the memory ratio allowed (two-byte codes hold twice the bytes
+# of one-byte codes), and whether both have the same columns
 COST_PAIRS = [
-    # name, large, small, time ratio allowed, same column shape
-    ("dictionary size", _derived_table(16383), _derived_table(2), 2, True),
-    ("grammar domain", _lane_table(4), _lane_table(1), 2, True),
-    ("derived fan-out", _derived_fanout(6), _derived_fanout(1), 2, False),
-    ("two-byte codes", TWO_BYTE_CHAIN, ONE_BYTE_CHAIN, 3, True),
+    ("dictionary size", _derived_table(16383), _derived_table(2), 1.5, True),
+    ("grammar domain", _lane_table(4), _lane_table(1), 1.5, True),
+    ("derived fan-out", _derived_fanout(6), _derived_fanout(1), 1.5, False),
+    ("two-byte codes", TWO_BYTE_CHAIN, ONE_BYTE_CHAIN, 2.5, True),
+    ("two-byte codes across a high byte", STRADDLING_CHAIN, _chain(98, "aa"), 2.5, True),
     ("non-uniform derived values", _nested_derived(["x"] * 254 + ["yy"]), _nested_derived(["x"] * 255), 1.5, True),
 ]
 
 
+def _peak(run):
+    tracemalloc.start()
+    try:
+        run()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def _rejects(codec, body, code="marker"):
+    def run():
+        with pytest.raises(HyperflyError) as err:
+            codec.decode_body(body)
+        assert err.value.code == code
+
+    return run
+
+
 @pytest.mark.parametrize(
-    "large, small, ratio, same_shape", [case[1:] for case in COST_PAIRS], ids=[case[0] for case in COST_PAIRS]
+    "large, small, memory, same_shape", [case[1:] for case in COST_PAIRS], ids=[case[0] for case in COST_PAIRS]
 )
-def test_cost_follows_the_body_not_the_profile(large, small, ratio, same_shape):
-    # against the same body under a small profile, measured together, so a slow runner
-    # slows both; with the same columns, the calls made must match up to per-call setup
-    timings = []
+def test_cost_follows_the_body_not_the_profile(large, small, memory, same_shape):
+    # memory and calls against the same body under a small profile, in one process, so
+    # neither the runner nor the interpreter version moves the bound
+    peaks = []
     counts = []
     for ir, profile, body in (large, small):
-        codec = compile_ir(ir, plan="columnar", profile=profile)
-        body = bytes.fromhex(body)
-        timings.append(_decode_seconds(codec, body, "marker"))
-        counts.append(calls(lambda: codec.decode_body(body)))
-    assert timings[0] < ratio * timings[1]
+        run = _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))
+        run()
+        peaks.append(_peak(run))
+        counts.append(calls(run))
+    assert peaks[0] < memory * peaks[1] + (1 << 20)
     if same_shape:
         assert counts[0] < 1.25 * counts[1] + 8192
+
+
+@pytest.fixture
+def spied(monkeypatch):
+    """Counts of the helpers whose work could follow a profile's domain: every table
+    _recode is handed with the rows it serves and whether it answered per row, source
+    tallies, masked translates, and grammar code lookups."""
+    seen = {"recode": [], "tally": 0, "split": 0, "grammar codes": 0}
+
+    def wrap(name, record):
+        original = getattr(_codec, name, None)
+        if original is None:
+            return
+
+        def spy(*args, **kwargs):
+            result = original(*args, **kwargs)
+            record(args, result)
+            return result
+
+        monkeypatch.setattr(_codec, name, spy)
+
+    def recode(args, result):
+        values, table = args
+        rows = len(values) if hasattr(values, "__len__") else None
+        seen["recode"].append((len(table), rows, type(result) is array))
+
+    wrap("_recode", recode)
+    wrap("_tally", lambda args, result: seen.__setitem__("tally", seen["tally"] + 1))
+    wrap("_translate_split", lambda args, result: seen.__setitem__("split", seen["split"] + 1))
+    grammar_codes = _codec._Ctx.grammar_codes
+
+    def counted(self, *args):
+        seen["grammar codes"] += 1
+        return grammar_codes(self, *args)
+
+    monkeypatch.setattr(_codec._Ctx, "grammar_codes", counted)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "case", [case[1] for case in COST_PAIRS[:2]] + [TWO_BYTE_CHAIN, STRADDLING_CHAIN], ids=[case[0] for case in COST_PAIRS[:2]] + ["two-byte codes", "two-byte codes across a high byte"]
+)
+def test_lookups_follow_the_rows(case, spied):
+    ir, profile, body = case
+    _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))()
+    for size, rows, bulk in spied["recode"]:
+        # no table larger than the rows it serves, and no long run answered row by row
+        assert rows is None or size <= max(4 * rows, 256)
+        assert rows is None or rows < 256 or bulk
+    if case is STRADDLING_CHAIN:
+        # the five derived columns another derives from, each over codes 255 and 256
+        assert spied["split"] == 5
+
+
+def test_derived_columns_read_their_source_once(spied):
+    ir, profile, body = _derived_fanout(6)
+    _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))()
+    assert spied["grammar codes"] == 1
+
+
+def test_short_derived_columns_take_no_tally(spied):
+    ir, profile, body = _nested_derived(["x"] * 254 + ["yy"])
+    _rejects(compile_ir(ir, plan="columnar", profile=profile), bytes.fromhex(body))()
+    assert spied["tally"] == 0
+
+
+def test_an_early_overflow_takes_no_tally(spied):
+    # 3,668 kilobyte values pass the budget long before the end of 524,000 rows
+    ir = _array(_field("s", "string"), _field("d", "string"), _field("n", "int"))
+    profile = _profile(
+        {"leaf": 0, "dict": ["s"] + [f"f{i}" for i in range(254)]},
+        {"leaf": 1, "derived": {"source": 0, "values": ["x" * 1000] + ["y" * 1001] * 254}},
+    )
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex("e0fd1f0101" + "ff" * 65500 + "0400ff"))
+    assert err.value.code == "limit" and "[].d[3668]" in str(err.value)
+    assert spied["tally"] == 0
 
 
 @pytest.mark.parametrize("count", [70, 300])
@@ -533,23 +592,17 @@ def _non_uniform_fanout(values):
     return ir, profile, body
 
 
-def test_derived_totals_count_codes_once_per_source(monkeypatch):
-    tallies = []
-    tally = hyperfly._codec._tally
-    monkeypatch.setattr(hyperfly._codec, "_tally", lambda *args: tallies.append(args) or tally(*args))
+def test_derived_totals_count_codes_once_per_source(spied):
     limits = Limits(max_total_bytes=9_000_000, max_byte_amplification=2**40)
-    timings = []
     # 200,000 bytes of s, then 150,000 per consumer with x and yy, 100,000 with x and y
     for values, rejected in ((["x", "yy"], "d58"), (["x", "y"], "d88")):
         ir, profile, body = _non_uniform_fanout(values)
         codec = compile_ir(ir, plan="columnar", profile=profile, limits=limits)
-        body = bytes.fromhex(body)
         with pytest.raises(HyperflyError) as err:
-            codec.decode_body(body)
+            codec.decode_body(bytes.fromhex(body))
         assert err.value.code == "limit" and f"[].{rejected}[" in str(err.value)
-        timings.append(_decode_seconds(codec, body, "limit"))
-    assert len(tallies) == 6
-    assert timings[0] < 1.5 * timings[1]
+    # x and yy: one tally of s serves every consumer; x and y need none
+    assert spied["tally"] == 1
 
 
 TABLE = {0: 1, 3: 2, 9: 3}
@@ -561,7 +614,7 @@ def test_recoding_is_total(typecode):
     if typecode in ("q", None):
         values.append(-1)
     run = values if typecode is None else array(typecode, values)
-    assert list(_recode(run, TABLE)) == [TABLE.get(value, 0) for value in values]
+    assert list(_codec._recode(run, TABLE)) == [TABLE.get(value, 0) for value in values]
 
 
 @pytest.mark.parametrize(
@@ -572,27 +625,36 @@ def test_recoding_is_total(typecode):
         ("H", [256 + i % 13 for i in range(300)]),
         ("H", [256 + i % 13 for i in range(299)] + [3]),
         ("H", [0x3F00 + i % 256 for i in range(300)]),
+        # high bytes 0 to 3, which translate under a mask per high byte
+        ("H", [(i * 7) % 1024 for i in range(300)]),
+        ("H", [255 + i % 2 for i in range(300)]),
     ],
 )
 @pytest.mark.parametrize("wide", [False, True])
-def test_bulk_recoding_matches_lookups(typecode, values, wide):
-    table = {value: (value * 37 + 5) % (1000 if wide else 200) for value in range(0, 0x4000, 3)}
-    assert list(_recode(array(typecode, values), table)) == [table.get(value, 0) for value in values]
+def test_bulk_recoding_matches_lookups(typecode, values, wide, spied):
+    straddles = typecode == "H" and max(values) >> 8 != min(values) >> 8
+    for keys in (range(0, 0x4000, 3), range(0, 1000, 3)):
+        table = {value: (value * 37 + 5) % (1000 if wide else 200) for value in keys}
+        recoded = _codec._recode(array(typecode, values), table)
+        assert list(recoded) == [table.get(value, 0) for value in values]
+        # a table below four high bytes answers in bulk whatever the high bytes
+        assert type(recoded) is array or (straddles and len(keys) > 1000 // 3 + 1)
+    assert spied["split"] == straddles
 
 
 def test_lane_codes_are_total():
     keys = {0: 1, 3: 2, 9: 3}
-    assert list(_lane_codes([_Values(lambda: array("B", [0, 10]))], 2, keys)) == [1, 0]
-    assert list(_lane_codes([_Values(lambda: array("q", [-1, 3]))], 2, keys)) == [0, 2]
+    assert list(_codec._lane_codes([_codec._Values(lambda: array("B", [0, 10]))], 2, keys)) == [1, 0]
+    assert list(_codec._lane_codes([_codec._Values(lambda: array("q", [-1, 3]))], 2, keys)) == [0, 2]
     pairs = {(0, 0): 1, (3, 0): 2, (9, 0): 3, (3, 1): 4}
-    varying = _Values(lambda: array("q", [-1, 3, 9, 10] * 2))
+    varying = _codec._Values(lambda: array("q", [-1, 3, 9, 10] * 2))
     for rows in (8, 1):
-        assert list(_lane_codes([varying, _constant(0, 8)], rows, pairs)) == [0, 2, 3, 0] * 2
+        assert list(_codec._lane_codes([varying, _codec._constant(0, 8)], rows, pairs)) == [0, 2, 3, 0] * 2
 
 
 def test_derived_code_lookup_is_total():
     table = (None, "x", "y")
-    assert [_derived_code(table, {"x": 5}, code) for code in (0, 1, 2, 3, -1, 0xFFFF)] == [0, 5, 0, 0, 0, 0]
+    assert [_codec._derived_code(table, {"x": 5}, code) for code in (0, 1, 2, 3, -1, 0xFFFF)] == [0, 5, 0, 0, 0, 0]
 
 
 @pytest.mark.parametrize("total, code", [(3000, "ok"), (2999, "limit")])

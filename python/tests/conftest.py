@@ -10,8 +10,8 @@ def load(name: str):
 
 
 def calls(run) -> int:
-    """Python and builtin calls made by run(), which may raise. Wall-clock bounds vary
-    between runners; a step taken per row instead of per body shows up here exactly."""
+    """Python and builtin calls made by run(). Wall-clock bounds vary between runners;
+    a step taken per row instead of per body shows up here exactly."""
     count = 0
 
     def hook(frame, event, arg):
@@ -19,11 +19,10 @@ def calls(run) -> int:
         if event in ("call", "c_call"):
             count += 1
 
+    previous = sys.getprofile()
     sys.setprofile(hook)
     try:
         run()
-    except Exception:
-        pass
     finally:
-        sys.setprofile(None)
+        sys.setprofile(previous)
     return count

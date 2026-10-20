@@ -221,7 +221,11 @@ def test_hostile_bodies_fail_fast_and_small(ir, profile, body, code):
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(body)
     # each body declares far more rows than it has bytes: a step per row would show here
-    assert calls(lambda: codec.decode_body(body)) < 4 * len(body)
+    def run():
+        with pytest.raises(HyperflyError):
+            codec.decode_body(body)
+
+    assert calls(run) < 4 * len(body)
     tracemalloc.start()
     try:
         with pytest.raises(HyperflyError):
