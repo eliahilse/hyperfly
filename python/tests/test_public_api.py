@@ -73,3 +73,54 @@ def test_generic_codec_accepts_bytes_like_input(factory, envelope):
     encode = codec.encode if envelope else codec.encode_body
     decode = codec.decode if envelope else codec.decode_body
     assert decode(factory(encode(True))) is True
+
+
+def test_codec_envelope_dispatches_through_public_body_methods():
+    class InvertedCodec(hyperfly.Codec[bool]):
+        def encode_body(self, value: bool) -> bytes:
+            return super().encode_body(not value)
+
+        def decode_body(self, data: bytes | bytearray | memoryview) -> bool:
+            return not super().decode_body(data)
+
+    codec = InvertedCodec({"kind": "bool"})
+    plain = hyperfly.compile_ir(codec.ir)
+    assert codec.encode(True) == plain.encode(False)
+    assert codec.decode(plain.encode(False)) is True
+
+
+@pytest.mark.parametrize("corruption,code,message", [
+    ("short", "header", "shorter than envelope header"),
+    ("magic", "header", "bad magic"),
+    ("version", "header", "unsupported wire major 255"),
+    ("fingerprint", "fingerprint", None),
+])
+def test_codec_checks_envelope_before_dispatching_to_body(corruption, code, message):
+    calls = []
+
+    class TrackingCodec(hyperfly.Codec[bool]):
+        def decode_body(self, data: bytes | bytearray | memoryview) -> bool:
+            calls.append(data)
+            return super().decode_body(data)
+
+    codec = TrackingCodec({"kind": "bool"})
+    data = bytearray(codec.encode(True))
+    if corruption == "short":
+        data = data[:2]
+    elif corruption == "magic":
+        data[:3] = b"xx\xff"
+        data[3] ^= 1
+    elif corruption == "version":
+        data[2] = 255
+        data[3] ^= 1
+    else:
+        data[3] ^= 1
+    data[-1] = 255
+    with pytest.raises(hyperfly.DecodeError) as raised:
+        codec.decode(data)
+    assert raised.value.code == code
+    if message is not None:
+        assert str(raised.value) == message
+    assert calls == []
+    assert codec.decode(codec.encode(True)) is True
+    assert calls == [b"\x01"]

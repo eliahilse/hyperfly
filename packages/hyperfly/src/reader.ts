@@ -1,6 +1,6 @@
 import { DecodeError } from "./errors.js";
 
-export interface DecodeLimits {
+export interface Limits {
   maxDepth: number;
   maxItems: number;
   maxByteLength: number;
@@ -9,7 +9,7 @@ export interface DecodeLimits {
    * rows in a handful of bytes, so input length cannot bound such a count. This
    * caps the work a byte of hostile input can demand instead: a count above
    * maxAmplification * (remaining bytes + 1) is rejected, and the item budget
-   * of one body is capped at maxAmplification * (body length + 1). Local decode
+   * of one body is capped at maxAmplification * (body length + 1). Local
    * policy, like every other limit — raise it for routes that really ship
    * millions of constant rows.
    */
@@ -25,7 +25,7 @@ export interface DecodeLimits {
   maxByteAmplification: number;
 }
 
-export const DEFAULT_LIMITS: Readonly<DecodeLimits> = Object.freeze({
+export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   maxDepth: 64,
   maxItems: 2 ** 24,
   maxByteLength: 2 ** 28,
@@ -51,11 +51,11 @@ export class Reader {
   private readonly buf: Uint8Array;
   private readonly view: DataView;
   private offset = 0;
-  readonly limits: DecodeLimits;
+  readonly limits: Limits;
   readonly budget: ItemBudget;
   readonly byteBudget: ByteBudget;
 
-  constructor(buf: Uint8Array, limits: DecodeLimits, budget?: ItemBudget, byteBudget?: ByteBudget) {
+  constructor(buf: Uint8Array, limits: Limits, budget?: ItemBudget, byteBudget?: ByteBudget) {
     this.buf = buf;
     this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     this.limits = limits;

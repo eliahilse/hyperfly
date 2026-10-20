@@ -2,7 +2,7 @@ use std::fmt;
 
 /// A machine-readable reason for a compilation, encoding, or decoding failure.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     /// `varint`: an overlong ULEB128 encoding or one exceeding eight bytes.
     Varint,
@@ -44,6 +44,8 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Returns the lowercase wire error code name.
+    ///
+    /// These are the same codec error codes the TypeScript and Python packages report.
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Varint => "varint",
@@ -67,13 +69,77 @@ impl ErrorCode {
     }
 }
 
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A codec failure with a stable code and a human-readable explanation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Error {
-    /// The machine-readable failure category.
-    pub code: ErrorCode,
-    /// The explanation, including a value path when available.
-    pub message: String,
+    pub(crate) code: ErrorCode,
+    pub(crate) message: String,
+    pub(crate) mismatch: Option<Box<(String, String)>>,
+}
+
+impl Error {
+    pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Error {
+        Error {
+            code,
+            message: message.into(),
+            mismatch: None,
+        }
+    }
+
+    pub(crate) fn fingerprint(expected: &str, actual: String) -> Error {
+        Error {
+            code: ErrorCode::Fingerprint,
+            message: format!("codec fingerprint {expected} does not match payload {actual}"),
+            mismatch: Some(Box::new((expected.to_owned(), actual))),
+        }
+    }
+
+    /// Returns the machine-readable failure category.
+    ///
+    /// ```
+    /// use hyperfly_core::{Codec, CompileOptions, ErrorCode, Node};
+    ///
+    /// let codec = Codec::compile(Node::Str, CompileOptions::default()).unwrap();
+    /// let err = codec.decode(&[0x68, 0x66]).unwrap_err();
+    /// assert_eq!(err.code(), ErrorCode::Header);
+    /// assert_eq!(err.code().as_str(), "header");
+    /// ```
+    pub fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// Returns the explanation, including a value path when available.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the codec's and the payload's fingerprints, as lowercase hex, for an
+    /// [`ErrorCode::Fingerprint`] error from [`crate::Codec::decode`]; `None` otherwise.
+    ///
+    /// ```
+    /// use hyperfly_core::{Codec, CompileOptions, Node, Value};
+    ///
+    /// let strings = Codec::compile(Node::Str, CompileOptions::new()).unwrap();
+    /// let bools = Codec::compile(Node::Bool, CompileOptions::new()).unwrap();
+    /// let bytes = strings.encode(&Value::Str("hi".into())).unwrap();
+    ///
+    /// let err = bools.decode(&bytes).unwrap_err();
+    /// assert_eq!(
+    ///     err.fingerprint_mismatch(),
+    ///     Some((bools.fingerprint(), strings.fingerprint()))
+    /// );
+    /// ```
+    pub fn fingerprint_mismatch(&self) -> Option<(&str, &str)> {
+        self.mismatch
+            .as_deref()
+            .map(|(expected, actual)| (expected.as_str(), actual.as_str()))
+    }
 }
 
 impl fmt::Display for Error {
@@ -88,10 +154,7 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn err<T>(code: ErrorCode, message: impl Into<String>) -> Result<T> {
-    Err(Error {
-        code,
-        message: message.into(),
-    })
+    Err(Error::new(code, message))
 }
 
 /// The smallest wire integer, `-(2^53 - 1)`.
@@ -102,7 +165,19 @@ const ULEB_DOMAIN_MAX: u64 = (1u64 << 56) - 1;
 const MAX_ULEB_BYTES: usize = 8;
 
 /// Resource bounds enforced during encoding and decoding.
-#[derive(Debug, Clone, Copy)]
+///
+/// Start from [`Limits::default`] and adjust individual fields:
+///
+/// ```
+/// use hyperfly_core::{Codec, CompileOptions, Limits, Node};
+///
+/// let mut limits = Limits::default();
+/// limits.max_depth = 16;
+/// let codec = Codec::compile(Node::Str, CompileOptions::new().with_limits(limits)).unwrap();
+/// assert_eq!(codec.limits().max_depth, 16);
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
     /// Maximum nesting depth from root depth zero; default 64. Structs, arrays, and nullable nodes count.
     pub max_depth: u32,
@@ -199,7 +274,7 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(buf: &'a [u8], limits: Limits) -> Self {
+    pub fn new(buf: &'a [u8], limits: &Limits) -> Self {
         Reader {
             buf,
             pos: 0,
