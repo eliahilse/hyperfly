@@ -1,7 +1,7 @@
 import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
-import { hasPayload, type IRNode } from "./ir.js";
+import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -30,8 +30,12 @@ export interface EncodeCtx {
   maxByteLength: number;
   maxAmplification: number;
   maxTotalItems: number;
+  maxTotalBytes: number;
+  maxByteAmplification: number;
   /** array counts charged so far in this body, columnar arrays once with their row count */
   items: number;
+  /** decoded string and bytes bytes charged so far in this body, as a decoder charges them */
+  bytes: number;
   columnar: boolean;
   deflate?: (data: Uint8Array) => Uint8Array;
   /** packing is only canonical when the same codec can also inflate what it wrote */
@@ -68,6 +72,23 @@ export function chargeItems(count: number, ctx: EncodeCtx, path: string): void {
 export function checkItemBudget(ctx: EncodeCtx, bodyLength: number): void {
   const cap = Math.min(ctx.maxTotalItems, ctx.maxAmplification * (bodyLength + 1));
   if (ctx.items > cap) fail("limit", "$", `${ctx.items} items in a ${bodyLength}-byte body exceed the item budget of ${cap}`);
+}
+
+/** Charge a string or bytes value's decoded length; a sum past maxTotalBytes can be refused before the body is complete. */
+export function chargeBytes(n: number, ctx: EncodeCtx, path: string, index?: number): void {
+  ctx.bytes += n;
+  if (ctx.bytes > ctx.maxTotalBytes) {
+    const at = index === undefined ? path : `${path}[${index}]`;
+    fail("limit", at, `${ctx.bytes} decoded bytes in this body exceed maxTotalBytes ${ctx.maxTotalBytes}`);
+  }
+}
+
+/** The byte budget against the final body length, once the body is complete. */
+export function checkByteBudget(ctx: EncodeCtx, bodyLength: number): void {
+  const cap = Math.min(ctx.maxTotalBytes, ctx.maxByteAmplification * (bodyLength + 1));
+  if (ctx.bytes > cap) {
+    fail("limit", "$", `${ctx.bytes} decoded bytes in a ${bodyLength}-byte body exceed the byte budget of ${cap}`);
+  }
 }
 
 export function typeAcceptsNull(node: IRNode): boolean {
@@ -130,6 +151,7 @@ export function encodeNode(
     case "string": {
       const bytes = utf8Bytes(value, path);
       if (bytes.length > ctx.maxByteLength) fail("limit", path, `string of ${bytes.length} bytes exceeds the codec limit`);
+      chargeBytes(bytes.length, ctx, path);
       writeUleb(w, BigInt(bytes.length));
       w.bytes(bytes);
       return;
@@ -137,6 +159,7 @@ export function encodeNode(
     case "bytes": {
       if (!(value instanceof Uint8Array)) fail("type", path, "expected Uint8Array");
       if (value.length > ctx.maxByteLength) fail("limit", path, `bytes of ${value.length} exceeds the codec limit`);
+      chargeBytes(value.length, ctx, path);
       writeUleb(w, BigInt(value.length));
       w.bytes(value);
       return;
@@ -144,12 +167,14 @@ export function encodeNode(
     case "literal": {
       const matches = node.value === null ? value === null : value === node.value;
       if (!matches) fail("type", path, `expected literal ${JSON.stringify(node.value)}`);
+      chargeBytes(literalBytes(node), ctx, path);
       return;
     }
     case "enum": {
       if (typeof value !== "string") fail("type", path, "expected enum member string");
       const index = node.members.indexOf(value);
       if (index < 0) fail("type", path, `"${value}" is not an enum member`);
+      chargeBytes(utf8Lengths(node.members)[index]!, ctx, path);
       writeUleb(w, BigInt(index));
       return;
     }

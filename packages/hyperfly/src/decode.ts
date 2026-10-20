@@ -1,6 +1,6 @@
 import { columnarEligible, decodeColumnarArray } from "./columnar.js";
 import { DecodeError } from "./errors.js";
-import { hasPayload, type IRNode } from "./ir.js";
+import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
 import { INT_MAX, INT_MIN, readUleb, unzigzag } from "./varint.js";
@@ -99,6 +99,7 @@ export function decodeNode(
     }
     case "string": {
       const len = readCount(r, r.limits.maxByteLength, "string length", path);
+      r.chargeBytes(len, path);
       const bytes = r.bytes(len);
       try {
         return utf8.decode(bytes);
@@ -109,15 +110,18 @@ export function decodeNode(
     }
     case "bytes": {
       const len = readCount(r, r.limits.maxByteLength, "bytes length", path);
+      r.chargeBytes(len, path);
       return r.bytes(len).slice();
     }
     case "literal":
+      r.chargeBytes(literalBytes(node), path);
       return node.value;
     case "enum": {
       const index = readUleb(r);
       if (index >= BigInt(node.members.length)) {
         fail("range", path, `enum index ${index} out of range`);
       }
+      r.chargeBytes(utf8Lengths(node.members)[Number(index)]!, path);
       return node.members[Number(index)]!;
     }
     case "nullable": {
