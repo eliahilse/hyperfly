@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { compileIR, train, type IRNode } from "../src/index.js";
+import { compileIR, HyperflyError, train, type IRNode } from "../src/index.js";
 import { MAX_DICT_ENTRIES } from "../src/profile.js";
 
 const ROWS: IRNode = {
@@ -10,6 +10,14 @@ const ROWS: IRNode = {
 const samples = (values: string[][]) => values.map((vs) => vs.map((s) => ({ s })));
 
 describe("reference trainer", () => {
+  test("rejects samples that are not an array", () => {
+    for (const bad of ["abc", 42, null, { length: 1, 0: [] }, new Set([[]])]) {
+      const run = () => train(ROWS, bad as never);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options" }));
+    }
+  });
+
   test("keeps repeated values and drops one-offs", () => {
     const profile = train(ROWS, samples([["alpha", "alpha"], ["alpha", "beta"], ["beta", "unique"]]));
     expect(profile?.shared.columns).toEqual([{ leaf: 0, dict: ["alpha", "beta"] }]);

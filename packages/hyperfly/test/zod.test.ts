@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
-import { UnsupportedSchemaError } from "../src/errors.js";
+import { DecodeError, EncodeError, HyperflyError, UnsupportedSchemaError } from "../src/errors.js";
 import { serializeArtifact } from "../src/index.js";
 import { compile, toIR } from "../src/zod.js";
 
@@ -120,6 +120,113 @@ describe("compile round-trip", () => {
     const json = new TextEncoder().encode(JSON.stringify(payload)).length;
     expect(wire).toBeLessThan(json);
   });
+});
+
+describe("coded validation errors", () => {
+  test.each([null, 0, 1, "true", {}, []].map((value) => [value] as const))("rejects validate: %p before compiling", (validate) => {
+    const run = () => compile({} as never, { validate } as never);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "options", message: "validate: must be a boolean" }));
+  });
+
+  test.each([
+    null, [], new Date(), new (class Options {})(),
+    { plan: "bad" }, { limits: { bogus: 1 } }, { pack: 42 }, { pack: [] },
+    { limits: new Date() }, { pack: new (class Pack {})() },
+  ].map((options) => [options] as const))("checks options %p before an unsupported schema", (options) => {
+    for (const schema of [{} as never, z.union([z.string(), z.number()])]) {
+      const run = () => compile(schema, options as never);
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "options" }));
+    }
+  });
+
+  test("reads option getters once before compiling", () => {
+    const reads = { limits: 0, plan: 0, pack: 0, profile: 0, validate: 0 };
+    const codec = compile(z.string().min(3), {
+      get limits() { reads.limits++; return {}; },
+      get plan(): "row" { return ++reads.plan === 1 ? "row" : "bad" as never; },
+      get pack(): false { return ++reads.pack === 1 ? false : 42 as never; },
+      get profile() { reads.profile++; return undefined; },
+      get validate() { return ++reads.validate === 1; },
+    });
+    expect(reads).toEqual({ limits: 1, plan: 1, pack: 1, profile: 1, validate: 1 });
+    expect(() => codec.encode("x")).toThrow(EncodeError);
+  });
+
+  test.each(["plan", "validate"] as const)("wraps a throwing %s getter before compiling", (key) => {
+    const cause = new Error("cannot read option");
+    const options = Object.defineProperty({}, key, { get() { throw cause; } });
+    const run = () => compile({} as never, options);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "options", cause }));
+  });
+
+  test.each(["encode", "encodeBody", "decode", "decodeBody"] as const)("wraps %s parse errors and preserves their cause", (method) => {
+    const schema = z.string().min(3);
+    const originalParse = schema.parse.bind(schema);
+    let cause: unknown;
+    schema.parse = (value) => {
+      try {
+        return originalParse(value);
+      } catch (error) {
+        cause = error;
+        throw error;
+      }
+    };
+    const codec = compile(schema, { validate: true });
+    const trusted = compile(schema);
+    const run = () => {
+      if (method === "encode" || method === "encodeBody") return codec[method]("x");
+      return codec[method](method === "decode" ? trusted.encode("x") : trusted.encodeBody("x"));
+    };
+    try {
+      run();
+      throw new Error("expected validation failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(method.startsWith("encode") ? EncodeError : DecodeError);
+      expect(error).toBeInstanceOf(HyperflyError);
+      expect((error as HyperflyError).code).toBe("validation");
+      expect(cause).toBeInstanceOf(z.ZodError);
+      expect((error as HyperflyError).cause).toBe(cause);
+      expect((error as HyperflyError).message).toBe(`$: ${(cause as Error).message}`);
+    }
+  });
+
+  test.each(["encode", "encodeBody", "decode", "decodeBody"] as const)("preserves %s codec errors", (method) => {
+    const codec = compile(z.string(), { validate: true, limits: { maxByteLength: 1 } });
+    const run = () => {
+      if (method === "encode" || method === "encodeBody") return codec[method]("long");
+      return codec[method](new Uint8Array());
+    };
+    const code = method.startsWith("encode") ? "limit" : method === "decode" ? "header" : "truncated";
+    expect(run).toThrow(method.startsWith("encode") ? EncodeError : DecodeError);
+    expect(run).toThrow(expect.objectContaining({ code }));
+    try {
+      run();
+    } catch (error) {
+      expect((error as HyperflyError).cause).toBeUndefined();
+    }
+  });
+
+  test("preserves an error thrown by a custom parse", () => {
+    const cause = new TypeError("custom validation failed");
+    const schema = z.string();
+    schema.parse = () => { throw cause; };
+    const codec = compile(schema, { validate: true });
+    expect(() => codec.encode("value")).toThrow(EncodeError);
+    expect(() => codec.encode("value")).toThrow(expect.objectContaining({ code: "validation", cause }));
+  });
+
+  test.each([null, "invalid", { toString: null }].map((cause) => [cause] as const))(
+    "wraps non-Error parse failures: %p", (cause) => {
+      const schema = z.string();
+      schema.parse = () => { throw cause; };
+      const codec = compile(schema, { validate: true });
+      expect(() => codec.encodeBody("value")).toThrow(EncodeError);
+      expect(() => codec.encodeBody("value")).toThrow(expect.objectContaining({ code: "validation", cause }));
+    },
+  );
 });
 
 describe("integer bound intersection (retro #7/#8)", () => {

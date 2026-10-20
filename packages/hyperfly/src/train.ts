@@ -1,4 +1,5 @@
 import { columnarEligible, flattenLeaves, intColumnEncodedLength, matchGrammar } from "./columnar.js";
+import { HyperflyError } from "./errors.js";
 import { defaultPackHooks } from "./pack.js";
 import { hasLoneSurrogate, validateIR, withinStack, type IRNode } from "./ir.js";
 import {
@@ -448,6 +449,7 @@ function detectDerivation(
  * detection are intentionally separated here so none is mistaken for wire logic.
  */
 export function train(ir: IRNode, samples: readonly unknown[], options: TrainOptions = {}): Profile | undefined {
+  if (!Array.isArray(samples)) throw new HyperflyError("options", "samples: must be an array");
   return withinStack(() => trainProfile(ir, samples, options));
 }
 

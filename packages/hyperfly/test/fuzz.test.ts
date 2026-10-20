@@ -79,6 +79,44 @@ const PROFILE = {
   shared: { columns: [{ leaf: 2, dict: ["alpha", "beta", "gamma"] }] },
 };
 
+const JSON_ATOMS = [null, false, true, 0, -1, 0.5, -0.5, Number.MAX_SAFE_INTEGER, 1e300, -1e300,
+  "", "alpha", "__proto__", "constructor", "toString", "\ud800"];
+const JSON_KEYS = ["version", "shared", "columns", "leaf", "dict", "grammar", "derived", "source", "values",
+  "lit", "num", "base", "len", "case", "hints", "limits", "plan", "pack", "profile", "deflate", "inflate",
+  "maxDepth", "maxItems", "maxByteLength", "maxAmplification", "maxTotalItems", "maxDeph", "__proto__", "constructor", "toString"];
+
+function arbitraryJSON(rng: () => number, depth = 4): unknown {
+  if (depth === 0 || rng() < 0.55) return JSON_ATOMS[Math.floor(rng() * JSON_ATOMS.length)];
+  const length = Math.floor(rng() * 5);
+  if (rng() < 0.5) return Array.from({ length }, () => arbitraryJSON(rng, depth - 1));
+  return Object.fromEntries(Array.from({ length }, () => [
+    JSON_KEYS[Math.floor(rng() * JSON_KEYS.length)]!, arbitraryJSON(rng, depth - 1),
+  ]));
+}
+
+function mutateJSON(value: object, rng: () => number): unknown {
+  const clone = structuredClone(value);
+  const objects: object[] = [];
+  const walk = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    objects.push(node);
+    for (const inner of Object.values(node)) walk(inner);
+  };
+  walk(clone);
+  const target = objects[Math.floor(rng() * objects.length)]!;
+  const keys = Object.keys(target);
+  const key = keys.length > 0 && rng() < 0.8
+    ? keys[Math.floor(rng() * keys.length)]!
+    : Array.isArray(target) ? String(target.length) : JSON_KEYS[Math.floor(rng() * JSON_KEYS.length)]!;
+  if (rng() < 0.2) {
+    if (Array.isArray(target)) target.splice(Number(key), 1);
+    else Reflect.deleteProperty(target, key);
+  } else {
+    Object.defineProperty(target, key, { value: arbitraryJSON(rng), enumerable: true, writable: true, configurable: true });
+  }
+  return clone;
+}
+
 const SLOW_DECODE_MS = 100;
 let slowest = 0;
 
@@ -379,6 +417,60 @@ function mutate(rng: () => number, src: Uint8Array): Uint8Array {
   }
   return src.subarray(0, at());
 }
+
+describe("compile fuzzing", () => {
+  test("arbitrary JSON profiles compile or throw HyperflyError", () => {
+    const rng = mulberry32(0xc0ded);
+    const profiles = [
+      PROFILE,
+      { ...PROFILE, version: { toString: null, constructor: "__proto__" } },
+      { ...PROFILE, version: 2, shared: { columns: [{
+        leaf: 2, dict: ["alpha", "beta"],
+        grammar: [{ lit: "id-" }, { num: { base: 10, len: 3, case: "lower" } }],
+      }] } },
+      { ...PROFILE, version: 2, shared: { columns: [{ leaf: 2, derived: { source: 0, values: ["alpha"] } }] } },
+    ];
+    const check = (profile: unknown): void => {
+      try {
+        compileIR(SCHEMAS[10]!, { plan: "columnar", profile: profile as never });
+      } catch (error) {
+        expect(error, JSON.stringify(profile)).toBeInstanceOf(HyperflyError);
+        expect((error as HyperflyError).code).toBe("ir");
+      }
+    };
+    for (const profile of [...JSON_ATOMS, ...profiles, [], {}]) check(profile);
+    for (let i = 0; i < 2000; i++) {
+      check(arbitraryJSON(rng));
+      check(mutateJSON(profiles[i % profiles.length]!, rng));
+    }
+  });
+
+  test("arbitrary options compile or throw coded HyperflyError", () => {
+    const rng = mulberry32(0x0f7105);
+    const options = [
+      {},
+      { plan: "row", limits: { maxDepth: 64, maxItems: 100, maxByteLength: 1000, maxAmplification: 4096 } },
+      { plan: "columnar", profile: PROFILE, pack: false },
+      { plan: "columnar", profile: PROFILE, pack: { deflate: undefined, inflate: undefined } },
+    ];
+    const check = (value: unknown): void => {
+      try {
+        compileIR(SCHEMAS[10]!, value as never);
+      } catch (error) {
+        expect(error, JSON.stringify(value)).toBeInstanceOf(HyperflyError);
+        expect(["options", "ir"]).toContain((error as HyperflyError).code);
+      }
+    };
+    for (const value of [...JSON_ATOMS, ...options, [], undefined]) check(value);
+    for (let i = 0; i < 2000; i++) {
+      const value = arbitraryJSON(rng);
+      check(value);
+      check(mutateJSON(options[i % options.length]!, rng));
+      const key = ["limits", "plan", "pack", "profile"][i % 4]!;
+      check({ plan: "columnar", [key]: value });
+    }
+  });
+});
 
 describe("decoder fuzzing", () => {
   test("random bytes never escape the error type", () => {
