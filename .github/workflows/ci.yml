@@ -109,6 +109,17 @@ jobs:
 
       - run: cargo test --manifest-path rust/Cargo.toml
 
+  # the library builds on the rust-version Cargo.toml declares; the dev-dependencies need a newer toolchain
+  rust-msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.82
+
+      - run: cargo check --manifest-path rust/Cargo.toml --lib --locked
+
   interop:
     runs-on: ubuntu-latest
     timeout-minutes: 10
