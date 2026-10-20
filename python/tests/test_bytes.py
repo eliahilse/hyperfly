@@ -79,6 +79,77 @@ def test_length_prefixes_are_charged_before_their_bytes(kind):
     assert _code(_array(_field("a", kind)), body, 2) == "truncated"
 
 
+THREE_MEMBERS = {"kind": "enum", "members": ["a", "bb", "ccc"]}
+NEG_ZERO, INFINITY = "0000000000000080", "000000000000f07f"
+
+
+@pytest.mark.parametrize(
+    "kind, body, total, outcome",
+    [
+        # a short column's values are read, checked and charged in row order
+        ("string", "01008000", 64, "varint: overlong uvarint encoding"),
+        ("string", "0200016104616263", 64, "limit: $[].a[1]: string length exceeds limit"),
+        ("string", "020001ff0561", 64, "utf8: $[].a[0]: invalid UTF-8"),
+        ("string", "020002616202ff62", 64, "utf8: $[].a[1]: invalid UTF-8"),
+        ("string", "0200026162026364", 3, "limit: $[].a[1]: decoded bytes exceed the byte budget of 3"),
+        ("string", "02000261620363", 3, "limit: $[].a[1]: decoded bytes exceed the byte budget of 3"),
+        ("string", "02000261620363", 5, "truncated: unexpected end of input"),
+        ("bytes", "028000", 64, "varint: overlong uvarint encoding"),
+        ("bytes", "020161046162", 64, "limit: $[].a[1]: bytes length exceeds limit"),
+        ({"kind": "int", "min": 0, "max": 5}, "02000980", 64, "range: $[].a[0]: above declared max"),
+        ({"kind": "int", "min": 0, "max": 5}, "02000180", 64, "truncated: unexpected end of input"),
+        ({"kind": "int", "min": 0, "max": 5}, "0301020303", 64, "range: $[].a[2]: below declared min"),
+        ("float64", "02030280", 64, "truncated: unexpected end of input"),
+        ("float64", "020302ffffffffffffff7f00", 64, "range: $[].a[0]: decimal mantissa outside the v0 domain"),
+        ("float64", "02020202ffffffffffffff7f", 64, "range: $[].a[1]: decimal mantissa outside the v0 domain"),
+        ("float64", "0200" + NEG_ZERO + INFINITY, 64, "float: $[].a[0]: negative-zero bit pattern"),
+        ("float64", "0200" + "0000000000000040" + INFINITY, 64, "float: $[].a[1]: non-finite float64"),
+        ("float64", "0200" + "0000000000000040" + "000000", 64, "truncated: unexpected end of input"),
+        (THREE_MEMBERS, "0104", 64, "bitmap: $[].a: nonzero bit-packing padding"),
+        (THREE_MEMBERS, "020d", 64, "range: $[].a[1]: enum index 3 out of range"),
+        (THREE_MEMBERS, "0306", 3, "limit: $[].a[1]: decoded bytes exceed the byte budget of 3"),
+        (THREE_MEMBERS, "0306", 5, "limit: $[].a[2]: decoded bytes exceed the byte budget of 5"),
+        (THREE_MEMBERS, "0306", 6, "ok"),
+    ],
+)
+def test_short_columns_fail_at_their_first_failing_value(kind, body, total, outcome):
+    t = {"kind": kind} if isinstance(kind, str) else kind
+    limits = Limits(max_byte_length=3, max_total_bytes=total, max_byte_amplification=2**40)
+    codec = compile_ir(_array({"name": "a", "type": t}), plan="columnar", limits=limits)
+    try:
+        codec.decode_body(bytes.fromhex(body))
+    except HyperflyError as err:
+        assert f"{err.code}: {err}" == outcome
+    else:
+        assert outcome == "ok"
+
+
+def test_a_short_column_of_a_long_value_defers_its_charge(readers):
+    codec = compile_ir(_array(_field("a", "string"), _field("b", "string")), plan="columnar", pack=False)
+    rows = [{"a": "x" * 1100, "b": "y"}]
+    assert codec.decode_body(codec.encode_body(rows)) == rows
+    budget = readers[-1].budget
+    assert (budget.bytes, budget.owed) == (1, 1100)
+    budget.settle()
+    assert budget.bytes == 1101
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"s": {"x": "p", "y": {"z": 1}}, "o": 2, "n": None},
+        {"s": {"x": "", "y": {"z": -1}}, "n": 1.5},
+    ],
+)
+def test_one_row_nests_and_drops_absent_fields(row):
+    inner = {"kind": "struct", "fields": [_field("z", "int")]}
+    nested = {"kind": "struct", "fields": [_field("x", "string"), {"name": "y", "type": inner}]}
+    ir = _array({"name": "s", "type": nested}, dict(_field("o", "int"), optional=True), dict(_field("n", "float64"), nullable=True))
+    codec = compile_ir(ir, plan="columnar")
+    decoded = codec.decode_body(codec.encode_body([row]))
+    assert decoded == [row] and list(decoded[0]) == list(row)
+
+
 # rows abcdefghij (code 1), k (code 2), zz (escape), abcdefghij: 10, 1, 2 and 10 decoded bytes
 DICT = _profile({"leaf": 0, "dict": ["abcdefghij", "k"]})
 
@@ -937,6 +1008,7 @@ def test_derived_totals_count_codes_once_per_source(spied):
         assert err.value.code == "limit" and f"[].{rejected}[" in str(err.value)
     # x and yy: one tally of s serves every consumer; x and y need none
     assert spied["tally"] == 1
+
 
 
 TABLE = {0: 1, 3: 2, 9: 3}
