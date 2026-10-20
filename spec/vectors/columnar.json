@@ -1104,6 +1104,41 @@
         }
       ],
       "hex": "0c04fdffffffffffff1f02340008e4e464ffffffffffff0f"
+    },
+    {
+      "name": "col-empty-nested-struct-falls-back-to-row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "empty",
+              "type": {
+                "kind": "struct",
+                "fields": []
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "empty": {},
+          "b": true
+        },
+        {
+          "empty": {},
+          "b": false
+        }
+      ],
+      "hex": "020100"
     }
   ],
   "invalidDecode": [
@@ -3047,6 +3082,49 @@
           {
             "a": "zz",
             "b": "ybb"
+          }
+        ]
+      },
+      {
+        "name": "grammar-matching-value-escaped-decodes",
+        "description": "A grammar match may arrive escaped; canonical encoding chooses plain mode on the size tie with grammar mode.",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "x",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "01030100023030",
+        "value": [
+          {
+            "x": "00"
           }
         ]
       }

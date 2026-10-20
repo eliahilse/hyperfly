@@ -80,6 +80,12 @@ An integer-valued field accepts any JSON number whose value is an integer in
 `[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
 fractional values and values beyond that range are invalid IR.
 
+IR nodes MUST be objects whose `kind` names one of the kinds below, with all
+required members shown below; fields MUST be objects with `name` and `type`.
+Node-valued members MUST themselves be valid IR nodes. `members` and `fields`
+MUST be arrays. Optional members, when present, MUST have the declared type;
+`null` is not an absent member.
+
 ### 4.1 `bool`
 
 One byte: `0x00` false, `0x01` true. Decoders MUST reject other values.
@@ -93,8 +99,9 @@ representable in v0).
 ### 4.3 `enum { members }`
 
 ULEB128 index into `members`, in declared order. Index MUST be
-`< members.length`. Members are unique, non-empty, strings only. Declared
-order is canonical; reordering members is a new artifact.
+`< members.length`. `members` MUST contain at least one member, and each
+member MUST be a unique, non-empty string. Declared order is canonical;
+reordering members is a new artifact.
 
 ### 4.4 `int { min?, max? }`
 
@@ -102,6 +109,7 @@ order is canonical; reordering members is a new artifact.
 - Otherwise: `svarint(value)`.
 - Declared bounds are validated on encode AND decode; out-of-bounds MUST be
   rejected on both sides.
+- If both bounds are declared, `min` MUST NOT exceed `max`.
 
 ### 4.5 `float64`
 
@@ -123,6 +131,8 @@ surrogates. Decoders MUST reject invalid UTF-8 (no replacement characters).
 - Fixed (`length` declared): exactly `length` elements, no count on the wire.
 - Variable: `uvarint` count, then elements.
 
+A declared `length` MUST be a non-negative integer in the domain of §3.3.
+
 ### 4.9 `nullable { inner }`
 
 One byte: `0x00` null (nothing follows), `0x01` value follows. Other values
@@ -132,14 +142,17 @@ field flag (§4.10), which uses the bitmap instead.
 ### 4.10 `struct { fields }`
 
 Field order is declared order and is canonical.
+Field names MUST be non-empty strings and MUST be unique within a struct.
 
 **Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
 a decimal array index (`0`, or a digit string with no leading zero whose value
 is below 2^32 − 1). Some host languages reorder integer-index object keys and
 trap `__proto__` assignment, so such names cannot round-trip or fingerprint
 identically everywhere. Field names, enum members, and string literals MUST
-also be well-formed Unicode: a lone surrogate has no portable representation
-and MUST be rejected at IR validation.
+also be well-formed Unicode: a sequence of Unicode scalar values. Lone
+surrogates MUST be rejected at IR validation; every other scalar value,
+including NUL, U+FFFE, U+FFFF and unassigned code points, MUST be accepted
+subject to the other constraints on that string.
 
 **Closed objects.** IR nodes and fields MUST NOT carry keys this
 specification does not define for their kind, and profile objects MUST NOT
@@ -148,7 +161,8 @@ not define; such IR or profile is invalid.
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
-value two wire encodings. Each field has `optional` and
+value two wire encodings. A field's `nullable` flag MUST NOT be true when its
+type is a `nullable` node. Each field has `optional` and
 `nullable` flags. When present, each flag MUST be a JSON boolean; any other
 value is invalid IR. Layout:
 
@@ -158,6 +172,12 @@ value is invalid IR. Layout:
    nullable field regardless of presence. Bit set = null. For an absent
    field the bit MUST be zero.
 3. Field values, in field order, for fields that are present and not null.
+
+A decoder MUST read the presence bitmap and then the null bitmap, validating
+each bitmap's padding, before processing fields in declared order. It MUST
+check a field's absent/null consistency when that field is reached, reporting
+a null bit for an absent field as `bitmap`; it MUST NOT check this before
+decoding earlier fields' values.
 
 Absent and null are distinct states and MUST NOT collapse. A required field
 cannot be absent; a non-nullable field cannot be null; violations are encode
@@ -203,8 +223,12 @@ Implementations MUST enforce configurable limits with these v0 defaults:
   nodes enclosing it, and decoding a node deeper than `maxDepth` is rejected
   with `depth`,
 - `maxItems` 2^24 per array, applied to a declared length as to a count,
-- `maxByteLength` 2^28 per string/bytes value, checked against the length
-  prefix before any payload byte is read,
+- `maxByteLength` 2^28 per string/bytes value and per declared inflated
+  total of a deflate-packed string column (plan-columnar-v5 §3), checked
+  against the length prefix before any payload byte is read; for a decoder
+  with inflate also per blob of such a column, checked against the blob
+  length before any blob byte is read (a decoder without inflate rejects the
+  column as `unsupported` without reading the blob length, below),
 - `maxAmplification` 32: an array count above
   `maxAmplification × (remaining bytes + 1)` is rejected, where remaining
   bytes are the body bytes after the count or, for a fixed-length array,
@@ -262,7 +286,9 @@ an exceeded budget as `limit`:
   declared inflated total, after `maxByteLength` is applied to each declared
   length and to the total, and before the blob length is read; a decoder
   without an inflate capability charges it the same way and only then
-  rejects the column as `unsupported`; its values are not charged again;
+  rejects the column as `unsupported`; otherwise it reads the blob length
+  and MUST reject a length above `maxByteLength` with `limit` before reading
+  any blob byte. Its values are not charged again;
 - a dictionary, grammar or derived value, when it is resolved, after its own
   checks (code range, source lookup) and after `maxByteLength` is applied to
   its length, and before it is built (a grammar value's length follows from
