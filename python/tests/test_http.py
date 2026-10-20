@@ -265,7 +265,9 @@ def test_json_fallback_preserves_json_only_field_serializer(with_bytes):
     assert json.loads(body) == ({"t": "T", "payload": "aGk="} if with_bytes else {"t": "T"})
 
 
-def test_json_fallback_preserves_nested_json_serializers_with_non_utf8_bytes():
+@pytest.mark.parametrize("payload,number", [(b"hi", "number:7"), (b"\xfb\xff\xfe\x00", 7)])
+def test_json_fallback_nested_json_serializers_depend_on_utf8_bytes(payload, number):
+    import base64
     from pydantic import ConfigDict, field_serializer
 
     class Child(BaseModel):
@@ -278,16 +280,17 @@ def test_json_fallback_preserves_nested_json_serializers_with_non_utf8_bytes():
             return f"number:{value}"
 
     class Response(BaseModel):
-        model_config = ConfigDict(ser_json_bytes="hex")
+        model_config = ConfigDict(ser_json_bytes="utf8")
         child: Child
 
-    value = Response(child=Child(payload=b"\xfb\xff\xfe\x00", number=7))
+    value = Response(child=Child(payload=payload, number=7))
     body, _ = encode_for(negotiate(None, CodecRegistry()), value)
-    assert json.loads(body) == {"child": {"payload": "+//+AA==", "number": "number:7"}}
+    assert json.loads(body) == {"child": {"payload": base64.b64encode(payload).decode(), "number": number}}
     assert Child.model_config["ser_json_bytes"] == "utf8"
-    assert Response.model_config["ser_json_bytes"] == "hex"
-    with pytest.raises(UnicodeDecodeError):
-        value.child.model_dump(mode="json")
+    assert Response.model_config["ser_json_bytes"] == "utf8"
+    if payload != b"hi":
+        with pytest.raises(UnicodeDecodeError):
+            value.child.model_dump(mode="json")
 
 
 def test_json_fallback_preserves_json_only_plain_serializer():
@@ -320,7 +323,7 @@ def test_json_fallback_preserves_model_serializer_divergent_shapes():
     assert json.loads(body) == {"message": "custom", "items": "collapsed"}
 
 
-def test_json_fallback_preserves_bytes_serializer_divergent_shape():
+def test_json_fallback_overlays_bytes_serializer_divergent_shape():
     from pydantic import field_serializer
 
     class Response(BaseModel):
@@ -331,7 +334,8 @@ def test_json_fallback_preserves_bytes_serializer_divergent_shape():
             return {"size": len(value)}
 
     body, _ = encode_for(negotiate(None, CodecRegistry()), Response(payload=b"hi"))
-    assert json.loads(body) == {"payload": {"size": 2}}
+    assert Response(payload=b"hi").model_dump(mode="json") == {"payload": {"size": 2}}
+    assert json.loads(body) == {"payload": "aGk="}
 
 
 def test_json_fallback_preserves_model_json_config():
@@ -408,6 +412,184 @@ def test_json_fallback_dumps_models_without_bytes_once(monkeypatch):
         body, _ = encode_for(negotiate(None, CodecRegistry()), value)
         assert json.loads(body) == {"message": "hello"}
     assert calls == [{"mode": "json", "by_alias": True}] * 2
+
+
+@pytest.mark.parametrize("payload", [None, b"hi", b"\xff"])
+def test_json_fallback_respects_model_dump_exclusions(payload):
+    class Response(BaseModel):
+        secret: str
+        payload: bytes | None = None
+
+        def model_dump(self, **kwargs):
+            return super().model_dump(exclude={"secret"}, **kwargs)
+
+    value = Response(secret="hidden", payload=payload)
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    expected = {None: None, b"hi": "aGk=", b"\xff": "/w=="}[payload]
+    assert json.loads(body) == {"payload": expected}
+    assert value.secret == "hidden"
+
+
+def test_json_fallback_preserves_unpicklable_schema_defaults_and_callbacks():
+    import threading
+    from typing import Annotated, Any
+    from pydantic import Field, PlainSerializer
+
+    class Formatter:
+        def __init__(self):
+            self.lock = threading.Lock()
+
+        def format(self, value):
+            return f"number:{value}"
+
+    formatter = Formatter()
+
+    class Response(BaseModel):
+        lock: Any = Field(default=threading.Lock(), exclude=True, alias="private-lock")
+        number: Annotated[int, PlainSerializer(formatter.format, when_used="json")]
+        payload: bytes
+
+    value = Response(number=7, payload=b"hi")
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"number": "number:7", "payload": "aGk="}
+
+
+def test_json_fallback_overlays_model_containers_and_json_dictionary_keys():
+    from pydantic import ConfigDict
+
+    class Key(Enum):
+        first = "first"
+        second = 2
+
+    class Child(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="base64")
+        payload: bytes
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes="base64")
+        unique: set[bytes]
+        frozen: frozenset[bytes]
+        numbers: dict[int, bytes]
+        states: dict[Key, bytes]
+        flags: dict[bool, bytes]
+        floats: dict[float, bytes]
+        chunks: tuple[bytes, ...]
+        children: list[Child]
+
+    payload = b"\xfb\xff\xff"
+    value = Response(
+        unique={payload, b"hi"}, frozen=frozenset({payload, b"hi"}),
+        numbers={7: payload, 8: b"hi"}, states={Key.first: payload, Key.second: b"hi"},
+        flags={True: payload, False: b"hi"}, floats={1e-7: payload, math.inf: b"hi"},
+        chunks=(payload, b"hi"), children=[Child(payload=payload), Child(payload=b"hi")],
+    )
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    plain = json.loads(body)
+    assert set(plain.pop("unique")) == {"+///", "aGk="}
+    assert set(plain.pop("frozen")) == {"+///", "aGk="}
+    assert plain == {
+        "numbers": {"7": "+///", "8": "aGk="}, "states": {"first": "+///", "2": "aGk="},
+        "flags": {"true": "+///", "false": "aGk="}, "floats": {"1e-07": "+///", "inf": "aGk="},
+        "chunks": ["+///", "aGk="], "children": [{"payload": "+///"}, {"payload": "aGk="}],
+    }
+
+
+@pytest.mark.parametrize("payload,expected", [(b"hi", "aGk="), (b"\xff", "/w=="), (bytearray(b"hi"), "aGk=")])
+def test_json_fallback_finds_runtime_bytes_in_any(payload, expected):
+    from typing import Any
+
+    class Response(BaseModel):
+        data: Any
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(data={"items": [payload]}))
+    assert json.loads(body) == {"data": {"items": [expected]}}
+
+
+def test_json_fallback_normalizes_python_dump_when_bytes_are_not_utf8():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from typing import Any
+    from uuid import UUID
+
+    class State(Enum):
+        online = "online"
+
+    class Response(BaseModel):
+        data: Any
+
+    value = Response(data={
+        "payload": b"\xff", "time": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "amount": Decimal("1.25"), "id": UUID(int=0), "state": State.online,
+        "values": [math.nan, math.inf, -math.inf], "chunks": {b"\xff"},
+    })
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert json.loads(body) == {"data": {
+        "payload": "/w==", "time": "2026-01-01T00:00:00Z", "amount": "1.25",
+        "id": "00000000-0000-0000-0000-000000000000", "state": "online",
+        "values": [None, None, None], "chunks": ["/w=="],
+    }}
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_json_fallback_handles_wrapped_utf8_serialization_errors(wrapped):
+    from pydantic_core import PydanticSerializationError
+
+    class Response(BaseModel):
+        payload: bytes
+
+        def model_dump(self, **kwargs):
+            if kwargs["mode"] == "json":
+                if wrapped:
+                    try:
+                        self.payload.decode("utf-8")
+                    except UnicodeDecodeError as error:
+                        raise PydanticSerializationError("serialization failed") from error
+                raise PydanticSerializationError("Error serializing to JSON: invalid utf-8 sequence of 1 bytes from index 0")
+            return super().model_dump(**kwargs)
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(payload=b"\xff"))
+    assert json.loads(body) == {"payload": "/w=="}
+
+
+def test_json_fallback_propagates_unrelated_model_serialization_errors():
+    from pydantic import field_serializer
+    from pydantic_core import PydanticSerializationError
+
+    class Response(BaseModel):
+        payload: bytes
+
+        @field_serializer("payload", when_used="json")
+        def fail(self, value):
+            raise ValueError("serializer failed")
+
+    with pytest.raises(PydanticSerializationError, match="serializer failed"):
+        encode_for(negotiate(None, CodecRegistry()), Response(payload=b"hi"))
+
+
+@pytest.mark.parametrize("shape", ["dict-length", "dict-order", "dict-key", "list-length"])
+def test_json_fallback_leaves_divergent_model_shapes_unchanged(shape):
+    from pydantic import model_serializer
+
+    plain = {
+        "dict-length": {"first": "one"},
+        "dict-order": {"second": "two", "first": "one"},
+        "dict-key": {"other": "one", "second": "two"},
+        "list-length": ["one"],
+    }[shape]
+
+    class Response(BaseModel):
+        payload: bytes
+
+        @model_serializer(mode="plain")
+        def serialize(self, info):
+            if info.mode == "json":
+                return plain
+            if shape == "list-length":
+                return [b"one", b"two"]
+            return {"first": b"one", "second": "two"}
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(payload=b"hi"))
+    assert json.loads(body) == plain
 
 
 def test_json_fallback_cache_does_not_retain_model_classes():
@@ -546,6 +728,25 @@ def test_json_bytes_walk_handles_deep_arrays():
     registry = CodecRegistry([compile_ir(ir)])
     body = b"[" * 200 + b'"AA=="' + b"]" * 200
     assert _decode_json_pair(body, registry) == [("json", expected)] * 2
+
+
+def test_json_bytes_walk_does_not_copy_deep_schema_from_extra_frames():
+    ir = {"kind": "bytes"}
+    for _ in range(490):
+        ir = {"kind": "array", "element": ir}
+    recursion_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(max(recursion_limit, 2000))
+        registry = CodecRegistry([compile_ir(ir)])
+    finally:
+        sys.setrecursionlimit(recursion_limit)
+
+    def decode(frames):
+        if frames:
+            return decode(frames - 1)
+        return _decode_json_pair(b"0", registry)
+
+    assert decode(20) == [("json", 0)] * 2
 
 
 @pytest.mark.parametrize("validate", [False, True])
