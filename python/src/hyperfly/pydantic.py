@@ -274,24 +274,19 @@ class ModelCodec(Codec[Any]):
         except ValidationError as error:
             raise DecodeError("validation", f"$: {error}") from error
 
-    def encode(self, value: Any) -> bytes:
-        """Encode a model or mapping once; raise ``validation`` or base encoding errors."""
-        return super().encode(self._to_value(value))
-
-    def decode(self, data: bytes | bytearray | memoryview) -> Any:
-        """Decode to a model when validating, or a plain value otherwise.
-
-        Raise ``validation`` or the base codec's envelope and body errors.
-        """
-        return self._from_value(super().decode(data))
-
     def encode_body(self, value: Any) -> bytes:
-        """Encode a model or mapping without an envelope; errors follow encode."""
-        return self._encode_body_raw(self._to_value(value))
+        """Encode a model or mapping without an envelope.
+
+        Raise ``validation`` or base body encoding errors.
+        """
+        return super().encode_body(self._to_value(value))
 
     def decode_body(self, data: bytes | bytearray | memoryview) -> Any:
-        """Decode a body to a model when validating; errors follow decode."""
-        return self._from_value(self._decode_body_raw(data))
+        """Decode a body to a model when validating, or a plain value otherwise.
+
+        Raise ``validation`` or base body decoding errors.
+        """
+        return self._from_value(super().decode_body(data))
 
 
 def compile(  # noqa: A001 - mirrors the documented API
