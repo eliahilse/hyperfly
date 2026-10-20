@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/columnar.json" with { type: "json" };
 import { z } from "zod";
-import { compileIR, FingerprintMismatchError, toHex, train, type IRNode } from "../src/index.js";
+import { compileIR, FingerprintMismatchError, train, type IRNode } from "../src/index.js";
+import { toHex } from "../src/canonical.js";
 import { HyperflyError } from "../src/errors.js";
 import { compile } from "../src/zod.js";
 

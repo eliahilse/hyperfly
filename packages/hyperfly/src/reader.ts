@@ -18,13 +18,13 @@ export interface DecodeLimits {
   maxTotalItems: number;
 }
 
-export const DEFAULT_LIMITS: DecodeLimits = {
+export const DEFAULT_LIMITS: Readonly<DecodeLimits> = Object.freeze({
   maxDepth: 64,
   maxItems: 2 ** 24,
   maxByteLength: 2 ** 28,
   maxAmplification: 32,
   maxTotalItems: 2 ** 24,
-};
+});
 
 /** Items charged so far against one body's cap; a sub-reader over the same body shares it. */
 export interface ItemBudget {

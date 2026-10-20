@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   compileIR,
+  DEFAULT_LIMITS,
   FingerprintMismatchError,
-  HEADER_SIZE,
   serializeArtifact,
   type IRNode,
 } from "../src/index.js";
+import { HEADER_SIZE } from "../src/codec.js";
 import { DecodeError, HyperflyError } from "../src/errors.js";
 
 const STRUCT: IRNode = {
@@ -78,6 +79,16 @@ describe("canonical artifact", () => {
 });
 
 describe("limits", () => {
+  test("defaults are frozen and custom limits stay local to a codec", () => {
+    expect(Object.isFrozen(DEFAULT_LIMITS)).toBe(true);
+    const ir: IRNode = { kind: "array", element: { kind: "bool" } };
+    const limited = compileIR(ir, { limits: { maxItems: 1 } });
+    const bytes = new Uint8Array([2, 1, 0]);
+    expect(() => limited.decodeBody(bytes)).toThrow("limit");
+    expect(compileIR(ir).decodeBody(bytes)).toEqual([true, false]);
+    expect(DEFAULT_LIMITS.maxItems).toBe(2 ** 24);
+  });
+
   test("depth limit", () => {
     let ir: IRNode = { kind: "int" };
     for (let i = 0; i < 70; i++) ir = { kind: "array", element: ir };
