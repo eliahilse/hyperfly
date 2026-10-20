@@ -4,7 +4,8 @@ from array import array
 
 import pytest
 
-from conftest import load
+import hyperfly._codec
+from conftest import calls, load
 from hyperfly import HyperflyError, Limits, compile_ir
 from hyperfly._codec import _constant, _derived_code, _lane_codes, _recode, _Values
 from test_limits import codec_for, revive
@@ -296,10 +297,10 @@ def test_hostile_literal_repetition_in_the_row_plan():
 
 def _assert_fast_limit(codec, body):
     assert len(body) < 64 * 1024
-    start = time.perf_counter()
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(body)
-    elapsed = time.perf_counter() - start
+    # each body declares far more rows than it has bytes: a step per row would show here
+    assert calls(lambda: codec.decode_body(body)) < 4 * len(body)
     tracemalloc.start()
     try:
         with pytest.raises(HyperflyError):
@@ -309,7 +310,6 @@ def _assert_fast_limit(codec, body):
         tracemalloc.stop()
     assert err.value.code == "limit"
     assert "byte budget" in str(err.value)
-    assert elapsed < 0.2
     assert peak < 8 << 20
 
 
@@ -407,15 +407,35 @@ def _derived_fanout(k):
     return ir, profile, ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * k + "ff"
 
 
+def _chain(fillers):
+    names = [f"filler{i}" for i in range(fillers)]
+    return (
+        _array(*(_field(f"s{i}", "string") for i in range(7)), _field("n", "int")),
+        _profile(
+            {"leaf": 0, "dict": names + ["00", "10"], "grammar": [LANE, LANE]},
+            *(
+                {"leaf": i, "dict": names + ["x", "y"], "derived": {"source": i - 1, "values": ["x"] * (fillers + 1) + ["y"]}}
+                for i in range(1, 7)
+            ),
+        ),
+        ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * 6 + "ff",
+    )
+
+
 FILLERS = [f"filler{i}" for i in range(298)]
-TWO_BYTE_CHAIN = (
-    _array(*(_field(f"s{i}", "string") for i in range(7)), _field("n", "int")),
-    _profile(
-        {"leaf": 0, "dict": FILLERS + ["00", "10"], "grammar": [LANE, LANE]},
-        *({"leaf": i, "dict": FILLERS + ["x", "y"], "derived": {"source": i - 1, "values": ["x"] * 299 + ["y"]}} for i in range(1, 7)),
-    ),
-    ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * 6 + "ff",
-)
+# codes 299 and 300 need two bytes; codes 99 and 100 fit one
+TWO_BYTE_CHAIN = _chain(298)
+ONE_BYTE_CHAIN = _chain(98)
+
+
+def _nested_derived(values):
+    # 4,000 nested arrays of one row, each with a derived column over a 255-entry dictionary
+    ir = _nested("a", "b")
+    profile = _profile(
+        {"leaf": 0, "dict": ["s"] + [f"f{i}" for i in range(254)]},
+        {"leaf": 1, "derived": {"source": 0, "values": values}},
+    )
+    return ir, profile, "a01f" + "010101010400" * 4000 + "ff"
 
 # bodies whose cost could scale with a profile's dictionary or grammar domain, or with
 # the number of derived columns, rather than with the body. Each of 4,000 nested arrays
@@ -428,7 +448,7 @@ DOMAIN = [
 ]
 
 
-def _decode_ms(codec, body, code):
+def _decode_seconds(codec, body, code):
     times = []
     for _ in range(5):
         start = time.perf_counter()
@@ -444,7 +464,9 @@ def test_profile_domains_and_fanout_stay_cheap(ir, profile, body, mib):
     codec = compile_ir(ir, plan="columnar", profile=profile)
     body = bytes.fromhex(body)
     assert len(body) < 64 * 1024
-    assert _decode_ms(codec, body, "marker") < 0.2
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(body)
+    assert err.value.code == "marker"
     tracemalloc.start()
     try:
         with pytest.raises(HyperflyError):
@@ -455,22 +477,32 @@ def test_profile_domains_and_fanout_stay_cheap(ir, profile, body, mib):
     assert peak < mib << 20
 
 
+COST_PAIRS = [
+    # name, large, small, time ratio allowed, same column shape
+    ("dictionary size", _derived_table(16383), _derived_table(2), 2, True),
+    ("grammar domain", _lane_table(4), _lane_table(1), 2, True),
+    ("derived fan-out", _derived_fanout(6), _derived_fanout(1), 2, False),
+    ("two-byte codes", TWO_BYTE_CHAIN, ONE_BYTE_CHAIN, 3, True),
+    ("non-uniform derived values", _nested_derived(["x"] * 254 + ["yy"]), _nested_derived(["x"] * 255), 1.5, True),
+]
+
+
 @pytest.mark.parametrize(
-    "large, small",
-    [
-        (_derived_table(16383), _derived_table(2)),
-        (_lane_table(4), _lane_table(1)),
-        (_derived_fanout(6), _derived_fanout(1)),
-    ],
-    ids=["dictionary size", "grammar domain", "derived fan-out"],
+    "large, small, ratio, same_shape", [case[1:] for case in COST_PAIRS], ids=[case[0] for case in COST_PAIRS]
 )
-def test_cost_follows_the_body_not_the_profile(large, small):
-    # relative to the same body under a small profile, so a slow runner slows both
+def test_cost_follows_the_body_not_the_profile(large, small, ratio, same_shape):
+    # against the same body under a small profile, measured together, so a slow runner
+    # slows both; with the same columns, the calls made must match up to per-call setup
     timings = []
+    counts = []
     for ir, profile, body in (large, small):
         codec = compile_ir(ir, plan="columnar", profile=profile)
-        timings.append(_decode_ms(codec, bytes.fromhex(body), "marker"))
-    assert timings[0] < 2 * timings[1] + 0.005
+        body = bytes.fromhex(body)
+        timings.append(_decode_seconds(codec, body, "marker"))
+        counts.append(calls(lambda: codec.decode_body(body)))
+    assert timings[0] < ratio * timings[1]
+    if same_shape:
+        assert counts[0] < 1.25 * counts[1] + 8192
 
 
 @pytest.mark.parametrize("count", [70, 300])
@@ -501,14 +533,23 @@ def _non_uniform_fanout(values):
     return ir, profile, body
 
 
-def test_derived_totals_count_codes_once_per_source():
+def test_derived_totals_count_codes_once_per_source(monkeypatch):
+    tallies = []
+    tally = hyperfly._codec._tally
+    monkeypatch.setattr(hyperfly._codec, "_tally", lambda *args: tallies.append(args) or tally(*args))
+    limits = Limits(max_total_bytes=9_000_000, max_byte_amplification=2**40)
     timings = []
-    for values in (["x", "yy"], ["x", "y"]):
+    # 200,000 bytes of s, then 150,000 per consumer with x and yy, 100,000 with x and y
+    for values, rejected in ((["x", "yy"], "d58"), (["x", "y"], "d88")):
         ir, profile, body = _non_uniform_fanout(values)
-        codec = compile_ir(ir, plan="columnar", profile=profile, limits=Limits(max_total_bytes=9_000_000))
-        timings.append(_decode_ms(codec, bytes.fromhex(body), "limit"))
-    assert timings[0] < 0.2
-    assert timings[0] < 2 * timings[1] + 0.005
+        codec = compile_ir(ir, plan="columnar", profile=profile, limits=limits)
+        body = bytes.fromhex(body)
+        with pytest.raises(HyperflyError) as err:
+            codec.decode_body(body)
+        assert err.value.code == "limit" and f"[].{rejected}[" in str(err.value)
+        timings.append(_decode_seconds(codec, body, "limit"))
+    assert len(tallies) == 6
+    assert timings[0] < 1.5 * timings[1]
 
 
 TABLE = {0: 1, 3: 2, 9: 3}

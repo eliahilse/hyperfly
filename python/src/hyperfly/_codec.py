@@ -1689,15 +1689,19 @@ def _settle(
     budget.settle()
     remaining = budget.byte_cap - budget.bytes
     lengths = make
-    if failure is not None:
+    if failure is None:
+        charge = exact()
+        if charge <= remaining:
+            budget.bytes += charge
+            return
+    else:
         stop = failure[0] + failure[1]
         lengths = lambda: islice(make(), stop)
     index = next(compress(itertools.count(), map(remaining.__lt__, accumulate(lengths()))), None)
     if index is not None:
         _dfail("limit", f"{path}[{index}]", f"decoded bytes exceed the byte budget of {budget.byte_cap}")
-    if failure is not None:
-        raise failure[2]
-    budget.bytes += exact()
+    assert failure is not None
+    raise failure[2]
 
 
 def _settle_uniform(r: Reader, length: int, count: int, failure: _Failure | None, path: str) -> None:
@@ -1975,7 +1979,7 @@ def _derived_column(
     def derived_total() -> int:
         if isinstance(source, int) or ordinal in ctx.uniform_derived:
             conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
-        elif not escaped:
+        elif not escaped and 4 * count >= len(sizes):
             assert source_codes is not None
             tally = source_codes(derivation["source"], counts=True)
             conformed = sum(sizes[code] * times for code, times in tally.items() if times)
@@ -2089,8 +2093,9 @@ def _lane_codes(lanes: list[_Values], rows: int, keys: dict[Any, int]) -> Iterab
 
 
 def _recode(values: Iterable[int], table: dict[int, int]) -> Iterable[int]:
-    """table.get(value, 0) for every value. Long runs of byte values, or of two-byte
-    values that share their high byte, translate in bulk through 256 of the entries."""
+    """table.get(value, 0) for every value. Long runs of byte values translate in bulk
+    through 256 of the entries; so do two-byte values that share their high byte, or
+    whose table reaches only a few high bytes, one masked pass per high byte."""
     if type(values) is array and len(values) >= 256:
         if values.typecode == "B":
             return _translate(values.tobytes(), table, 0)
@@ -2100,7 +2105,37 @@ def _recode(values: Iterable[int], table: dict[int, int]) -> Iterable[int]:
             top = high[0]
             if high.count(top) == len(high):
                 return _translate(low, table, top << 8)
+            if 4 * len(values) >= len(table) and max(table, default=0) < _SPLIT_TOPS << 8:
+                return _translate_split(low, high, table)
     return map(table.get, values, repeat(0))
+
+
+_SPLIT_TOPS = 4
+
+
+def _translate_split(low: bytes, high: bytes, table: dict[int, int]) -> array:
+    """table.get(high << 8 | low, 0) for every pair of bytes, every key of the table
+    below _SPLIT_TOPS << 8: per high byte present, the low bytes translate through its
+    256 entries and a mask keeps the rows with that high byte."""
+    count = len(low)
+    tops = [top for top in range(_SPLIT_TOPS) if high.count(top)]
+    covered = sum(map(high.count, tops)) == count
+    low_out = high_out = taken = 0
+    for index, top in enumerate(tops):
+        if covered and index == len(tops) - 1:
+            mask = ~taken & ((1 << 8 * count) - 1)
+        else:
+            mask = int.from_bytes(high.translate(bytes(0xFF if byte == top else 0 for byte in range(256))), "little")
+            taken |= mask
+        entries = [table.get((top << 8) | byte, 0) for byte in range(256)]
+        low_out |= mask & int.from_bytes(low.translate(bytes(entry & 0xFF for entry in entries)), "little")
+        if max(entries) > 0xFF:
+            high_out |= mask & int.from_bytes(low.translate(bytes(entry >> 8 for entry in entries)), "little")
+    out = bytearray(2 * count)
+    first = 1 if _BIG_ENDIAN else 0
+    out[first::2] = low_out.to_bytes(count, "little")
+    out[1 - first :: 2] = high_out.to_bytes(count, "little")
+    return array("H", out)
 
 
 def _translate(data: bytes, table: dict[int, int], base: int) -> array:
@@ -2328,8 +2363,8 @@ def _source_codes(
 
 def _tally(codes: array, entries: int) -> dict[int, int]:
     """How often each code occurs: by one byte count per code for byte codes of a small
-    dictionary, else in one pass."""
-    if codes.typecode == "B" and entries < 256:
+    dictionary when they outnumber its codes fourfold, else in one pass."""
+    if codes.typecode == "B" and entries < 256 and len(codes) >= 4 * (entries + 1):
         data = codes.tobytes()
         return {code: data.count(code) for code in range(entries + 1)}
     return Counter(codes)

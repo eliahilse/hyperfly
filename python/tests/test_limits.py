@@ -1,10 +1,9 @@
 import dataclasses
-import time
 import tracemalloc
 
 import pytest
 
-from conftest import load
+from conftest import calls, load
 from hyperfly import HyperflyError, Limits, compile_ir
 from test_vectors import deep_eq
 
@@ -219,10 +218,10 @@ def test_hostile_bodies_fail_fast_and_small(ir, profile, body, code):
     codec = compile_ir(ir, plan="columnar", profile=profile, limits=Limits(max_total_bytes=2**40, max_byte_amplification=2**40))
     body = bytes.fromhex(body)
     assert len(body) < 64 * 1024
-    start = time.perf_counter()
     with pytest.raises(HyperflyError) as err:
         codec.decode_body(body)
-    elapsed = time.perf_counter() - start
+    # each body declares far more rows than it has bytes: a step per row would show here
+    assert calls(lambda: codec.decode_body(body)) < 4 * len(body)
     tracemalloc.start()
     try:
         with pytest.raises(HyperflyError):
@@ -231,7 +230,6 @@ def test_hostile_bodies_fail_fast_and_small(ir, profile, body, code):
     finally:
         tracemalloc.stop()
     assert err.value.code == code
-    assert elapsed < 0.2
     assert peak < 8 << 20
 
 
