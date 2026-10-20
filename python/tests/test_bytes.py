@@ -507,9 +507,19 @@ def test_cost_follows_the_body_not_the_profile(large, small, decoded, extra, rea
 def spied(monkeypatch):
     """Counts of the helpers whose work could follow a profile's domain or the number of
     derived columns: every table _recode is handed with the rows it serves and whether
-    it answered in bulk, source tallies, run-wise sums, masked translates, rows looked up
-    one at a time through a derivation, and grammar code lookups."""
-    seen = {"recode": [], "tally": 0, "runs": 0, "split": 0, "per row": 0, "grammar codes": 0}
+    it answered in bulk, source tallies, run-wise sums, source tallies taken in runs and
+    the runs they count, masked translates, rows looked up one at a time through a
+    derivation, and grammar code lookups."""
+    seen = {
+        "recode": [],
+        "tally": 0,
+        "runs": 0,
+        "tally runs": 0,
+        "counted": 0,
+        "split": 0,
+        "per row": 0,
+        "grammar codes": 0,
+    }
 
     def wrap(name, record):
         original = getattr(_codec, name)
@@ -532,6 +542,8 @@ def spied(monkeypatch):
     wrap("_recode", recode)
     wrap("_tally", count("tally"))
     wrap("_run_sums", count("runs"))
+    wrap("_tally_runs", count("tally runs"))
+    wrap("_count_into", count("counted"))
     wrap("_translate_split", count("split"))
     wrap("_derived_code", count("per row"))
     grammar_codes = _codec._Ctx.grammar_codes
@@ -570,7 +582,7 @@ def test_lookups_follow_the_rows(case, spied):
     if case is STRADDLING_CHAIN:
         # the five derived columns another derives from, each over codes 255 and 256
         assert spied["split"] == 5
-    if case[1] is LOOKUP_CASES[0][1][1]:
+    if case[1] == LOOKUP_CASES[0][1][1]:
         # one row per nested array never pays for the 16,383-entry recoding table
         assert not codec._ctx.recodings
         assert spied["per row"] == len(case[2]) // 16
@@ -664,6 +676,81 @@ def test_derived_fan_out_reads_its_source_once(k, values, fillers, spied):
     assert spied["runs"] <= 1 and spied["tally"] <= 1
     if fillers == 0:
         assert spied["runs"] == 0
+
+
+def _masked_fanout(k, distinct=True):
+    # 128 rows of an optional grammar source alternating 00 and 10, each rendering an
+    # empty value, then k optional consumers absent from two rows each: rows i and i + 1
+    # for consumer i, or rows 0 and 1 for all of them
+    ir = _array(
+        dict(_field("s", "string"), optional=True),
+        *(dict(_field(f"d{i}", "string"), optional=True) for i in range(k)),
+        _field("n", "int"),
+    )
+    values = ["", "", "y" * 10] + [""] * 39
+    profile = _profile(
+        {"leaf": 0, "dict": ["00", "10"] + [f"f{i}" for i in range(40)], "grammar": [LANE, LANE]},
+        *({"leaf": i + 1, "derived": {"source": 0, "values": values}} for i in range(k)),
+    )
+    body = "8001" + "ff" * 16 + "0300020001" + "aa" * 16 + "020000"
+    for i in range(k):
+        absent = (1 << i) | (1 << (i + 1)) if distinct else 3
+        body += (((1 << 128) - 1) ^ absent).to_bytes(16, "little").hex() + "0400"
+    return ir, profile, body + "ff"
+
+
+# each consumer's bound, 126 rows of up to 10 bytes, passes a 1,000-byte budget
+SMALL = Limits(max_total_bytes=1000)
+
+
+@pytest.mark.parametrize("k", [2, 6, 40])
+def test_distinct_participation_takes_no_unused_tally(k, spied):
+    _decode_with(_masked_fanout(k), limits=SMALL)
+    # each consumer's own rows are tallied once, as its charge, and nothing else is
+    assert spied["tally"] == 0 and spied["runs"] == 0
+    assert spied["tally runs"] == k
+
+
+@pytest.mark.parametrize("k", [2, 6])
+@pytest.mark.parametrize("shape", ["masked", "sparse"])
+def test_one_participation_reads_its_source_once(k, shape, spied):
+    if shape == "masked":
+        _decode_with(_masked_fanout(k, distinct=False), limits=SMALL)
+    else:
+        _decode_with(_sparse_fanout(k, ["", "y" * 10], 40))
+    assert spied["tally"] == 0 and spied["runs"] == 0
+    assert spied["tally runs"] == 1
+
+
+@pytest.mark.parametrize("second", ["uniform", "never read"])
+def test_a_tally_is_taken_only_for_a_charge(second, spied):
+    ir, profile, body = _sparse_fanout(2, ["", "y" * 10], 40)
+    if second == "uniform":
+        profile["shared"]["columns"][2]["derived"]["values"] = [""] * 42
+    else:
+        body = body[: -len("0400ff")] + "ff"
+    _decode_with((ir, profile, body))
+    # the first consumer's tally is its charge; the second needs none
+    assert spied["tally"] == 0 and spied["runs"] == 0
+    assert spied["tally runs"] == 1
+
+
+def test_a_shared_early_overflow_takes_no_full_pass(spied):
+    # two consumers of 524,000 rows of kilobyte values: the first passes the budget at
+    # d[3668], within the first run of its tally
+    ir = _array(_field("s", "string"), _field("d", "string"), _field("e", "string"), _field("n", "int"))
+    values = ["x" * 1000] + ["y" * 1001] * 254
+    profile = _profile(
+        {"leaf": 0, "dict": ["s"] + [f"f{i}" for i in range(254)]},
+        {"leaf": 1, "derived": {"source": 0, "values": values}},
+        {"leaf": 2, "derived": {"source": 0, "values": values}},
+    )
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex("e0fd1f0101" + "ff" * 65500 + "04000400ff"))
+    assert err.value.code == "limit" and "[].d[3668]" in str(err.value)
+    assert spied["tally"] == 0 and spied["runs"] == 0
+    assert spied["tally runs"] == 1 and spied["counted"] == 1
 
 
 @pytest.mark.parametrize("count", [70, 300])

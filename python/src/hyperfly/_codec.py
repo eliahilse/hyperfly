@@ -13,7 +13,7 @@ from collections import Counter
 from collections.abc import Mapping
 from functools import partial
 from itertools import accumulate, chain, compress, islice, repeat
-from operator import add, and_, lshift, not_, sub, truediv
+from operator import add, and_, lshift, mul, not_, sub, truediv
 from typing import Any, Callable, Iterable, Iterator, NoReturn
 
 from ._ir import (
@@ -1674,15 +1674,15 @@ def _settle(
     bound: int | None = None,
     total: Callable[[], int] | None = None,
     quick: Callable[[], int | None] | None = None,
-    learn: Callable[[], object] | None = None,
+    runs: Callable[[int], int | None] | None = None,
 ) -> None:
     """Charge a column's value lengths, given in participating-row order, as if value
     by value: the first value whose own checks fail or whose charge passes the byte
     budget decides the error. A column with no failure whose `bound` on the sum of its
     lengths fits defers the exact sum, `total` or else the lengths summed. One that does
     not fit sums its lengths in runs, stopping at the run that passes the budget, unless
-    `quick` gives its exact sum without reading its rows; `learn` runs once its runs
-    reach the end within the budget, so later columns can answer quickly."""
+    `quick` gives its exact sum without reading its rows; `runs`, given the budget left,
+    stands in for both."""
     budget = r.budget
     exact = total or (lambda: sum(make()))
     if failure is None and bound is not None:
@@ -1700,11 +1700,12 @@ def _settle(
         stop = failure[0] + failure[1]
         lengths = lambda: islice(make(), stop)
     else:
-        charge = quick() if quick is not None else None
-        if charge is None:
-            charge = _run_sums(lengths(), remaining)
-            if charge is not None and learn is not None:
-                learn()
+        if runs is not None:
+            charge = runs(remaining)
+        else:
+            charge = quick() if quick is not None else None
+            if charge is None:
+                charge = _run_sums(lengths(), remaining)
         if charge is not None and charge <= remaining:
             budget.bytes += charge
             return
@@ -2010,14 +2011,16 @@ def _derived_column(
         assert total is not None
         return total
 
-    def quick_total(quick: bool = True) -> int | None:
+    def quick_total(quick: bool = True, within: int | None = None) -> int | None:
         """The column's decoded bytes; when `quick`, None unless they follow without
-        reading its rows (from equal lengths or a tally of its source already taken)."""
+        reading its rows (from equal lengths or a tally of its source already taken);
+        given a budget `within`, None once a tally of its source, taken in runs, passes it."""
         if isinstance(source, int) or ordinal in ctx.uniform_derived:
             conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
         elif not escaped and 4 * count >= len(sizes):
             assert source_codes is not None
-            tally = source_codes(derivation["source"], counts=True, cheap=quick)
+            limit = None if within is None else (sizes, within)
+            tally = source_codes(derivation["source"], counts=True, cheap=quick, within=limit)
             if tally is None:
                 return None
             conformed = sum(sizes[code] * times for code, times in tally.items() if times)
@@ -2027,14 +2030,11 @@ def _derived_column(
             conformed = sum(derived_lengths())
         return conformed + sum(escape_lengths())
 
-    def learn() -> object:
-        # another derived column reads this source: tally it once for all of them
-        assert source_codes is not None
-        return source_codes(derivation["source"], counts=True)
-
     bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
+    # another derived column reads this source: a tally of it, taken in runs, serves them all
     shared = not escaped and 4 * count >= len(sizes) and ctx.consumers[derivation["source"]] > 1
-    _settle(r, make, escape_failure or failure, path, bound, derived_total, quick_total, learn if shared else None)
+    runs = partial(quick_total, False) if shared else None
+    _settle(r, make, escape_failure or failure, path, bound, derived_total, quick_total, runs)
     table = ctx.derived_tables[ordinal]
 
     if isinstance(source, int) and not escaped:
@@ -2372,13 +2372,15 @@ def _source_codes(
     ordinal: int,
     counts: bool = False,
     cheap: bool = False,
+    within: tuple[tuple[int, ...], int] | None = None,
 ) -> Any:
     """A derivation source's dictionary codes at the rows a derived column with
     participation `part` covers: 0 outside the dictionary, _NOT_PARTICIPATING where
     the source is absent; with `counts`, how often each code occurs there (with `cheap`,
-    None unless that is known or takes a byte count per code). Every derived column
-    that reads one source with the same participation shares one result, held in
-    `found`."""
+    None unless that is known or takes a byte count per code; with `within`, sizes by
+    code and a budget, otherwise tallied in runs and None once their sum passes it).
+    Every derived column that reads one source with the same participation shares one
+    result, held in `found`."""
     if counts:
         tally = found.get(("counts", ordinal, part))
         if tally is None:
@@ -2386,7 +2388,13 @@ def _source_codes(
             entries = len(ctx.codes[ordinal])
             if cheap and not _counts_each(source, entries):
                 return None
-            tally = found[("counts", ordinal, part)] = _tally(source, entries)
+            if within is None or _counts_each(source, entries):
+                tally = _tally(source, entries)
+            else:
+                tally = _tally_runs(source, *within)
+            if tally is None:
+                return None
+            found[("counts", ordinal, part)] = tally
         return tally
     known = found.get((ordinal, part))
     if known is not None:
@@ -2431,6 +2439,40 @@ def _tally(codes: array, entries: int) -> dict[int, int]:
         data = codes.tobytes()
         return {code: data.count(code) for code in range(entries + 1)}
     return Counter(codes)
+
+
+def _tally_runs(codes: Any, sizes: tuple[int, ...], remaining: int) -> Counter[int] | None:
+    """How often each code occurs, tallied in runs, or None once a run takes the sum of
+    their sizes past `remaining`. A run is at least four times the codes, so summing the
+    tally after each run costs at most a quarter of reading it."""
+    tally: Counter[int] = Counter()
+    run = max(_RUN, 4 * len(sizes))
+    for start in range(0, len(codes), run):
+        _count_into(tally, codes[start : start + run])
+        if sum(map(mul, map(sizes.__getitem__, tally), tally.values())) > remaining:
+            return None
+    return tally
+
+
+def _count_into(tally: Counter[int], codes: Any) -> None:
+    """Adds how often each code occurs to `tally`: byte codes by deleting one code at a
+    time while each after the first is at least an eighth of them, then the rest in one
+    pass. A deletion costs about a thirtieth of that pass."""
+    if type(codes) is not array or codes.typecode != "B":
+        tally.update(codes)
+        return
+    data = codes.tobytes()
+    size = len(data)
+    first = True
+    while data:
+        rest = data.translate(None, data[:1])
+        found = len(data) - len(rest)
+        tally[data[0]] += found
+        data = rest
+        if not first and 8 * found < size:
+            tally.update(data)
+            return
+        first = False
 
 
 _Shape = tuple[list[str], list[Any]]
