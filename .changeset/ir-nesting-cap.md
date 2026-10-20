@@ -2,4 +2,4 @@
 "hyperfly": patch
 ---
 
-Reliably accept schemas within the artifact nesting limit and reject deeper schemas consistently across all entry points.
+Schemas nested up to the 512-level artifact limit now compile on every entry point, and deeper schemas are rejected with code `ir` instead of exhausting the stack.
