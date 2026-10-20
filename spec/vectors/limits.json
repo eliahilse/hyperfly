@@ -3385,6 +3385,75 @@
         {}
       ],
       "hex": "0405000206"
+    },
+    {
+      "name": "zero-bit-recursive-at-bound",
+      "description": "a fixed array of literals is zero-bit, so the outer count 10 falls under amplification (10 <= 32 x (0 + 1)), not the floor; budget 10 + 10 x 3 = 40 <= 32 x (1 + 1)",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "element": {
+            "kind": "literal",
+            "value": "x"
+          },
+          "length": 3
+        }
+      },
+      "value": [
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ],
+        [
+          "x",
+          "x",
+          "x"
+        ]
+      ],
+      "hex": "0a"
     }
   ],
   "invalidDecode": [
@@ -3715,6 +3784,45 @@
         "maxTotalItems": 3
       },
       "hex": "0405000206",
+      "error": "limit"
+    },
+    {
+      "name": "one-bit-floor-over-bound",
+      "description": "9 bools with 1 byte remaining: 9 > 8 bits fails the floor, though amplification would allow 32 x (1 + 1) = 64",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        }
+      },
+      "hex": "0900",
+      "error": "limit"
+    },
+    {
+      "name": "one-bit-floor-columnar-fallback",
+      "description": "array<bool> is not columnar eligible, so the columnar plan row-encodes it and the floor applies: 9 > 8 bits",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        }
+      },
+      "hex": "0900",
+      "error": "limit"
+    },
+    {
+      "name": "max-byte-length-prefix-first",
+      "description": "the length prefix 5 exceeds maxByteLength 4 and is rejected before the missing payload is read: limit, not truncated",
+      "plan": "row",
+      "ir": {
+        "kind": "string"
+      },
+      "limits": {
+        "maxByteLength": 4
+      },
+      "hex": "0561",
       "error": "limit"
     }
   ],

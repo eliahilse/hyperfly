@@ -43,16 +43,18 @@ that lists a new profile before an old one moves itself over without the server
 tracking who has what.
 
 A client opts out of binary through `Accept`. A server examines at most the
-first 32 media ranges, separated by commas outside quoted strings. A range
-is a type/subtype with
-parameters; the `q` parameter name is case-insensitive and its value follows
-the RFC 9110 qvalue syntax: `0`, `0.`, `0.0`, `0.00` and `0.000` are zero, any
-other value that parses is non-zero, and a range whose `q` does not parse is
-ignored. A range carrying any parameter other than `q`, or more than one `q`,
-is ignored. Binary is
-refused when the most specific range present among `application/vnd.hyperfly`,
-`application/*` and `*/*` (types compared case-insensitively; among equally
-specific ranges the first listed counts) has `q` zero;
+first 32 media ranges, separated by commas outside quoted strings; inside a
+quoted string a backslash escapes the next character (RFC 9110 quoted-pair),
+so `\"` does not end the string. A range is a type/subtype with parameters.
+SP and HTAB around a range, its type/subtype, each `;`, and each parameter
+name and value are ignored; type and subtype compare case-insensitively. The
+`q` parameter name is case-insensitive and its value follows the RFC 9110
+qvalue syntax: `0`, `0.`, `0.0`, `0.00` and `0.000` are zero, any other value
+that parses is non-zero, and a range whose `q` does not parse is ignored. A
+range carrying any parameter other than `q`, or more than one `q`, is
+ignored. Binary is refused when the most specific range present among
+`application/vnd.hyperfly`, `application/*` and `*/*` (among equally specific
+ranges the first listed counts) has `q` zero;
 the server then MUST NOT answer in binary, whatever `Hyperfly-Accept` says,
 and answers with the fallback (§2). If no range matches, or `Accept` is
 absent, binary is not refused: `Hyperfly-Accept` is the opt-in, so a client
@@ -144,9 +146,9 @@ that applies wins:
    only to reject early.
 3. A hyperfly body is shorter than the envelope header, or its magic or major
    is wrong (wire-v0 §2): `400 Bad Request`.
-4. `Hyperfly-Codec` is present and its value, with leading and trailing SP and
-   HTAB removed, is not exactly the envelope fingerprint in lowercase hex:
-   `400`.
+4. A hyperfly body arrives with a `Hyperfly-Codec` header whose value, with
+   leading and trailing SP and HTAB removed, is not exactly the envelope
+   fingerprint in lowercase hex: `400`. On a JSON body the header is ignored.
 5. The server does not hold the envelope fingerprint: `415` with
    `Hyperfly-Offer`, as above.
 6. The hyperfly body fails to decode under the held codec, for any wire-v0
