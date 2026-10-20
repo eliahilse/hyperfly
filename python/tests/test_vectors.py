@@ -35,15 +35,24 @@ def run_invalid_decode(vector, plan):
 
 
 def revive(value):
-    if isinstance(value, dict) and "$surrogate" in value:
-        return chr(int(value["$surrogate"], 16))
-    if isinstance(value, dict) and set(value) == {"$bytes"}:
-        return bytes.fromhex(value["$bytes"])
-    if isinstance(value, dict):
-        return {key: revive(inner) for key, inner in value.items()}
-    if isinstance(value, list):
-        return [revive(inner) for inner in value]
-    return value
+    """A copy with surrogate and bytes markers revived, without recursion: before Python 3.12 the
+    512-deep IR rows would exceed the recursion limit."""
+    holder = [value]
+    stack = [(holder, 0)]
+    while stack:
+        parent, key = stack.pop()
+        item = parent[key]
+        if isinstance(item, dict) and "$surrogate" in item:
+            parent[key] = chr(int(item["$surrogate"], 16))
+        elif isinstance(item, dict) and set(item) == {"$bytes"}:
+            parent[key] = bytes.fromhex(item["$bytes"])
+        elif isinstance(item, dict):
+            parent[key] = copy = dict(item)
+            stack.extend((copy, inner) for inner in copy)
+        elif isinstance(item, list):
+            parent[key] = copy = list(item)
+            stack.extend((copy, index) for index in range(len(copy)))
+    return holder[0]
 
 
 def run_invalid_encode(vector, plan):
