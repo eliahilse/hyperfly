@@ -1,55 +1,89 @@
 use hyperfly_core::{
-    fingerprint_of, serialize_artifact, Codec, Derivation, Field, GrammarCase, GrammarNum,
-    GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn, Value,
+    fingerprint_of, serialize_artifact, Codec, Derivation, ErrorCode, Field, GrammarCase,
+    GrammarNum, GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn, Value,
 };
 use serde_json::Value as Json;
 
-fn node_of(json: &Json) -> Node {
-    let kind = json["kind"].as_str().unwrap();
-    match kind {
+fn node_of(json: &Json) -> Result<Node, String> {
+    fn required<'a>(json: &'a Json, key: &str) -> Result<&'a Json, String> {
+        json.get(key).ok_or_else(|| format!("missing IR key {key}"))
+    }
+
+    fn string(json: &Json) -> Result<String, String> {
+        json.as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "IR string required (lone surrogates are unrepresentable)".to_owned())
+    }
+
+    fn flag(field: &Json, name: &str) -> Result<bool, String> {
+        field.get(name).map_or(Ok(false), |value| {
+            value
+                .as_bool()
+                .ok_or_else(|| format!("{name} flag must be a boolean"))
+        })
+    }
+
+    fn integer(json: &Json) -> Result<i64, String> {
+        json.as_i64()
+            .ok_or_else(|| "IR integer required".to_owned())
+    }
+
+    let kind = required(json, "kind")?
+        .as_str()
+        .ok_or_else(|| "IR kind must be a string".to_owned())?;
+    Ok(match kind {
         "bool" => Node::Bool,
         "float64" => Node::Float64,
         "string" => Node::Str,
         "bytes" => Node::Bytes,
         "int" => Node::Int {
-            min: json.get("min").and_then(Json::as_i64),
-            max: json.get("max").and_then(Json::as_i64),
+            min: json.get("min").map(integer).transpose()?,
+            max: json.get("max").map(integer).transpose()?,
         },
-        "literal" => Node::Literal(match &json["value"] {
+        "literal" => Node::Literal(match required(json, "value")? {
             Json::Null => Literal::Null,
             Json::Bool(b) => Literal::Bool(*b),
-            Json::Number(n) => Literal::Int(n.as_i64().unwrap()),
+            Json::Number(_) => Literal::Int(integer(&json["value"])?),
             Json::String(s) => Literal::Str(s.clone()),
-            other => panic!("bad literal {other:?}"),
+            _ => return Err("literal must be a string, boolean, null, or integer".to_owned()),
         }),
         "enum" => Node::Enum(
-            json["members"]
+            required(json, "members")?
                 .as_array()
-                .unwrap()
+                .ok_or_else(|| "enum members must be an array".to_owned())?
                 .iter()
-                .map(|m| m.as_str().unwrap().to_owned())
-                .collect(),
+                .map(string)
+                .collect::<Result<_, _>>()?,
         ),
-        "nullable" => Node::Nullable(Box::new(node_of(&json["inner"]))),
+        "nullable" => Node::Nullable(Box::new(node_of(required(json, "inner")?)?)),
         "array" => Node::Array {
-            element: Box::new(node_of(&json["element"])),
-            length: json.get("length").and_then(Json::as_u64),
+            element: Box::new(node_of(required(json, "element")?)?),
+            length: json
+                .get("length")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .ok_or_else(|| "array length must be a non-negative integer".to_owned())
+                })
+                .transpose()?,
         },
         "struct" => Node::Struct(
-            json["fields"]
+            required(json, "fields")?
                 .as_array()
-                .unwrap()
+                .ok_or_else(|| "struct fields must be an array".to_owned())?
                 .iter()
-                .map(|f| Field {
-                    name: f["name"].as_str().unwrap().to_owned(),
-                    ty: node_of(&f["type"]),
-                    optional: f.get("optional").and_then(Json::as_bool).unwrap_or(false),
-                    nullable: f.get("nullable").and_then(Json::as_bool).unwrap_or(false),
+                .map(|f| {
+                    Ok(Field {
+                        name: string(required(f, "name")?)?,
+                        ty: node_of(required(f, "type")?)?,
+                        optional: flag(f, "optional")?,
+                        nullable: flag(f, "nullable")?,
+                    })
                 })
-                .collect(),
+                .collect::<Result<_, String>>()?,
         ),
-        other => panic!("unknown kind {other}"),
-    }
+        other => return Err(format!("unknown IR kind {other}")),
+    })
 }
 
 fn value_of(json: &Json) -> Value {
@@ -65,6 +99,9 @@ fn value_of(json: &Json) -> Value {
         }
         Json::String(s) => Value::Str(s.clone()),
         Json::Array(items) => Value::Array(items.iter().map(value_of).collect()),
+        Json::Object(entries) if entries.len() == 1 && entries.contains_key("$bytes") => {
+            Value::Bytes(from_hex(entries["$bytes"].as_str().unwrap()))
+        }
         Json::Object(entries) => Value::Object(
             entries
                 .iter()
@@ -107,7 +144,30 @@ fn load(name: &str) -> Json {
 }
 
 fn compile(ir: &Json, plan: Plan) -> Codec {
-    Codec::compile(node_of(ir), plan, Limits::default(), true).unwrap()
+    Codec::compile(node_of(ir).unwrap(), plan, Limits::default(), true).unwrap()
+}
+
+#[test]
+fn ir_vectors() {
+    let file = load("ir.json");
+    for v in file["invalid"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let code = match node_of(&v["ir"]) {
+            Err(_) => ErrorCode::Ir,
+            Ok(node) => match Codec::compile(node, Plan::Row, Limits::default(), false) {
+                Ok(_) => panic!("{name}: expected IR compilation failure"),
+                Err(error) => error.code,
+            },
+        };
+        assert_eq!(code, ErrorCode::Ir, "{name}");
+        assert_eq!(code.as_str(), v["error"].as_str().unwrap(), "{name}");
+    }
+    for v in file["valid"].as_array().unwrap() {
+        let name = v["name"].as_str().unwrap();
+        let node = node_of(&v["ir"]).unwrap_or_else(|e| panic!("{name}: {e}"));
+        Codec::compile(node, Plan::Row, Limits::default(), false)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
 }
 
 fn run_valid(file: &Json, section: &str, plan: Plan) {
@@ -184,12 +244,140 @@ fn columnar_vectors() {
     }
 }
 
+fn limits_codec(vector: &Json) -> Codec {
+    let plan = match vector["plan"].as_str().unwrap() {
+        "row" => Plan::Row,
+        "columnar" => Plan::Columnar,
+        other => panic!("unknown plan {other}"),
+    };
+    let mut limits = Limits::default();
+    if let Some(overrides) = vector.get("limits") {
+        for (key, value) in overrides.as_object().unwrap() {
+            let value = value.as_u64().unwrap();
+            match key.as_str() {
+                "maxDepth" => limits.max_depth = u32::try_from(value).unwrap(),
+                "maxItems" => limits.max_items = value,
+                "maxByteLength" => limits.max_byte_length = value,
+                "maxAmplification" => limits.max_amplification = value,
+                "maxTotalItems" => limits.max_total_items = value,
+                other => panic!("unknown limit {other}"),
+            }
+        }
+    }
+    Codec::compile(node_of(&vector["ir"]).unwrap(), plan, limits, true).unwrap()
+}
+
+#[test]
+fn limits_vectors() {
+    let file = load("limits.json");
+    for section in ["valid", "invalidDecode", "invalidEncode", "decodeOnly"] {
+        for vector in file[section].as_array().unwrap() {
+            let name = vector["name"].as_str().unwrap();
+            let codec = limits_codec(vector);
+            match section {
+                "valid" => {
+                    let value = value_of(&vector["value"]);
+                    let body = from_hex(vector["hex"].as_str().unwrap());
+                    assert_eq!(
+                        codec
+                            .encode_body(&value)
+                            .unwrap_or_else(|e| panic!("{name}: {e}")),
+                        body,
+                        "{name}: bytes"
+                    );
+                    let decoded = codec
+                        .decode_body(&body)
+                        .unwrap_or_else(|e| panic!("{name}: {e}"));
+                    assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
+                }
+                "invalidDecode" => {
+                    let error = codec
+                        .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
+                        .expect_err(name);
+                    assert_eq!(
+                        error.code.as_str(),
+                        vector["error"].as_str().unwrap(),
+                        "{name}"
+                    );
+                }
+                "invalidEncode" => {
+                    let value = value_of(&vector["value"]);
+                    let expected = vector["error"].as_str().unwrap();
+                    assert_eq!(
+                        codec.encode_body(&value).expect_err(name).code.as_str(),
+                        expected,
+                        "{name}"
+                    );
+                    assert_eq!(
+                        codec.encode(&value).expect_err(name).code.as_str(),
+                        expected,
+                        "{name}"
+                    );
+                }
+                "decodeOnly" => {
+                    let value = value_of(&vector["value"]);
+                    let decoded = codec
+                        .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
+                        .unwrap_or_else(|e| panic!("{name}: {e}"));
+                    assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
+                    assert_eq!(
+                        codec.encode_body(&value).expect_err(name).code.as_str(),
+                        "limit",
+                        "{name}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn columnar_hostile_count_fails_before_decoding_columns() {
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(
+            ["a", "b"]
+                .into_iter()
+                .map(|name| Field {
+                    name: name.into(),
+                    ty: Node::Int {
+                        min: None,
+                        max: None,
+                    },
+                    optional: false,
+                    nullable: false,
+                })
+                .collect(),
+        )),
+        length: None,
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let rem = 2042 - 4;
+    let count = 4096 * (rem + 1);
+    let mut body = Vec::new();
+    let mut rest = count;
+    while rest >= 0x80 {
+        body.push((rest & 0x7f) as u8 | 0x80);
+        rest >>= 7;
+    }
+    body.push(rest as u8);
+    assert_eq!(body.len(), 4);
+    body.extend_from_slice(&[0x02, 0x00, 0x00, 0xff]);
+    body.resize(2042, 0);
+    assert_eq!(codec.decode_body(&body).unwrap_err().code.as_str(), "limit");
+}
+
 #[test]
 fn packed_without_inflate_fails_closed() {
     let file = load("columnar.json");
     let v = &file["packedDecode"][0];
-    let codec =
-        Codec::compile(node_of(&v["ir"]), Plan::Columnar, Limits::default(), false).unwrap();
+    let codec = Codec::compile(
+        node_of(&v["ir"]).unwrap(),
+        Plan::Columnar,
+        Limits::default(),
+        false,
+    )
+    .unwrap();
     let e = codec
         .decode_body(&from_hex(v["hex"].as_str().unwrap()))
         .unwrap_err();
@@ -205,7 +393,7 @@ fn fingerprints() {
             _ => Plan::Columnar,
         };
         let profile = case.get("profile").map(profile_of).transpose().unwrap();
-        let canonical = serialize_artifact(&node_of(&case["ir"]), plan, profile.as_ref());
+        let canonical = serialize_artifact(&node_of(&case["ir"]).unwrap(), plan, profile.as_ref());
         assert_eq!(
             canonical,
             case["canonical"].as_str().unwrap(),
@@ -219,7 +407,7 @@ fn fingerprints() {
             case["name"]
         );
         let codec = Codec::compile_with_profile(
-            node_of(&case["ir"]),
+            node_of(&case["ir"]).unwrap(),
             plan,
             Limits::default(),
             false,
@@ -442,7 +630,7 @@ fn profiled_codec(v: &Json, with_profile: bool) -> Codec {
         None
     };
     Codec::compile_with_profile(
-        node_of(&v["ir"]),
+        node_of(&v["ir"]).unwrap(),
         Plan::Columnar,
         Limits::default(),
         false,
@@ -511,7 +699,7 @@ fn profiled_vectors() {
         let code = match profile_of(&v["profile"]) {
             Err(_) => "ir",
             Ok(profile) => match Codec::compile_with_profile(
-                node_of(&v["ir"]),
+                node_of(&v["ir"]).unwrap(),
                 Plan::Columnar,
                 Limits::default(),
                 false,
@@ -523,4 +711,45 @@ fn profiled_vectors() {
         };
         assert_eq!(code, v["error"].as_str().unwrap(), "{name}");
     }
+}
+
+#[test]
+fn columnar_bytes_and_literal_leaves_round_trip() {
+    let field = |name: &str, ty: Node, optional: bool| Field {
+        name: name.into(),
+        ty,
+        optional,
+        nullable: false,
+    };
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(vec![
+            field("l", Node::Literal(Literal::Str("x".into())), false),
+            field("y", Node::Bytes, true),
+            field(
+                "n",
+                Node::Int {
+                    min: None,
+                    max: None,
+                },
+                false,
+            ),
+        ])),
+        length: None,
+    };
+    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let rows: Vec<Value> = (0..5)
+        .map(|i| {
+            let mut row = vec![("l".to_owned(), Value::Str("x".into()))];
+            if i % 2 == 0 {
+                row.push(("y".to_owned(), Value::Bytes(vec![i as u8; i])));
+            }
+            row.push(("n".to_owned(), Value::Int(i as i64)));
+            Value::Object(row)
+        })
+        .collect();
+    let value = Value::Array(rows);
+    let body = codec.encode_body(&value).unwrap();
+    assert!(deep_eq(&codec.decode_body(&body).unwrap(), &value));
+    let truncated = codec.decode_body(&body[..body.len() - 1]).unwrap_err();
+    assert_eq!(truncated.code.as_str(), "truncated");
 }

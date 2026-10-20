@@ -111,11 +111,15 @@ pub struct Limits {
     /// Maximum bytes per string or byte value, and per packed blob and inflated column; default `2^28`.
     pub max_byte_length: u64,
     /// Array count multiplier for the bound `count <= max_amplification * (remaining_bytes + 1)`;
-    /// default 4096. On decode it bounds columnar arrays and row arrays of zero-bit elements;
+    /// default 32. On decode it bounds columnar arrays and row arrays of zero-bit elements;
     /// other row arrays are held to the stricter one-bit floor, `count <= remaining_bytes * 8`.
     /// Encoding applies it to every array, with the array's own bytes after its count in place
     /// of remaining bytes.
     pub max_amplification: u64,
+    /// Maximum sum of the element counts of every array in one body; default `2^24`. The
+    /// effective item budget is `min(max_total_items, max_amplification * (body_length + 1))`,
+    /// charged as each array's count is read and checked against the final body on encode.
+    pub max_total_items: u64,
 }
 
 impl Default for Limits {
@@ -124,19 +128,56 @@ impl Default for Limits {
             max_depth: 64,
             max_items: 1 << 24,
             max_byte_length: 1 << 28,
-            max_amplification: 4096,
+            max_amplification: 32,
+            max_total_items: 1 << 24,
         }
+    }
+}
+
+impl Limits {
+    pub(crate) fn item_budget(&self, body_length: usize) -> u64 {
+        let amplified =
+            (body_length as u128 + 1).saturating_mul(u128::from(self.max_amplification));
+        u128::from(self.max_total_items).min(amplified) as u64
+    }
+}
+
+pub(crate) struct ItemBudget {
+    pub total: u64,
+    cap: u64,
+}
+
+impl ItemBudget {
+    pub fn new(cap: u64) -> Self {
+        ItemBudget { total: 0, cap }
+    }
+
+    pub fn charge(&mut self, count: u64, path: &str) -> Result<()> {
+        if count > self.cap - self.total {
+            return err(ErrorCode::Limit, format!("{path}: item budget exceeded"));
+        }
+        self.total += count;
+        Ok(())
     }
 }
 
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    items: ItemBudget,
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, pos: 0 }
+    pub fn new(buf: &'a [u8], limits: Limits) -> Self {
+        Reader {
+            buf,
+            pos: 0,
+            items: ItemBudget::new(limits.item_budget(buf.len())),
+        }
+    }
+
+    pub fn charge_items(&mut self, count: usize, path: &str) -> Result<()> {
+        self.items.charge(count as u64, path)
     }
 
     pub fn u8(&mut self) -> Result<u8> {

@@ -45,8 +45,44 @@ struct ColumnInput<'a> {
 
 struct DecodedLeaf {
     slots: Vec<usize>,
-    values: Vec<Value>,
+    values: LeafValues,
     null_rows: Vec<usize>,
+}
+
+enum LeafValues {
+    Int(Vec<i64>),
+    Float(Vec<f64>),
+    Bool(Vec<bool>),
+    Str(Vec<String>),
+    Bytes(Vec<Vec<u8>>),
+    Repeated(Value, usize),
+    Values(Vec<Value>),
+}
+
+impl LeafValues {
+    fn take_value(&mut self, index: usize) -> Option<Value> {
+        match self {
+            LeafValues::Int(values) => values
+                .get_mut(index)
+                .map(|value| Value::Int(std::mem::take(value))),
+            LeafValues::Float(values) => values
+                .get_mut(index)
+                .map(|value| Value::Float(std::mem::take(value))),
+            LeafValues::Bool(values) => values
+                .get_mut(index)
+                .map(|value| Value::Bool(std::mem::take(value))),
+            LeafValues::Str(values) => values
+                .get_mut(index)
+                .map(|value| Value::Str(std::mem::take(value))),
+            LeafValues::Bytes(values) => values
+                .get_mut(index)
+                .map(|value| Value::Bytes(std::mem::take(value))),
+            LeafValues::Repeated(value, count) => (index < *count).then(|| value.clone()),
+            LeafValues::Values(values) => values
+                .get_mut(index)
+                .map(|value| std::mem::replace(value, Value::Null)),
+        }
+    }
 }
 
 fn input_source_value<'a>(
@@ -66,11 +102,14 @@ fn decoded_source_value(
     ordinal_base: usize,
     ordinal: usize,
     row: usize,
-) -> Option<&Value> {
+) -> Option<&str> {
     let local = ordinal.checked_sub(ordinal_base)?;
     let entry = decoded.get(local)?;
     let participant = entry.slots.binary_search(&row).ok()?;
-    entry.values.get(participant)
+    match &entry.values {
+        LeafValues::Str(values) => values.get(participant).map(String::as_str),
+        _ => None,
+    }
 }
 
 fn flatten<'a>(fields: &'a [Field], segs: &mut Vec<&'a str>, out: &mut Vec<LeafCol<'a>>) -> bool {
@@ -445,7 +484,11 @@ impl Codec {
     /// out-of-range integers, non-finite floats, or exceeded resource limits.
     pub fn encode_body(&self, value: &Value) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        self.enc(&mut out, &self.ir, value, "$", 0, 0)?;
+        let mut budget = ItemBudget::new(self.limits.max_total_items);
+        self.enc(&mut out, &self.ir, value, "$", 0, 0, &mut budget)?;
+        if budget.total > self.limits.item_budget(out.len()) {
+            return err(ErrorCode::Limit, "$: item budget exceeded");
+        }
         Ok(out)
     }
 
@@ -455,7 +498,7 @@ impl Codec {
     /// input, out-of-range values, or exceeded resource limits. No partial value
     /// is returned; the caller is responsible for selecting the matching codec.
     pub fn decode_body(&self, data: &[u8]) -> Result<Value> {
-        let mut r = Reader::new(data);
+        let mut r = Reader::new(data, self.limits);
         let value = self.dec(&mut r, &self.ir, "$", 0, 0)?;
         r.expect_end()?;
         Ok(value)
@@ -500,6 +543,7 @@ impl Codec {
         self.decode_body(&data[HEADER_SIZE..])
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn enc(
         &self,
         out: &mut Vec<u8>,
@@ -508,6 +552,7 @@ impl Codec {
         path: &str,
         depth: u32,
         column: usize,
+        budget: &mut ItemBudget,
     ) -> Result<()> {
         if depth > self.limits.max_depth {
             return err(
@@ -604,14 +649,23 @@ impl Codec {
                     Ok(())
                 } else {
                     out.push(1);
-                    self.enc(out, inner, value, path, depth.saturating_add(1), column)
+                    self.enc(
+                        out,
+                        inner,
+                        value,
+                        path,
+                        depth.saturating_add(1),
+                        column,
+                        budget,
+                    )
                 }
             }
             Node::Array { element, length } => {
                 if self.plan == Plan::Columnar {
                     if let Some(leaves) = columnar_leaves(element) {
-                        return self
-                            .enc_columnar(out, column, &leaves, *length, value, path, depth);
+                        return self.enc_columnar(
+                            out, column, &leaves, *length, value, path, depth, budget,
+                        );
                     }
                 }
                 let Value::Array(items) = value else {
@@ -638,6 +692,7 @@ impl Codec {
                     }
                     None => write_uleb(out, item_count)?,
                 }
+                budget.charge(item_count, path)?;
                 let payload_start = out.len();
                 for (i, item) in items.iter().enumerate() {
                     self.enc(
@@ -647,6 +702,7 @@ impl Codec {
                         &format!("{path}[{i}]"),
                         depth.saturating_add(1),
                         column,
+                        budget,
                     )?;
                 }
                 let payload_bytes = out.len().checked_sub(payload_start).ok_or_else(|| Error {
@@ -700,6 +756,7 @@ impl Codec {
                             &format!("{path}.{}", f.name),
                             depth.saturating_add(1),
                             base,
+                            budget,
                         )?,
                     }
                 }
@@ -718,6 +775,7 @@ impl Codec {
         value: &Value,
         path: &str,
         depth: u32,
+        budget: &mut ItemBudget,
     ) -> Result<()> {
         let Value::Array(rows) = value else {
             return err(ErrorCode::Type, format!("{path}: expected array"));
@@ -743,6 +801,7 @@ impl Codec {
             }
             None => write_uleb(out, row_count)?,
         }
+        budget.charge(row_count, path)?;
         let payload_start = out.len();
         for (i, row) in rows.iter().enumerate() {
             if !matches!(row, Value::Object(_)) {
@@ -931,6 +990,7 @@ impl Codec {
                             &format!("{field_path}[{i}]"),
                             depth.saturating_add(2),
                             ordinal_base + leaf_index,
+                            budget,
                         )?;
                     }
                 }
@@ -1048,6 +1108,7 @@ impl Codec {
                 }
                 let count = self.read_count(r, *length, path)?;
                 self.bound_by_input(r, count, element, path)?;
+                r.charge_items(count, path)?;
                 let mut out = Vec::with_capacity(count.min(4096));
                 for i in 0..count {
                     out.push(self.dec(
@@ -1237,6 +1298,7 @@ impl Codec {
     ) -> Result<Value> {
         let count = self.read_count(r, length, path)?;
         self.bound_amplification(r, count, path)?;
+        r.charge_items(count, path)?;
 
         fn ensure_path(entries: &mut Vec<(String, Value)>, segs: &[&str]) -> Result<()> {
             if segs.is_empty() {
@@ -1353,20 +1415,13 @@ impl Codec {
                 );
             }
 
-            let values: Vec<Value> = match &f.ty {
-                Node::Int { min, max } => dec_int_column(r, *min, *max, slots.len(), &field_path)?
-                    .into_iter()
-                    .map(Value::Int)
-                    .collect(),
-                Node::Float64 => dec_float_column(r, slots.len(), &field_path)?
-                    .into_iter()
-                    .map(Value::Float)
-                    .collect(),
-                Node::Bool => read_bitmap(r, slots.len(), &field_path)?
-                    .into_iter()
-                    .map(Value::Bool)
-                    .collect(),
-                Node::Str => dec_string_column(
+            let values = match &f.ty {
+                Node::Int { min, max } => {
+                    LeafValues::Int(dec_int_column(r, *min, *max, slots.len(), &field_path)?)
+                }
+                Node::Float64 => LeafValues::Float(dec_float_column(r, slots.len(), &field_path)?),
+                Node::Bool => LeafValues::Bool(read_bitmap(r, slots.len(), &field_path)?),
+                Node::Str => LeafValues::Str(dec_string_column(
                     r,
                     &slots,
                     &decoded,
@@ -1378,14 +1433,42 @@ impl Codec {
                     self.grammar_of(ordinal_base + leaf_index),
                     self.derivation_of(ordinal_base + leaf_index),
                     &self.codes,
-                )?
-                .into_iter()
-                .map(Value::Str)
-                .collect(),
-                Node::Enum(members) => dec_enum_column(r, members, slots.len(), &field_path)?
-                    .into_iter()
-                    .map(Value::Str)
-                    .collect(),
+                )?),
+                Node::Enum(members) => {
+                    LeafValues::Str(dec_enum_column(r, members, slots.len(), &field_path)?)
+                }
+                Node::Literal(_) => match slots.first() {
+                    Some(row) => LeafValues::Repeated(
+                        self.dec(
+                            r,
+                            &f.ty,
+                            &format!("{path}[{row}]"),
+                            depth.saturating_add(2),
+                            ordinal_base + leaf_index,
+                        )?,
+                        slots.len(),
+                    ),
+                    None => LeafValues::Values(Vec::new()),
+                },
+                Node::Bytes => {
+                    let mut out = Vec::with_capacity(slots.len());
+                    for row in &slots {
+                        let row_path = format!("{path}[{row}]");
+                        match self.dec(
+                            r,
+                            &f.ty,
+                            &row_path,
+                            depth.saturating_add(2),
+                            ordinal_base + leaf_index,
+                        )? {
+                            Value::Bytes(bytes) => out.push(bytes),
+                            _ => {
+                                return err(ErrorCode::Type, format!("{row_path}: expected bytes"))
+                            }
+                        }
+                    }
+                    LeafValues::Bytes(out)
+                }
                 t => {
                     let mut out = Vec::with_capacity(slots.len());
                     for row in &slots {
@@ -1397,7 +1480,7 @@ impl Codec {
                             ordinal_base + leaf_index,
                         )?);
                     }
-                    out
+                    LeafValues::Values(out)
                 }
             };
             decoded.push(DecodedLeaf {
@@ -1416,7 +1499,7 @@ impl Codec {
                     ensure_path(row, &leaf.segs[..leaf.segs.len() - 1])?;
                 }
             }
-            let entry = decoded.get(leaf_index).ok_or_else(|| Error {
+            let entry = decoded.get_mut(leaf_index).ok_or_else(|| Error {
                 code: ErrorCode::Truncated,
                 message: format!("{path}: decoded leaf table is incomplete"),
             })?;
@@ -1434,11 +1517,11 @@ impl Codec {
                         "{path}: participant row index exceeds the declared row count"
                     ),
                 })?;
-                let value = entry.values.get(participant).ok_or_else(|| Error {
+                let value = entry.values.take_value(participant).ok_or_else(|| Error {
                     code: ErrorCode::Truncated,
                     message: format!("{path}: decoded leaf value table is incomplete"),
                 })?;
-                set_path(row, &leaf.segs, value.clone())?;
+                set_path(row, &leaf.segs, value)?;
             }
         }
         Ok(Value::Array(rows.into_iter().map(Value::Object).collect()))
@@ -2696,12 +2779,6 @@ fn dec_string_column(
                         "{path}[{i}]: derived source does not participate in this array row"
                     ),
                 })?;
-            let Value::Str(source) = source else {
-                return err(
-                    ErrorCode::Range,
-                    format!("{path}[{i}]: derived source does not participate in this array row"),
-                );
-            };
             let code = source_codes
                 .and_then(|codes| codes.get(source))
                 .copied()
