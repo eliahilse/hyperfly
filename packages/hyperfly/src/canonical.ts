@@ -1,5 +1,6 @@
-import type { IRField, IRNode, LiteralValue } from "./ir.js";
-import type { Derivation, GrammarToken, SharedProfile } from "./profile.js";
+import { HyperflyError } from "./errors.js";
+import { validateIR, type IRField, type IRNode, type LiteralValue } from "./ir.js";
+import { checkedProfile, type Derivation, type GrammarToken, type Profile, type SharedProfile } from "./profile.js";
 import { sha256 } from "./sha256.js";
 
 /** Spec §5: not generic JSON canonicalization — key order and escaping are fixed here. */
@@ -82,13 +83,26 @@ export function serializeShared(shared: SharedProfile): string {
   return `{"columns":[${columns.join(",")}]}`;
 }
 
+/** The canonical artifact text of an IR and profile that compileIR has already checked. */
+export function canonicalArtifact(
+  ir: IRNode,
+  layout: PlanLayout,
+  profile?: { shared: SharedProfile },
+): string {
+  const head = `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}`;
+  return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
+}
+
 export function serializeArtifact(
   ir: IRNode,
   layout: PlanLayout = "row",
   profile?: { shared: SharedProfile },
 ): string {
-  const head = `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}`;
-  return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
+  if (layout !== "row" && layout !== "columnar") throw new HyperflyError("options", "plan: must be row or columnar");
+  validateIR(ir);
+  if (profile === undefined || profile === null) return canonicalArtifact(ir, layout);
+  if (layout !== "columnar") throw new HyperflyError("ir", "profiles apply to the columnar plan only");
+  return canonicalArtifact(ir, layout, checkedProfile(ir, { version: 2, ...profile } as Profile));
 }
 
 export function fingerprintOf(artifact: string): Uint8Array {

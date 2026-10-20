@@ -1,4 +1,4 @@
-import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
+import { canonicalArtifact, fingerprintOf, toHex, type PlanLayout } from "./canonical.js";
 import { defaultPackHooks } from "./pack.js";
 import { checkedProfile, indexProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
@@ -139,14 +139,14 @@ function compileArtifact(
   // fixed at compile time and the schema behind it must not drift
   ir = deepFreeze(structuredClone(ir));
   if (profile === undefined || profile === null) {
-    return { ir, profile: undefined, artifact: serializeArtifact(ir, plan) };
+    return { ir, profile: undefined, artifact: canonicalArtifact(ir, plan) };
   }
   if (plan !== "columnar") {
     throw new HyperflyError("ir", "profiles apply to the columnar plan only");
   }
   // the profile is fixed by the fingerprint exactly as the IR is
   const frozen = deepFreeze(checkedProfile(ir, profile));
-  return { ir, profile: frozen, artifact: serializeArtifact(ir, plan, frozen) };
+  return { ir, profile: frozen, artifact: canonicalArtifact(ir, plan, frozen) };
 }
 
 export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = {}): Codec<T> {

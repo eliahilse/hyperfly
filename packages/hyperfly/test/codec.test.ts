@@ -79,6 +79,44 @@ describe("canonical artifact", () => {
   });
 });
 
+describe("serializeArtifact input checks", () => {
+  const STRINGS: IRNode = {
+    kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+  const shared = { columns: [{ leaf: 0, dict: ["hello"] }] };
+
+  test.each([
+    { kind: "int", min: NaN },
+    { kind: "int", max: Infinity },
+    { kind: "nope" },
+    { kind: "struct", fields: [{ name: "a" }] },
+  ].map((ir) => [ir] as const))("rejects %p with the code compileIR uses", (ir) => {
+    const run = () => serializeArtifact(ir as never);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "ir" }));
+    expect(() => compileIR(ir as never)).toThrow(expect.objectContaining({ code: "ir" }));
+  });
+
+  test("rejects an unknown layout as options", () => {
+    expect(() => serializeArtifact(STRUCT, "table" as never)).toThrow(expect.objectContaining({ code: "options" }));
+  });
+
+  test("rejects a profile on the row plan and malformed profiles as ir", () => {
+    expect(() => serializeArtifact(STRINGS, "row", { shared })).toThrow(expect.objectContaining({ code: "ir" }));
+    for (const profile of [false, 0, "", { shared: { columns: [{ leaf: 9, dict: ["x"] }] } }]) {
+      expect(() => serializeArtifact(STRINGS, "columnar", profile as never)).toThrow(expect.objectContaining({ code: "ir" }));
+    }
+  });
+
+  test("matches the compiled artifact, with and without a profile", () => {
+    expect(serializeArtifact(STRUCT)).toBe(compileIR(STRUCT).artifact);
+    const profiled = compileIR(STRINGS, { plan: "columnar", profile: { version: 1, shared } });
+    expect(serializeArtifact(STRINGS, "columnar", { shared })).toBe(profiled.artifact);
+    expect(serializeArtifact(STRINGS, "columnar", profiled.profile)).toBe(profiled.artifact);
+    expect(serializeArtifact(STRINGS, "columnar", null as never)).toBe(compileIR(STRINGS, { plan: "columnar" }).artifact);
+  });
+});
+
 describe("limits", () => {
   test("defaults are frozen and custom limits stay local to a codec", () => {
     expect(Object.isFrozen(DEFAULT_LIMITS)).toBe(true);
