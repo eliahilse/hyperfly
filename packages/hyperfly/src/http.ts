@@ -1,5 +1,8 @@
-import { HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec } from "./codec.js";
-import { DecodeError, EncodeError, HyperflyError } from "./errors.js";
+import { compileIR, HEADER_SIZE, MAGIC, WIRE_VERSION, type Codec, type PackHooks } from "./codec.js";
+import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
+import type { IRNode } from "./ir.js";
+import type { Profile, SharedProfile } from "./profile.js";
+import type { DecodeLimits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
 
 export const HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly";
@@ -154,6 +157,128 @@ export function serveArtifact(pathname: string, registry: CodecRegistry): WellKn
   };
 }
 
+export interface LoadArtifactOptions {
+  limits?: Partial<DecodeLimits>;
+  pack?: PackHooks | false;
+}
+
+function checkedFingerprint(fingerprint: string): string {
+  if (fingerprint.length !== 32 || !/^[0-9a-f]{32}$/i.test(fingerprint)) {
+    throw new HyperflyError("fingerprint", "invalid artifact fingerprint");
+  }
+  return fingerprint.toLowerCase();
+}
+
+const MAX_ARTIFACT_NESTING = 512;
+
+function checkNesting(value: unknown): void {
+  const stack: [unknown, number][] = [[value, 1]];
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()!;
+    if (typeof node !== "object" || node === null) continue;
+    if (depth > MAX_ARTIFACT_NESTING) throw new HyperflyError("ir", `artifact nests deeper than ${MAX_ARTIFACT_NESTING}`);
+    for (const inner of Object.values(node)) stack.push([inner, depth + 1]);
+  }
+}
+
+function artifactRecord(
+  value: unknown,
+  path: string,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new HyperflyError("ir", `${path}: must be a plain object`);
+  }
+  for (const key of Object.keys(value)) {
+    if (!required.includes(key) && !optional.includes(key)) throw new HyperflyError("ir", `${path}: unknown key ${key}`);
+  }
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) throw new HyperflyError("ir", `${path}: missing key ${key}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/** Compile parsed artifact content and verify its fingerprint (negotiation §3). */
+export function loadArtifact<T = unknown>(text: string, fingerprint: string, options: LoadArtifactOptions = {}): Codec<T> {
+  const expected = checkedFingerprint(fingerprint);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new HyperflyError("ir", `artifact is not JSON: ${error.message}`);
+    throw error;
+  }
+  checkNesting(parsed);
+  const root = artifactRecord(parsed, "$", ["wire", "plan", "ir"], ["profile"]);
+  if (root.wire !== 1) throw new HyperflyError("ir", "$.wire: must be 1");
+  const plan = artifactRecord(root.plan, "$.plan", ["layout", "version"]);
+  if (plan.layout !== "row" && plan.layout !== "columnar") {
+    throw new HyperflyError("ir", "$.plan.layout: must be row or columnar");
+  }
+  if (typeof plan.version !== "number") throw new HyperflyError("ir", "$.plan.version: must be a number");
+  let profile: Profile | undefined;
+  if (Object.prototype.hasOwnProperty.call(root, "profile")) {
+    const shared = root.profile as SharedProfile | null;
+    const version = Array.isArray(shared?.columns)
+      && shared.columns.some((column) => column && (column.grammar || column.derived)) ? 2 : 1;
+    profile = { version, shared: shared as SharedProfile };
+  }
+  let codec: Codec<T>;
+  try {
+    codec = compileIR<T>(root.ir as IRNode, { plan: plan.layout, profile, limits: options.limits, pack: options.pack });
+  } catch (error) {
+    if (error instanceof HyperflyError) throw error;
+    throw new HyperflyError("ir", `artifact does not compile: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const compiled = JSON.parse(codec.artifact) as { plan: { version: number } };
+  if (compiled.plan.version !== plan.version) {
+    throw new HyperflyError("ir", `$.plan.version: ${plan.layout} is version ${compiled.plan.version} in this build`);
+  }
+  if (codec.fingerprint !== expected) throw new FingerprintMismatchError(expected, codec.fingerprint);
+  return codec;
+}
+
+export interface FetchArtifactOptions extends LoadArtifactOptions {
+  fetch?: typeof fetch;
+  headers?: HeadersInit;
+  maxBytes?: number;
+  signal?: AbortSignal;
+}
+
+/** Fetch and verify an offered artifact. 404 is a miss; another non-2xx status throws code "fingerprint"; network errors and aborts propagate. */
+export async function fetchArtifact<T = unknown>(
+  base: string | URL,
+  fingerprint: string,
+  options: FetchArtifactOptions = {},
+): Promise<Codec<T> | undefined> {
+  const fp = checkedFingerprint(fingerprint);
+  const maxBytes = bodyLimit(options.maxBytes ?? DEFAULT_MAX_BODY_BYTES);
+  const response = await (options.fetch ?? globalThis.fetch)(new URL(WELL_KNOWN_PREFIX + fp, base), {
+    method: "GET",
+    headers: options.headers,
+    signal: options.signal,
+  });
+  if (!response.ok) {
+    response.body?.cancel().catch(() => {});
+    if (response.status === 404) return undefined;
+    throw new HyperflyError("fingerprint", `artifact fetch failed with status ${response.status}`);
+  }
+  const result = await readLimited(response.body, maxBytes);
+  if (!result.ok) {
+    if (options.signal?.aborted) throw options.signal.reason;
+    if (result.status === 413) throw new HyperflyError("limit", `artifact exceeds maxBytes ${maxBytes}`);
+    throw new HyperflyError("ir", "artifact body could not be read");
+  }
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(result.bytes);
+  } catch {
+    throw new HyperflyError("ir", "artifact is not valid UTF-8");
+  }
+  return loadArtifact<T>(text, fp, options);
+}
+
 /** The header a client sends. Preference order is the caller's. */
 export function acceptHeader(fingerprints: readonly string[]): string {
   return fingerprints.join(", ");
@@ -299,11 +424,14 @@ export function readBody<T>(
   registry: CodecRegistry,
   options: ReadBodyOptions = {},
 ): Promise<{ ok: true; value: T } | { ok: false; response: Response }> {
-  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BODY_BYTES;
+  return readBodyWithinLimit<T>(request, registry, bodyLimit(options.maxBytes ?? DEFAULT_MAX_BODY_BYTES));
+}
+
+function bodyLimit(maxBytes: number): number {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
     throw new RangeError("maxBytes must be a non-negative safe integer");
   }
-  return readBodyWithinLimit<T>(request, registry, maxBytes);
+  return maxBytes;
 }
 
 async function readBodyWithinLimit<T>(
@@ -322,41 +450,9 @@ async function readBodyWithinLimit<T>(
   if (contentLength !== null && /^\d+$/.test(contentLength.trim()) && Number(contentLength) > maxBytes) {
     return { ok: false, response: new Response(null, { status: 413 }) };
   }
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  if (request.body !== null) {
-    const reader = request.body.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        length += value.byteLength;
-        if (length > maxBytes) {
-          try {
-            reader.cancel().catch(() => {});
-          } catch {
-            // Cancellation is best effort.
-          }
-          return { ok: false, response: new Response(null, { status: 413 }) };
-        }
-        if (value.byteLength > 0) chunks.push(value);
-      }
-    } catch {
-      return { ok: false, response: new Response(null, { status: 400 }) };
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // Stream cleanup must not replace the response.
-      }
-    }
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
+  const result = await readLimited(request.body, maxBytes);
+  if (!result.ok) return { ok: false, response: new Response(null, { status: result.status }) };
+  const bytes = result.bytes;
   if (!isHyperfly) {
     try {
       return { ok: true, value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as T };
@@ -386,4 +482,46 @@ async function readBodyWithinLimit<T>(
     if (error instanceof HyperflyError) return { ok: false, response: new Response(null, { status: 400 }) };
     throw error;
   }
+}
+
+async function readLimited(
+  stream: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; status: 400 | 413 }> {
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  if (stream !== null) {
+    const reader = stream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > maxBytes) {
+          try {
+            reader.cancel().catch(() => {});
+          } catch {
+            // Cancellation is best effort.
+          }
+          return { ok: false, status: 413 };
+        }
+        if (value.byteLength > 0) chunks.push(value);
+      }
+    } catch {
+      return { ok: false, status: 400 };
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // Stream cleanup must not replace the response.
+      }
+    }
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, bytes };
 }
