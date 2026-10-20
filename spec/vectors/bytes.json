@@ -373,6 +373,82 @@
       "hex": ""
     },
     {
+      "name": "row-enum-max-byte-length-exempt",
+      "description": "a 16-byte enum member decodes under maxByteLength 4: enum members are schema constants, charged to the byte budget only (16 <= 64 x (1 + 1))",
+      "plan": "row",
+      "limits": {
+        "maxByteLength": 4
+      },
+      "ir": {
+        "kind": "enum",
+        "members": [
+          "abcdefghijklmnop"
+        ]
+      },
+      "value": "abcdefghijklmnop",
+      "hex": "00"
+    },
+    {
+      "name": "col-enum-max-byte-length-exempt",
+      "description": "one row of a single-member enum column with a 16-byte member under maxByteLength 4; the width-zero column costs no bytes and the member is charged to the byte budget only (16 <= 64 x (1 + 1))",
+      "plan": "columnar",
+      "limits": {
+        "maxByteLength": 4
+      },
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "e",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "abcdefghijklmnop"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "e": "abcdefghijklmnop"
+        }
+      ],
+      "hex": "01"
+    },
+    {
+      "name": "col-literal-max-byte-length-exempt",
+      "description": "one row of a columnar literal leaf of 16 bytes under maxByteLength 4: literals are schema constants, charged to the byte budget only (16 <= 64 x (1 + 1))",
+      "plan": "columnar",
+      "limits": {
+        "maxByteLength": 4
+      },
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "l",
+              "type": {
+                "kind": "literal",
+                "value": "abcdefghijklmnop"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "l": "abcdefghijklmnop"
+        }
+      ],
+      "hex": "01"
+    },
+    {
       "name": "col-grammar-byte-budget-at-bound",
       "description": "2 matched rows x (4 literal + 4 numeric bytes) = 16 decoded bytes equals maxTotalBytes 16",
       "plan": "columnar",
