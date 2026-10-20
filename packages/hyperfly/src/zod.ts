@@ -1,6 +1,7 @@
 import { checkedOptions, compileIR, type Codec, type CompileOptions } from "./codec.js";
 import { DecodeError, EncodeError, UnsupportedSchemaError } from "./errors.js";
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
+import { checkArtifactDepth } from "./nesting.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
 interface ZodDef {
@@ -124,7 +125,8 @@ function unwrap(z: ZodInternals, path: string): Unwrapped {
   }
 }
 
-function nodeOf(z: ZodInternals, path: string): IRNode {
+function nodeOf(z: ZodInternals, path: string, depth: number): IRNode {
+  checkArtifactDepth(depth);
   const def = z.def as DefRecord;
   const bag = z.bag ?? {};
 
@@ -150,6 +152,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
       return { kind: "float64" };
     }
     case "enum": {
+      checkArtifactDepth(depth + 1);
       const entries = def.entries as Record<string, unknown> | undefined;
       if (!entries) unsupported(path, "enum without entries");
       const members = Object.values(entries);
@@ -183,11 +186,12 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
     case "array": {
       const { inner, optional, nullable } = unwrap(internals(def.element, `${path}[]`), `${path}[]`);
       if (optional) unsupported(`${path}[]`, "optional array elements have no v0 encoding");
-      let element = nodeOf(inner, `${path}[]`);
+      let element = nodeOf(inner, `${path}[]`, depth + 1 + Number(nullable));
       if (nullable) element = { kind: "nullable", inner: element };
       return { kind: "array", element };
     }
     case "object": {
+      checkArtifactDepth(depth + 1);
       if (def.catchall !== undefined) {
         unsupported(path, "catchall/loose objects have no v0 encoding");
       }
@@ -198,7 +202,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
         const fieldPath = `${path}.${name}`;
         checkFieldName(name, fieldPath);
         const { inner, optional, nullable } = unwrap(internals(fieldSchema, fieldPath), fieldPath);
-        const field: IRField = { name, type: nodeOf(inner, fieldPath) };
+        const field: IRField = { name, type: nodeOf(inner, fieldPath, depth + 3) };
         if (optional) field.optional = true;
         if (nullable) field.nullable = true;
         fields.push(field);
@@ -213,7 +217,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
 export function toIR(schema: ZodSchemaLike): IRNode {
   const { inner, optional, nullable } = unwrap(internals(schema, "$"), "$");
   if (optional) unsupported("$", "top-level optional has no v0 encoding");
-  const node = nodeOf(inner, "$");
+  const node = nodeOf(inner, "$", 2 + Number(nullable));
   return nullable ? { kind: "nullable", inner: node } : node;
 }
 

@@ -300,7 +300,7 @@ describe("profile JSON data", () => {
   cyclic.self = cyclic;
   const cyclicArray: unknown[] = [];
   cyclicArray.push(cyclicArray);
-  let deep: unknown = {};
+  let deep: unknown = { value: undefined };
   for (let i = 0; i < 10000; i++) deep = { nested: deep };
 
   test.each([

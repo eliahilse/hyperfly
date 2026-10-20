@@ -1,4 +1,5 @@
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
+import { checkIRNesting } from "./nesting.js";
 import type { Derivation, GrammarToken, SharedProfile } from "./profile.js";
 import { sha256 } from "./sha256.js";
 
@@ -87,6 +88,7 @@ export function serializeArtifact(
   layout: PlanLayout = "row",
   profile?: { shared: SharedProfile },
 ): string {
+  checkIRNesting(ir);
   const head = `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}`;
   return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
 }
