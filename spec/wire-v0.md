@@ -242,8 +242,9 @@ does. It applies the amplification bound to every array with, in place of
 remaining bytes, the number of bytes the array's own encoding occupies after
 its count (for a fixed-length array, all of its bytes), and the budget with
 the final body length. It applies the same one-bit floor as a decoder, to the
-same arrays, measured by those same bytes. An encoder that would violate any of these MUST refuse
-the value, with `depth` for `maxDepth` and `limit` otherwise. An encoder may
+same arrays, measured by those same bytes. An encoder that would violate any
+of these MUST refuse the value, with `depth` for `maxDepth` and `limit`
+otherwise. An encoder may
 therefore refuse a value whose body a decoder would accept (the decoder's
 remaining bytes include later siblings), never the reverse.
 
