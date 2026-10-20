@@ -17,6 +17,10 @@ export const DEFAULT_MAX_BODY_BYTES = 1 << 20;
 const MAX_ENTRIES = 32;
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 const VARY = "Hyperfly-Accept, Accept";
+/** The intrinsic getters see a chunk's internal slots, so neither a subclass nor another realm can misreport it. */
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const typedArrayTag = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
+const typedArrayByteLength = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
 
 /** Client fingerprints in preference order, ignoring malformed entries and duplicates. */
 export function parseAccept(header: string | null | undefined): string[] {
@@ -490,6 +494,14 @@ async function readBodyWithinLimit<T>(
   }
 }
 
+function cancelQuietly(reader: ReadableStreamDefaultReader<Uint8Array>): void {
+  try {
+    reader.cancel().catch(() => {});
+  } catch {
+    // Cancellation is best effort.
+  }
+}
+
 async function readLimited(
   stream: ReadableStream<Uint8Array> | null,
   maxBytes: number,
@@ -497,21 +509,27 @@ async function readLimited(
   const chunks: Uint8Array[] = [];
   let length = 0;
   if (stream !== null) {
-    const reader = stream.getReader();
+    let reader: ReadableStreamDefaultReader<Uint8Array>;
+    try {
+      reader = stream.getReader();
+    } catch {
+      return { ok: false, status: 400 };
+    }
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        length += value.byteLength;
+        if (typedArrayTag.call(value) !== "Uint8Array") {
+          cancelQuietly(reader);
+          return { ok: false, status: 400 };
+        }
+        const size = typedArrayByteLength.call(value) as number;
+        length += size;
         if (length > maxBytes) {
-          try {
-            reader.cancel().catch(() => {});
-          } catch {
-            // Cancellation is best effort.
-          }
+          cancelQuietly(reader);
           return { ok: false, status: 413 };
         }
-        if (value.byteLength > 0) chunks.push(value);
+        if (size > 0) chunks.push(new Uint8Array(value));
       }
     } catch {
       return { ok: false, status: 400 };
