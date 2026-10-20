@@ -435,23 +435,27 @@ describe("decoder fuzzing", () => {
 
   test("a declared count cannot outrun the input", () => {
     const element: IRNode = { kind: "struct", fields: [{ name: "x", type: { kind: "int" } }] };
+    const raised = { maxItems: 2 ** 32, maxTotalItems: 2 ** 32 };
     const cases: [string, Codec][] = [
       ["row", compileIR({ kind: "array", element })],
       ["columnar", compileIR({ kind: "array", element }, { plan: "columnar" })],
       ["nested row", compileIR(NESTED)],
       ["nested columnar", compileIR(NESTED, { plan: "columnar" })],
       ["literals", compileIR({ kind: "array", element: X })],
+      ["row, raised limits", compileIR({ kind: "array", element }, { limits: raised })],
+      ["columnar, raised limits", compileIR({ kind: "array", element }, { plan: "columnar", limits: raised })],
+      ["literals, raised limits", compileIR({ kind: "array", element: X }, { limits: raised })],
     ];
     for (const [name, codec] of cases) {
-      // every varint length that fits the limit, with no body behind it
-      for (const declared of [0x7f, 0x8001, 0x808001, 0x80808008]) {
+      // a count of every varint length up to the default limit, and one near 2^31, with no body behind it
+      for (const declared of [0x7f, 0x80, 0x4000, 2 ** 24, 2 ** 31 - 1]) {
         const bytes: number[] = [];
         let v = declared;
-        while (v > 0) {
-          bytes.push(v & 0xff);
-          v >>>= 8;
-        }
-        expectRejected(() => timedDecode(codec, new Uint8Array(bytes.reverse()), name), `${name} count ${declared}`);
+        do {
+          bytes.push(v > 0x7f ? (v & 0x7f) | 0x80 : v);
+          v = Math.floor(v / 0x80);
+        } while (v > 0);
+        expectRejected(() => timedDecode(codec, new Uint8Array(bytes), name), `${name} count ${declared}`);
       }
     }
   });
