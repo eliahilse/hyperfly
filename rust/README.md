@@ -17,8 +17,10 @@ comparing fingerprints.
 hyperfly-core = "0.1"
 ```
 
+## Quick start
+
 ```rust
-use hyperfly_core::{Codec, Field, Limits, Node, Plan, Value};
+use hyperfly_core::{Codec, CompileOptions, Field, Node, Value};
 
 fn main() -> Result<(), hyperfly_core::Error> {
     let ir = Node::Struct(vec![Field {
@@ -27,7 +29,7 @@ fn main() -> Result<(), hyperfly_core::Error> {
         optional: false,
         nullable: false,
     }]);
-    let codec = Codec::compile(ir, Plan::Row, Limits::default(), true)?;
+    let codec = Codec::compile(ir, CompileOptions::default())?;
 
     let value = Value::Object(vec![("id".into(), Value::Str("abc".into()))]);
     let bytes = codec.encode(&value)?;
@@ -36,20 +38,116 @@ fn main() -> Result<(), hyperfly_core::Error> {
 }
 ```
 
-`Plan::Columnar` lays arrays of structs out column by column, and
-`Codec::compile_with_profile` takes a trained profile (dictionaries, grammars,
-derived columns). `codec.fingerprint()` is the hex fingerprint peers negotiate on.
+`codec.fingerprint()` is the hex fingerprint peers negotiate on.
+
+## Columnar plan and profiles
+
+`Plan::Columnar` lays arrays of structs out column by column. A `Profile`
+adds decode-critical knowledge for string columns: dictionaries, grammars and
+derived columns. Each `ProfileColumn` names a string leaf by its ordinal in a
+depth-first walk of the schema in declared order. The fingerprint covers the
+profile, so peers only agree when they compiled the same one.
+
+```rust
+use hyperfly_core::{Codec, CompileOptions, Field, Node, Plan, Profile, ProfileColumn, Value};
+
+fn main() -> Result<(), hyperfly_core::Error> {
+    let ir = Node::Array {
+        element: Box::new(Node::Struct(vec![Field {
+            name: "status".into(),
+            ty: Node::Str,
+            optional: false,
+            nullable: false,
+        }])),
+        length: None,
+    };
+    let profile = Profile::new(
+        1,
+        vec![ProfileColumn::new(0).with_dict(vec!["active".into(), "paused".into()])],
+    );
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_profile(profile),
+    )?;
+
+    let value = Value::Array(vec![
+        Value::Object(vec![("status".into(), Value::Str("active".into()))]),
+        Value::Object(vec![("status".into(), Value::Str("paused".into()))]),
+    ]);
+    assert_eq!(codec.decode(&codec.encode(&value)?)?, value);
+    Ok(())
+}
+```
 
 ## Decoding untrusted input
 
 Decoding is bounded by `Limits`: nesting depth, item counts and byte lengths are
 capped, a declared count must be payable by the bytes still on the wire, and
 every failure is a typed `Error` with an `ErrorCode`, never a panic or a partial
-value.
+value. Start from the defaults and tighten individual fields:
+
+```rust
+use hyperfly_core::{Codec, CompileOptions, Limits, Node};
+
+fn main() -> Result<(), hyperfly_core::Error> {
+    let mut limits = Limits::default();
+    limits.max_depth = 16;
+    limits.max_total_bytes = 1 << 20;
+    let codec = Codec::compile(Node::Str, CompileOptions::new().with_limits(limits))?;
+    assert_eq!(codec.limits().max_depth, 16);
+    Ok(())
+}
+```
+
+- `max_depth` bounds nesting of structs, arrays and nullable values.
+- `max_items` bounds the element count of each array, and `max_total_items`
+  the sum of all array counts in one body.
+- `max_byte_length` bounds each string or bytes value, packed blob and
+  inflated column, and `max_total_bytes` the decoded string and bytes total in
+  one body.
+- `max_amplification` and `max_byte_amplification` scale item and byte budgets
+  with the body length, so a short body cannot declare a large result.
+
+## Errors
+
+Every failure carries an `ErrorCode` and a message. The codes are the same
+strings the TypeScript and Python packages report.
+
+```rust
+use hyperfly_core::{Codec, CompileOptions, ErrorCode, Limits, Node};
+
+fn main() -> Result<(), hyperfly_core::Error> {
+    let mut limits = Limits::default();
+    limits.max_items = 2;
+    let ir = Node::Array {
+        element: Box::new(Node::Bool),
+        length: None,
+    };
+    let codec = Codec::compile(ir, CompileOptions::new().with_limits(limits))?;
+
+    let err = codec.decode_body(&[3, 0b111]).unwrap_err();
+    match err.code() {
+        ErrorCode::Limit => assert_eq!(err.code().as_str(), "limit"),
+        other => panic!("unexpected {other}: {}", err.message()),
+    }
+    Ok(())
+}
+```
+
+## Stability
+
+hyperfly-core follows semantic versioning from 1.0. Within 1.x the wire format
+and the public API are stable. Enums and option structs marked
+`#[non_exhaustive]` may gain variants or fields in minor releases, so match
+them with a wildcard arm and build options from `Default` or `new()`. The crate
+has no `unsafe` code and no cargo features.
 
 ## Minimum supported Rust version
 
-Rust 1.82.
+Rust 1.82 for the library. The MSRV is raised only in a minor release and noted
+in the changelog, never in a patch release.
 
 ## Specification
 

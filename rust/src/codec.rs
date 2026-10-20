@@ -5,6 +5,7 @@ use crate::ir::{
 use crate::value::Value;
 use crate::wire::*;
 use std::collections::HashMap;
+use std::fmt;
 
 /// Envelope magic bytes, `0x68 0x66` (`hf`).
 pub const MAGIC: [u8; 2] = [0x68, 0x66];
@@ -363,7 +364,69 @@ fn sig_bytes(x: u64) -> usize {
     (64 - x.leading_zeros() as usize).div_ceil(8)
 }
 
+/// Settings for [`Codec::compile`].
+///
+/// Build from [`CompileOptions::new`] or [`Default`] and chain the `with_*` setters.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileOptions {
+    /// Body layout; default [`Plan::Row`].
+    pub plan: Plan,
+    /// Bounds for encoding and decoding; default [`Limits::default`].
+    pub limits: Limits,
+    /// Enables DEFLATE string-column candidates and acceptance of packed input,
+    /// independently of profile modes; default true. False rejects packed input with
+    /// [`ErrorCode::Unsupported`]. Packing does not change the fingerprint.
+    pub pack: bool,
+    /// Decode-critical profile; default `None`. Profiles apply only to
+    /// [`Plan::Columnar`], and their shared content changes the fingerprint.
+    pub profile: Option<Profile>,
+}
+
+impl Default for CompileOptions {
+    fn default() -> Self {
+        CompileOptions {
+            plan: Plan::Row,
+            limits: Limits::default(),
+            pack: true,
+            profile: None,
+        }
+    }
+}
+
+impl CompileOptions {
+    /// Returns the default options: row plan, default limits, packing on, no profile.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the body layout.
+    pub fn with_plan(mut self, plan: Plan) -> Self {
+        self.plan = plan;
+        self
+    }
+
+    /// Sets the encoding and decoding bounds.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Enables or disables packed string columns.
+    pub fn with_pack(mut self, pack: bool) -> Self {
+        self.pack = pack;
+        self
+    }
+
+    /// Sets the profile.
+    pub fn with_profile(mut self, profile: Profile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+}
+
 /// A validated schema, layout, and optional profile for bounded encoding and decoding.
+#[derive(Clone)]
 pub struct Codec {
     ir: Node,
     plan: Plan,
@@ -379,35 +442,53 @@ pub struct Codec {
     fingerprint: String,
 }
 
-impl Codec {
-    /// Compiles `ir` with the body layout `plan` and no profile.
-    ///
-    /// `limits` bounds encoding and decoding. `pack` enables DEFLATE string-column
-    /// candidates and decoding packed string columns; false rejects packed input
-    /// with [`ErrorCode::Unsupported`]. Packing does not change the fingerprint.
-    ///
-    /// Returns [`ErrorCode::Ir`] if the schema or selected layout is invalid.
-    pub fn compile(ir: Node, plan: Plan, limits: Limits, pack: bool) -> Result<Codec> {
-        Codec::compile_with_profile(ir, plan, limits, pack, None)
+impl fmt::Debug for Codec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Codec")
+            .field("fingerprint", &self.fingerprint)
+            .field("plan", &self.plan)
+            .field("limits", &self.limits)
+            .field("pack", &self.pack)
+            .finish_non_exhaustive()
     }
+}
 
-    /// Compiles `ir` with `plan` and an optional decode-critical `profile`.
-    ///
-    /// `limits` bounds encoding and decoding. `pack` enables DEFLATE string-column
-    /// candidates and acceptance of packed input, independently of profile modes.
-    /// False rejects packed input with [`ErrorCode::Unsupported`]. Profiles apply
-    /// only to [`Plan::Columnar`]; their shared content changes the fingerprint,
-    /// while `pack` does not.
+impl Codec {
+    /// Compiles `ir` with the plan, limits, packing, and profile in `options`.
     ///
     /// Returns [`ErrorCode::Ir`] for an invalid schema, layout, profile, or a
     /// profile supplied with [`Plan::Row`].
-    pub fn compile_with_profile(
-        ir: Node,
-        plan: Plan,
-        limits: Limits,
-        pack: bool,
-        profile: Option<Profile>,
-    ) -> Result<Codec> {
+    ///
+    /// ```
+    /// use hyperfly_core::{Codec, CompileOptions, Field, Node, Plan, Value};
+    ///
+    /// let ir = Node::Array {
+    ///     element: Box::new(Node::Struct(vec![Field {
+    ///         name: "n".into(),
+    ///         ty: Node::Int { min: None, max: None },
+    ///         optional: false,
+    ///         nullable: false,
+    ///     }])),
+    ///     length: None,
+    /// };
+    /// let codec = Codec::compile(ir, CompileOptions::new().with_plan(Plan::Columnar))?;
+    ///
+    /// let value = Value::Array(
+    ///     (0..3)
+    ///         .map(|n| Value::Object(vec![("n".into(), Value::Int(n))]))
+    ///         .collect(),
+    /// );
+    /// let bytes = codec.encode(&value)?;
+    /// assert_eq!(codec.decode(&bytes)?, value);
+    /// # Ok::<(), hyperfly_core::Error>(())
+    /// ```
+    pub fn compile(ir: Node, options: CompileOptions) -> Result<Codec> {
+        let CompileOptions {
+            plan,
+            limits,
+            pack,
+            profile,
+        } = options;
         validate(&ir, "$")?;
         if plan == Plan::Columnar {
             validate_columnar_layout(&ir)?;
@@ -482,6 +563,21 @@ impl Codec {
     /// Returns the compiled profile, or `None` when compiled without one.
     pub fn profile(&self) -> Option<&Profile> {
         self.profile.as_ref()
+    }
+
+    /// Returns the compiled schema.
+    pub fn ir(&self) -> &Node {
+        &self.ir
+    }
+
+    /// Returns the body layout.
+    pub fn plan(&self) -> Plan {
+        self.plan
+    }
+
+    /// Returns the encoding and decoding bounds.
+    pub fn limits(&self) -> &Limits {
+        &self.limits
     }
 
     fn dict_of(&self, ordinal: usize) -> Option<&[String]> {

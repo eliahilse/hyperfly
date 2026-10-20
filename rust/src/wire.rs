@@ -2,7 +2,7 @@ use std::fmt;
 
 /// A machine-readable reason for a compilation, encoding, or decoding failure.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     /// `varint`: an overlong ULEB128 encoding or one exceeding eight bytes.
     Varint,
@@ -44,6 +44,8 @@ pub enum ErrorCode {
 
 impl ErrorCode {
     /// Returns the lowercase wire error code name.
+    ///
+    /// These are the same codes the TypeScript and Python packages report.
     pub fn as_str(self) -> &'static str {
         match self {
             ErrorCode::Varint => "varint",
@@ -67,13 +69,38 @@ impl ErrorCode {
     }
 }
 
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A codec failure with a stable code and a human-readable explanation.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
-    /// The machine-readable failure category.
-    pub code: ErrorCode,
-    /// The explanation, including a value path when available.
-    pub message: String,
+    pub(crate) code: ErrorCode,
+    pub(crate) message: String,
+}
+
+impl Error {
+    /// Returns the machine-readable failure category.
+    ///
+    /// ```
+    /// use hyperfly_core::{Codec, CompileOptions, ErrorCode, Node};
+    ///
+    /// let codec = Codec::compile(Node::Str, CompileOptions::default()).unwrap();
+    /// let err = codec.decode(&[0x68, 0x66]).unwrap_err();
+    /// assert_eq!(err.code(), ErrorCode::Header);
+    /// assert_eq!(err.code().as_str(), "header");
+    /// ```
+    pub fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// Returns the explanation, including a value path when available.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl fmt::Display for Error {
@@ -102,7 +129,19 @@ const ULEB_DOMAIN_MAX: u64 = (1u64 << 56) - 1;
 const MAX_ULEB_BYTES: usize = 8;
 
 /// Resource bounds enforced during encoding and decoding.
-#[derive(Debug, Clone, Copy)]
+///
+/// Start from [`Limits::default`] and adjust individual fields:
+///
+/// ```
+/// use hyperfly_core::{Codec, CompileOptions, Limits, Node};
+///
+/// let mut limits = Limits::default();
+/// limits.max_depth = 16;
+/// let codec = Codec::compile(Node::Str, CompileOptions::new().with_limits(limits)).unwrap();
+/// assert_eq!(codec.limits().max_depth, 16);
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Limits {
     /// Maximum nesting depth from root depth zero; default 64. Structs, arrays, and nullable nodes count.
     pub max_depth: u32,

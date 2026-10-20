@@ -2,7 +2,8 @@ use crate::wire::{err, ErrorCode, Result, INT_MAX, INT_MIN};
 use sha2::{Digest, Sha256};
 
 /// A schema constant that occupies no body bytes.
-#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Literal {
     /// The null value.
     Null,
@@ -15,7 +16,8 @@ pub enum Literal {
 }
 
 /// A schema node; struct fields and enum members retain their declared order.
-#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// A boolean.
     Bool,
@@ -50,7 +52,7 @@ pub enum Node {
 }
 
 /// A named struct field with independent absence and null permissions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     /// Unique, nonempty name; `__proto__` and decimal array indices below `2^32 - 1` are invalid.
     pub name: String,
@@ -278,7 +280,8 @@ pub fn serialize_node(node: &Node, out: &mut String) {
 }
 
 /// The body layout included in the canonical artifact and fingerprint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Plan {
     /// Row layout version 1.
     Row,
@@ -306,7 +309,7 @@ impl Plan {
 pub const MAX_DICT_ENTRIES: usize = 16383;
 
 /// Exact ASCII letter case used to match and render grammar digits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GrammarCase {
     /// Lowercase letters; required for base 10.
     Lower,
@@ -336,6 +339,7 @@ pub struct GrammarNum {
 }
 
 /// One token in a string grammar, matched in sequence without case folding.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrammarToken {
     /// A nonempty verbatim string; adjacent literal tokens are invalid.
@@ -354,7 +358,8 @@ pub struct Derivation {
 }
 
 /// Decode-critical knowledge for one string column; at least one coding option is required.
-#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileColumn {
     /// Zero-based leaf ordinal from a depth-first schema walk in declared order.
     /// Each eligible array contributes its flattened leaves without further descent.
@@ -367,13 +372,80 @@ pub struct ProfileColumn {
     pub derived: Option<Derivation>,
 }
 
+impl ProfileColumn {
+    /// Returns an entry for string leaf ordinal `leaf` with no coding options set.
+    pub fn new(leaf: usize) -> ProfileColumn {
+        ProfileColumn {
+            leaf,
+            dict: None,
+            grammar: None,
+            derived: None,
+        }
+    }
+
+    /// Sets the dictionary.
+    pub fn with_dict(mut self, dict: Vec<String>) -> Self {
+        self.dict = Some(dict);
+        self
+    }
+
+    /// Sets the grammar.
+    pub fn with_grammar(mut self, grammar: Vec<GrammarToken>) -> Self {
+        self.grammar = Some(grammar);
+        self
+    }
+
+    /// Sets the derivation.
+    pub fn with_derived(mut self, derived: Derivation) -> Self {
+        self.derived = Some(derived);
+        self
+    }
+}
+
 /// A columnar profile whose column content is embedded in the canonical artifact.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// ```
+/// use hyperfly_core::{Codec, CompileOptions, Field, Node, Plan, Profile, ProfileColumn, Value};
+///
+/// let ir = Node::Array {
+///     element: Box::new(Node::Struct(vec![Field {
+///         name: "status".into(),
+///         ty: Node::Str,
+///         optional: false,
+///         nullable: false,
+///     }])),
+///     length: None,
+/// };
+/// let profile = Profile::new(
+///     1,
+///     vec![ProfileColumn::new(0).with_dict(vec!["active".into(), "paused".into()])],
+/// );
+/// let options = CompileOptions::new().with_plan(Plan::Columnar);
+/// let plain = Codec::compile(ir.clone(), options.clone())?;
+/// let codec = Codec::compile(ir, options.with_profile(profile))?;
+///
+/// let value = Value::Array(vec![
+///     Value::Object(vec![("status".into(), Value::Str("active".into()))]),
+///     Value::Object(vec![("status".into(), Value::Str("paused".into()))]),
+/// ]);
+/// assert_eq!(codec.decode(&codec.encode(&value)?)?, value);
+/// assert_ne!(codec.fingerprint(), plain.fingerprint());
+/// # Ok::<(), hyperfly_core::Error>(())
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Profile {
     /// Profile version: 1 permits dictionaries only; 2 also permits grammars and derivations.
     pub version: u32,
     /// Nonempty column entries sorted by unique, ascending string leaf ordinal.
     pub columns: Vec<ProfileColumn>,
+}
+
+impl Profile {
+    /// Returns a profile with `version` and `columns`; [`crate::Codec::compile`] validates it.
+    pub fn new(version: u32, columns: Vec<ProfileColumn>) -> Profile {
+        Profile { version, columns }
+    }
 }
 
 pub fn serialize_shared(profile: &Profile, out: &mut String) {
@@ -437,7 +509,7 @@ pub fn serialize_shared(profile: &Profile, out: &mut String) {
 
 /// Returns canonical JSON for wire major 1, `plan`, `ir`, and optional shared profile content.
 /// Profile version is not serialized. Does not validate inputs; use
-/// [`crate::Codec::compile_with_profile`] to validate them.
+/// [`crate::Codec::compile`] to validate them.
 pub fn serialize_artifact(ir: &Node, plan: Plan, profile: Option<&Profile>) -> String {
     let mut out = String::new();
     out.push_str(&format!(
