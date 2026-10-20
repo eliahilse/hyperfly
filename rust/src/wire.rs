@@ -14,11 +14,13 @@ pub enum ErrorCode {
     Required,
     /// `utf8`: decoded string bytes are not valid UTF-8.
     Utf8,
-    /// `float`: a non-finite float, or a negative-zero bit pattern on decode.
+    /// `float`: a non-finite float, or on decode a negative-zero bit pattern or a non-minimal XOR
+    /// float column encoding.
     Float,
     /// `marker`: an invalid boolean, nullable marker, column mode, or mode parameter.
     Marker,
-    /// `bitmap`: nonzero padding, an absent field marked null, or inconsistent escape bits.
+    /// `bitmap`: nonzero bitmap or bit-packing padding, an absent field marked null, inconsistent
+    /// escape bits, or a patched-frame exception with a zero high part.
     Bitmap,
     /// `trailing`: bytes remain after a complete body.
     Trailing,
@@ -109,7 +111,10 @@ pub struct Limits {
     /// Maximum bytes per string or byte value, and per packed blob and inflated column; default `2^28`.
     pub max_byte_length: u64,
     /// Array count multiplier for the bound `count <= max_amplification * (remaining_bytes + 1)`;
-    /// default 4096. Encoding uses the array payload byte length in place of remaining bytes.
+    /// default 4096. On decode it bounds columnar arrays and row arrays of zero-bit elements;
+    /// other row arrays are held to the stricter one-bit floor, `count <= remaining_bytes * 8`.
+    /// Encoding applies it to every array, with the array's own bytes after its count in place
+    /// of remaining bytes.
     pub max_amplification: u64,
 }
 

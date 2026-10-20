@@ -2,4 +2,4 @@
 "@hyperfly/rust": patch
 ---
 
-The crate root exports only the codec surface, with internal modules private and every public item documented. `Codec::artifact()` and `Codec::fingerprint()` replace the public fields with read-only accessors.
+Everything needed to build, compile and run a codec is imported from the crate root and documented there. A compiled codec's identity is read through `Codec::artifact()` and `Codec::fingerprint()`.

@@ -9,7 +9,8 @@ implementations, so all three agree byte-for-byte.
 
 For 1.0 the crate is codec-only. HTTP negotiation, schema adapters and profile
 training live in the TypeScript and Python packages; a Rust peer builds the IR
-itself or loads the canonical artifact another peer serves.
+and profile itself and can check them against a peer's served artifact by
+comparing fingerprints.
 
 ```toml
 [dependencies]
