@@ -1,4 +1,7 @@
+import tracemalloc
+
 import pytest
+from conftest import load
 
 from hyperfly import CodecRegistry, compile_ir
 from hyperfly.http import (
@@ -17,18 +20,88 @@ CODEC_A = compile_ir(IR)
 CODEC_B = compile_ir(IR_B)
 VALUE = {"id": "abc"}
 
+FINGERPRINT_A = "a" * 32
+FINGERPRINT_B = "b" * 32
+FINGERPRINTS = [format(i, "032x") for i in range(32)]
+ACCEPT_CASES = [
+    (None, []),
+    ("", []),
+    (FINGERPRINT_A, [FINGERPRINT_A]),
+    (f"{FINGERPRINT_B}, {FINGERPRINT_A}", [FINGERPRINT_B, FINGERPRINT_A]),
+    (f" \t{FINGERPRINT_A}\t ,\t {FINGERPRINT_B} \t", [FINGERPRINT_A, FINGERPRINT_B]),
+    *[(f"{space}{FINGERPRINT_A}", []) for space in ("\n", "\r", "\v", "\f", "\u00a0", "\u2003")],
+    *[(f"{FINGERPRINT_A}{space}", []) for space in ("\n", "\r", "\v", "\f", "\u00a0", "\u2003")],
+    (FINGERPRINT_A.upper(), []),
+    ("a" * 31, []),
+    ("a" * 33, []),
+    ("g" * 32, []),
+    (",,,", []),
+    ("," * 31 + FINGERPRINT_A, [FINGERPRINT_A]),
+    ("," * 32 + FINGERPRINT_A, []),
+    (f"{FINGERPRINT_A},{FINGERPRINT_B},{FINGERPRINT_A}", [FINGERPRINT_A, FINGERPRINT_B]),
+    (",".join([FINGERPRINT_A] * 31 + [FINGERPRINT_B]), [FINGERPRINT_A, FINGERPRINT_B]),
+    (",".join([FINGERPRINT_A] * 32 + [FINGERPRINT_B]), [FINGERPRINT_A]),
+    (", ".join(FINGERPRINTS), FINGERPRINTS),
+    ("nope," * 32 + FINGERPRINT_A, []),
+    ("," * (1024 * 1024), []),
+    (FINGERPRINT_A + ",", [FINGERPRINT_A]),
+    ("," * 31 + FINGERPRINT_A + ",", [FINGERPRINT_A]),
+    (",".join(FINGERPRINTS[1:] + ["f" * 32, FINGERPRINT_A]), FINGERPRINTS[1:] + ["f" * 32]),
+    ("," * 31 + FINGERPRINT_A + "," + FINGERPRINT_B, [FINGERPRINT_A]),
+    (FINGERPRINT_A + "\n," + FINGERPRINT_B, [FINGERPRINT_B]),
+    (" " + FINGERPRINT_A + "\t, " + FINGERPRINT_A, [FINGERPRINT_A]),
+    ("a" * 16 + " " + "a" * 15, []),
+    ("aB" * 16, []),
+    (("x" * 4096 + ",") * 32 + FINGERPRINT_A, []),
+]
 
-def test_parse_accept_keeps_order_drops_junk_and_duplicates():
-    a = "a" * 32
-    b = "b" * 32
-    assert parse_accept(f"{a.upper()}, nope, {a}, {b}") == [a, b]
-    assert parse_accept(None) == []
-    assert parse_accept("") == []
+
+def _assert_accept_rows(rows):
+    for row in rows:
+        assert parse_accept(row["header"]) == row["expected"]
 
 
-def test_parse_accept_is_bounded_against_a_hostile_header():
-    flood = ",".join(format(i, "032x") for i in range(5000))
-    assert len(parse_accept(flood)) <= 32
+@pytest.mark.parametrize("header,expected", ACCEPT_CASES)
+def test_parse_accept(header, expected):
+    _assert_accept_rows([{"header": header, "expected": expected}])
+
+
+@pytest.mark.parametrize("row", load("accept.json"), ids=lambda row: row["name"])
+def test_parse_accept_vectors(row):
+    _assert_accept_rows([row])
+
+
+def test_parse_accept_bounds_allocation_by_examined_segments():
+    tracemalloc.start()
+    try:
+        for header, expected in [
+            ("x" * (1 << 20) + "," + FINGERPRINT_A, [FINGERPRINT_A]),
+            (" " * (1 << 20) + FINGERPRINT_A, [FINGERPRINT_A]),
+            ("x" * (1 << 20), []),
+        ]:
+            tracemalloc.reset_peak()
+            before = tracemalloc.get_traced_memory()[0]
+            assert parse_accept(header) == expected
+            assert tracemalloc.get_traced_memory()[1] - before < 64 * 1024
+    finally:
+        tracemalloc.stop()
+
+
+def test_parse_accept_stops_after_the_cap():
+    class Header(str):
+        def find(self, sub, start=0, end=None):
+            assert start < 32, "segment past the cap examined"
+            return str.find(self, sub, start)
+
+    assert parse_accept(Header("," * 32 + "x" * (1 << 20))) == []
+
+
+def test_accept_header_emits_only_valid_lowercase_fingerprints():
+    assert accept_header([]) == ""
+    assert accept_header([
+        FINGERPRINT_B, FINGERPRINT_A.upper(), "nope", "a" * 31, "a" * 33,
+        "g" * 32, f" {FINGERPRINT_A}", f"{FINGERPRINT_A}\n", FINGERPRINT_A,
+    ]) == f"{FINGERPRINT_B}, {FINGERPRINT_A}"
 
 
 def test_binary_when_the_client_holds_the_codec():

@@ -124,9 +124,15 @@ what makes the fallback a transition rather than an outage.
 
 ## 6. Security
 
-- `Hyperfly-Accept` is client-controlled input. A server MUST bound the number
-  of entries it parses (32 is ample) and MUST NOT allocate per unrecognized
-  entry.
+- `Hyperfly-Accept` is client-controlled input. A server MUST examine at most
+  the first 32 comma-separated segments and ignore the rest; every segment
+  counts toward that bound, including empty, malformed and duplicate ones. It
+  MUST NOT allocate per malformed segment, so the work one request can demand
+  is bounded by the 32 segments. Only SP and HTAB are trimmed, and an entry
+  that is not exactly 32 lowercase hex characters after trimming is
+  malformed, not normalized. Duplicates are compared after trimming and only
+  the first is kept. `spec/vectors/accept.json` pins this behaviour; every
+  implementation runs it.
 - A fingerprint is not a secret, but it does identify a schema and a trained
   dictionary. A server MUST NOT serve an artifact belonging to one tenant to
   another, and `.well-known` discovery MUST apply the same authorization as
