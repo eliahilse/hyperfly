@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum as _enum
 import types
 import typing
-from typing import Any
+from typing import Any, Callable, Literal
 
 from ._codec import Codec, compile_ir
 from ._wire import INT_MAX, INT_MIN, Limits, UnsupportedSchemaError
@@ -195,17 +195,26 @@ class _ModelCodec:
         self._codec = codec
         self._model = model
         self._validate = validate
-        self._codec_ir = codec.ir
-        self.plan = codec.plan
-        self.artifact = codec.artifact
-        self.fingerprint = codec.fingerprint
+
+    @property
+    def plan(self) -> str:
+        return self._codec.plan
+
+    @property
+    def artifact(self) -> str:
+        return self._codec.artifact
+
+    @property
+    def fingerprint(self) -> str:
+        return self._codec.fingerprint
+
+    @property
+    def profile(self) -> dict[str, Any] | None:
+        return self._codec.profile
 
     @property
     def ir(self) -> dict[str, Any]:
-        """A copy: the compiled schema is fixed by the fingerprint and never mutated."""
-        import copy as _copy
-
-        return _copy.deepcopy(self._codec_ir)
+        return self._codec.ir
 
     def _to_value(self, value: Any) -> Any:
         if isinstance(value, BaseModel):
@@ -237,7 +246,8 @@ def compile(  # noqa: A001 - mirrors the documented API
     plan: str = "row",
     validate: bool = False,
     limits: Limits | None = None,
-    pack=None,
+    pack: dict[str, Callable[..., bytes]] | Literal[False] | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> _ModelCodec:
-    codec = compile_ir(to_ir(model), plan=plan, limits=limits, pack=pack)
+    codec = compile_ir(to_ir(model), plan=plan, limits=limits, pack=pack, profile=profile)
     return _ModelCodec(codec, model, validate)
