@@ -266,9 +266,9 @@ async function getEvents(url: string) {
             <h2 className="section-title" id="limits-title">Limits</h2>
           </div>
           <p className="docs-prose">
-            A decoder bounds nesting, array counts, value lengths, and two per-body budgets: the
+            Codecs bound nesting, array counts, value lengths, and two per-body budgets: the
             sum of all array counts and the sum of all decoded string and bytes lengths, each
-            scaled to the body&apos;s length. Encoders apply the same limits; over HTTP, a value past them
+            scaled to the body&apos;s length. Over HTTP, a value past these limits
             falls back to JSON. Limits are local to each peer, are not negotiated, and are not
             part of the fingerprint.
           </p>
