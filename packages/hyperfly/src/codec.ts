@@ -1,9 +1,9 @@
-import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./canonical.js";
+import { canonicalArtifact, fingerprintOf, toHex, type PlanLayout } from "./canonical.js";
 import { defaultPackHooks } from "./pack.js";
 import { checkedProfile, indexProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
 import { checkByteBudget, checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
-import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
+import { DecodeError, FingerprintMismatchError, HyperflyError, isInstance } from "./errors.js";
 import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type Limits } from "./reader.js";
 import { Writer } from "./writer.js";
@@ -128,7 +128,7 @@ export function checkedOptions(options: CompileOptions & { validate?: boolean })
     }
     return { limits: checkedLimits, plan: plan ?? "row", pack: checkedPack, profile, validate };
   } catch (cause) {
-    if (cause instanceof HyperflyError && cause.code === "options") throw cause;
+    if (isInstance(cause, HyperflyError) && cause.code === "options") throw cause;
     throw new HyperflyError("options", "options: could not read compile options", { cause });
   }
 }
@@ -143,14 +143,14 @@ function compileArtifact(
   // fixed at compile time and the schema behind it must not drift
   ir = deepFreeze(structuredClone(ir));
   if (profile === undefined || profile === null) {
-    return { ir, profile: undefined, artifact: serializeArtifact(ir, plan) };
+    return { ir, profile: undefined, artifact: canonicalArtifact(ir, plan) };
   }
   if (plan !== "columnar") {
     throw new HyperflyError("ir", "profiles apply to the columnar plan only");
   }
   // the profile is fixed by the fingerprint exactly as the IR is
   const frozen = deepFreeze(checkedProfile(ir, profile));
-  return { ir, profile: frozen, artifact: serializeArtifact(ir, plan, frozen) };
+  return { ir, profile: frozen, artifact: canonicalArtifact(ir, plan, frozen) };
 }
 
 export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = {}): Codec<T> {

@@ -4,6 +4,7 @@ import { DecodeError, EncodeError } from "./errors.js";
 import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
+import { isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -752,7 +753,14 @@ function encodeStringColumn(
       concat.set(value, offset);
       offset += value.length;
     }
-    packed = ctx.deflate(concat);
+    try {
+      packed = ctx.deflate(concat);
+    } catch (err) {
+      throw new EncodeError("packed", `${path}: string column failed to deflate`, { cause: err });
+    }
+    if (!isUint8Array(packed)) {
+      throw new EncodeError("packed", `${path}: deflate hook must return a Uint8Array`);
+    }
     packedCost =
       bytes.reduce((n, value) => n + ulebLen(BigInt(value.length)), 0) +
       ulebLen(BigInt(packed.length)) +
