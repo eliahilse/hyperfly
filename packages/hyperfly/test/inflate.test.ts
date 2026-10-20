@@ -4,7 +4,7 @@ import zlib from "node:zlib";
 import vectors from "../../../spec/vectors/columnar.json" with { type: "json" };
 import { compileIR, defaultPackHooks, HyperflyError, type IRNode } from "../src/index.js";
 import { DecodeError } from "../src/errors.js";
-import { inflateRaw } from "../src/inflate.js";
+import { inflateRaw, inflateRebasing } from "../src/inflate.js";
 
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -75,9 +75,44 @@ function oursInflate(data: Uint8Array, cap: number): Uint8Array | null {
   }
 }
 
+type Outcome = { out: Uint8Array } | { error: unknown };
+
+function settle(run: () => Uint8Array): Outcome {
+  try {
+    return { out: run() };
+  } catch (error) {
+    return { error };
+  }
+}
+
+const REBASES = [7, 8, 13, 64, 1000];
+let rotation = 0;
+
+/** The default path and small rebase thresholds give the same bytes, or the same error. */
+function expectRebasingAgrees(data: Uint8Array, cap: number, context = "", thresholds = REBASES): Outcome {
+  const expected = settle(() => inflateRaw(data, cap));
+  for (const bits of thresholds) {
+    const actual = settle(() => inflateRebasing(data, cap, bits));
+    if ("out" in expected) {
+      if (!("out" in actual) || !Buffer.from(actual.out).equals(Buffer.from(expected.out))) {
+        throw new Error(`${context} cap ${cap} rebase ${bits}: default accepts ${expected.out.length}, rebasing does not agree`);
+      }
+    } else {
+      const want = expected.error as DecodeError;
+      const got = "error" in actual ? (actual.error as DecodeError) : undefined;
+      if (!(got instanceof DecodeError) || got.constructor !== want.constructor || got.code !== want.code || got.message !== want.message) {
+        throw new Error(`${context} cap ${cap} rebase ${bits}: default throws "${want.message}", rebasing ${got ? `throws "${got.message}"` : "accepts"}`);
+      }
+    }
+  }
+  return expected;
+}
+
 function expectAgree(data: Uint8Array, cap: number, context = ""): Uint8Array | null {
   const theirs = zlibInflate(data, cap);
   const ours = oursInflate(data, cap);
+  // one threshold per stream, rotating, so the whole corpus covers all of them
+  expectRebasingAgrees(data, cap, context, [REBASES[rotation++ % REBASES.length]!]);
   if ((theirs === null) !== (ours === null) || (theirs && ours && !Buffer.from(theirs).equals(Buffer.from(ours)))) {
     throw new Error(
       `${context} cap ${cap}: zlib ${theirs ? `accepts ${theirs.length}` : "rejects"}, ours ${ours ? `accepts ${ours.length}` : "rejects"}: ${hex(data).slice(0, 400)}`,
@@ -565,6 +600,80 @@ describe("inflateRaw: bombs stop at the cap", () => {
     expect(() => inflateRaw(stream, 1000)).toThrow(DecodeError);
     expect(performance.now() - start).toBeLessThan(50);
     expect(inflateRaw(stream, 1 + 258 * 100_000).length).toBe(1 + 258 * 100_000);
+  });
+});
+
+describe("inflateRaw: rebasing the bit position changes nothing", () => {
+  test("stored blocks at every bit offset, straddling rebase points", () => {
+    const rng = mulberry32(0x5707ed);
+    for (let i = 0; i < 60; i++) {
+      const w = new Bits();
+      let expected = 0;
+      for (let b = 0, blocks = 1 + Math.floor(rng() * 6); b < blocks; b++) {
+        const last = b === blocks - 1 ? 1 : 0;
+        if (rng() < 0.5) {
+          w.put(last, 1).put(1, 2);
+          for (let k = Math.floor(rng() * 9); k > 0; k--, expected++) fixedLit(w, Math.floor(rng() * 256));
+          fixedLit(w, 256);
+        } else {
+          const part = random(rng, Math.floor(rng() * 300));
+          w.put(last, 1).put(0, 2).align().put(part.length, 16).put(~part.length & 0xffff, 16).raw(part);
+          expected += part.length;
+        }
+      }
+      const stream = w.finish();
+      const outcome = expectAgree(stream, expected, `stored ${i}`);
+      expect(outcome?.length).toBe(expected);
+      expectRebasingAgrees(Buffer.concat([stream, Uint8Array.of(0)]), expected, `stored ${i} trailing`);
+      expectRebasingAgrees(stream, expected - 1, `stored ${i} over the cap`);
+    }
+  });
+
+  test("every truncation of fixed, dynamic and stored streams", () => {
+    const rng = mulberry32(0x7c07);
+    const input = text(rng, 3000);
+    const streams = [
+      deflate(input, { level: 1, strategy: zlib.constants.Z_FIXED }),
+      deflate(input, { level: 9 }),
+      deflate(input, { level: 0 }),
+      deflate(repetitive(rng, 5000), { level: 6 }),
+      Buffer.concat([
+        Uint8Array.of(0, 200, 0, 55, 255),
+        input.subarray(0, 200),
+        deflate(input.subarray(200, 900), { level: 1, strategy: zlib.constants.Z_FIXED, finishFlush: zlib.constants.Z_SYNC_FLUSH }),
+        deflate(input.subarray(900), { level: 9 }),
+      ]),
+    ];
+    for (const [k, stream] of streams.entries()) {
+      for (let cut = 0; cut <= stream.length; cut++) {
+        expectRebasingAgrees(stream.subarray(0, cut), 1 << 16, `stream ${k} cut ${cut}`);
+      }
+    }
+  });
+
+  test("thresholds below 7 bits are refused", () => {
+    for (const bits of [-8, 0, 6, 7.5, Number.NaN]) {
+      expect(() => inflateRebasing(Uint8Array.of(3, 0), 0, bits)).toThrow(RangeError);
+    }
+    expect(inflateRebasing(Uint8Array.of(3, 0), 0, 7).length).toBe(0);
+  });
+
+  test("long matches, large outputs and caps hit mid-match", () => {
+    const w = fixedLit(new Bits().put(1, 1).put(1, 2), 0x61);
+    for (let i = 0; i < 20_000; i++) fixedMatch(w, 258, 0);
+    const run = fixedLit(w, 256).finish();
+    const big = text(mulberry32(5), 400_000);
+    for (const [stream, size] of [
+      [run, 1 + 258 * 20_000],
+      [deflate(big, { level: 6 }), big.length],
+      [deflate(big, { level: 0 }), big.length],
+      [deflate(new Uint8Array(1_000_000), { level: 9 }), 1_000_000],
+    ] as const) {
+      for (const cap of [size, size - 1, 1000, 0]) {
+        const outcome = expectRebasingAgrees(stream, cap);
+        expect("out" in outcome).toBe(cap === size);
+      }
+    }
   });
 });
 

@@ -1,5 +1,5 @@
 import { columnarEligible, flattenLeaves } from "./columnar.js";
-import { HyperflyError } from "./errors.js";
+import { HyperflyError, isInstance } from "./errors.js";
 import { describeValue, hasLoneSurrogate, validateIR, withinStack } from "./ir.js";
 import type { IRNode } from "./ir.js";
 
@@ -168,7 +168,7 @@ function snapshotProfile(profile: Profile): Profile {
     }
     return result;
   } catch (cause) {
-    if (cause instanceof HyperflyError && cause.code === "ir") throw cause;
+    if (isInstance(cause, HyperflyError) && cause.code === "ir") throw cause;
     throw new HyperflyError("ir", "profile: could not read JSON data", { cause });
   }
 }

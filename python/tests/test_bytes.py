@@ -7,8 +7,8 @@ import pytest
 
 from conftest import calls, load
 from hyperfly import HyperflyError, Limits, _codec, compile_ir
-from test_limits import codec_for, revive
-from test_vectors import deep_eq
+from test_limits import codec_for
+from test_vectors import deep_eq, revive
 
 BYTES = load("bytes.json")
 

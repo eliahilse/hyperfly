@@ -209,6 +209,26 @@ describe("coded validation errors", () => {
     }
   });
 
+  test("applies a value-changing check once across a round trip", () => {
+    const codec = compile(z.string().overwrite((s) => s + "!"), { validate: true });
+    expect(codec.decode(codec.encode("x"))).toBe("x!");
+    expect(codec.decodeBody(codec.encodeBody("x"))).toBe("x!");
+  });
+
+  test.each(["decode", "decodeBody"] as const)("%s still rejects values that fail validation", (method) => {
+    const codec = compile(z.string().min(3), { validate: true });
+    const trusted = compile(z.string());
+    const bytes = method === "decode" ? trusted.encode("x") : trusted.encodeBody("x");
+    expect(() => codec[method](bytes)).toThrow(DecodeError);
+    expect(() => codec[method](bytes)).toThrow(expect.objectContaining({ code: "validation" }));
+  });
+
+  test("the validating codec is frozen like a compiled codec", () => {
+    const codec = compile(z.string(), { validate: true });
+    expect(Object.isFrozen(codec)).toBe(true);
+    expect(Object.isFrozen(compile(z.string()))).toBe(true);
+  });
+
   test("preserves an error thrown by a custom parse", () => {
     const cause = new TypeError("custom validation failed");
     const schema = z.string();
@@ -216,6 +236,23 @@ describe("coded validation errors", () => {
     const codec = compile(schema, { validate: true });
     expect(() => codec.encode("value")).toThrow(EncodeError);
     expect(() => codec.encode("value")).toThrow(expect.objectContaining({ code: "validation", cause }));
+  });
+
+  test("wraps a revoked proxy thrown by parse", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const schema = z.string();
+    schema.parse = () => { throw proxy; };
+    const codec = compile(schema, { validate: true });
+    let caught: unknown;
+    try {
+      codec.encode("value");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(EncodeError);
+    expect((caught as EncodeError).code).toBe("validation");
+    expect((caught as EncodeError).cause).toBe(proxy);
   });
 
   test.each([null, "invalid", { toString: null }].map((cause) => [cause] as const))(
