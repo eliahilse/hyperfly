@@ -511,7 +511,7 @@ async function readLimited(
           }
           return { ok: false, status: 413 };
         }
-        if (value.byteLength > 0) chunks.push(value);
+        if (value.byteLength > 0) chunks.push(value.slice());
       }
     } catch {
       return { ok: false, status: 400 };

@@ -246,6 +246,21 @@ describe("fetchArtifact", () => {
     expect(loaded?.fingerprint).toBe(unicode.fingerprint);
   });
 
+  test("copies each chunk before the stream reuses its buffer", async () => {
+    const bytes = new TextEncoder().encode(codec.artifact);
+    const buffer = new Uint8Array(1);
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset === bytes.length) return controller.close();
+        buffer[0] = bytes[offset++]!;
+        controller.enqueue(buffer);
+      },
+    }, { highWaterMark: 0 });
+    const loaded = await fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)) });
+    expect(loaded?.fingerprint).toBe(codec.fingerprint);
+  });
+
   test("rejects invalid UTF-8", async () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(new Uint8Array([0xff]))) }))
       .rejects.toThrow(expect.objectContaining({ code: "ir", message: expect.stringContaining("UTF-8") }));

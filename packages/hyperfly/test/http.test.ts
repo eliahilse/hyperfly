@@ -748,6 +748,20 @@ describe("request body limits", () => {
     })).toEqual({ ok: true, value: "é" });
   });
 
+  test("copies each chunk before the stream reuses its buffer", async () => {
+    const buffer = new Uint8Array(1);
+    const digits = new TextEncoder().encode("12");
+    let pulls = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulls === digits.length) return controller.close();
+        buffer[0] = digits[pulls++]!;
+        controller.enqueue(buffer);
+      },
+    }, { highWaterMark: 0 });
+    expect(await readBody(new Request(url, { method: "POST", body }), registry)).toEqual({ ok: true, value: 12 });
+  });
+
   test.each(["-1", "1.5", "1x"])("ignores invalid Content-Length %s", async (contentLength) => {
     const result = await readBody(new Request(url, {
       method: "POST",
