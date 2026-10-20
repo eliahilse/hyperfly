@@ -328,15 +328,20 @@ function decodeIntColumn(r: Reader, bounds: IntBounds, count: number, path: stri
   };
 
   if (mode === 0x00 || mode === 0x01) {
-    // every value, and in delta mode every difference, costs at least one byte
+    let prev = 0n;
+    const next = (i: number): number => {
+      const form = readUleb(r);
+      prev = i === 0 || mode === 0x00 ? fromForm(form) : prev + unzigzag(form);
+      return check(prev, i);
+    };
+    // every value, and in delta mode every difference, costs at least one byte: a body
+    // too short for the column fails on its first bad value or its end, before allocating
+    if (r.remaining() < count) {
+      for (let i = 0; i < count; i++) next(i);
+    }
     r.need(count);
     const out = new Float64Array(count);
-    let prev = fromForm(readUleb(r));
-    out[0] = check(prev, 0);
-    for (let i = 1; i < count; i++) {
-      prev = mode === 0x00 ? fromForm(readUleb(r)) : prev + unzigzag(readUleb(r));
-      out[i] = check(prev, i);
-    }
+    for (let i = 0; i < count; i++) out[i] = next(i);
     return (j) => out[j]!;
   }
 
@@ -886,21 +891,32 @@ function decodeStringColumn(
     }
     const width = r.u8();
     if (width > 14) throw new DecodeError("marker", `${path}: dictionary width ${width} exceeds 14`);
-    const codes = unpackBits(r, count, width, path);
-    // width zero codes every row as an escape, and each escape costs a byte
-    if (width === 0) r.need(count);
-    const out = new Array<string>(count);
-    for (let i = 0; i < count; i++) {
-      const code = codes();
-      if (code === 0n) {
-        out[i] = readLiteral(i);
-      } else {
-        if (code > BigInt(dict.length)) {
-          throw new DecodeError("range", `${path}[${i}]: dictionary code ${code} out of range`);
-        }
-        out[i] = checkProfileLength(dict[Number(code) - 1]!, i);
+    const next = unpackBits(r, count, width, path);
+    // width zero codes every row as an escape; codes are held only once their bytes are read
+    const codes = width === 0 ? null : new Uint16Array(count);
+    let escapeCount = codes ? 0 : count;
+    if (codes) {
+      for (let i = 0; i < count; i++) {
+        codes[i] = Number(next());
+        if (codes[i] === 0) escapeCount++;
       }
     }
+    const value = (i: number): string => {
+      const code = codes ? codes[i]! : 0;
+      if (code === 0) return readLiteral(i);
+      if (code > dict.length) {
+        throw new DecodeError("range", `${path}[${i}]: dictionary code ${code} out of range`);
+      }
+      return checkProfileLength(dict[code - 1]!, i);
+    };
+    // each escape costs at least its length byte: a body too short for them fails on its
+    // first bad row or its end, before allocating
+    if (r.remaining() < escapeCount) {
+      for (let i = 0; i < count; i++) value(i);
+    }
+    r.need(escapeCount);
+    const out = new Array<string>(count);
+    for (let i = 0; i < count; i++) out[i] = value(i);
     return (j) => out[j]!;
   }
 
@@ -932,46 +948,52 @@ function decodeStringColumn(
     const derived = profile.derivedOf(ordinal);
     if (!derived) throw new DecodeError("unsupported", `${path}: derived column requires a profile for this leaf`);
     const escapes = readEscapes();
-    readEscaped(escapes);
     const source = sourceOf(derived.source);
     // per participant: its escape index when escaped, else the source's dictionary code
-    const slot = new Int32Array(count);
-    let j = 0;
-    let s = 0;
-    let e = 0;
-    for (let row = 0; row < rows && j < count; row++) {
-      const sourceRow = source !== undefined && participates(source.part, row);
-      if (participates(part, row)) {
-        if (escapes.escaped(j)) {
-          slot[j] = e++;
-        } else {
-          if (!sourceRow) {
-            throw new DecodeError("range", `${path}[${j}]: derived source does not participate in this array row`);
+    const resolve = (slot: Int32Array | null): void => {
+      let j = 0;
+      let s = 0;
+      for (let row = 0; row < rows && j < count; row++) {
+        const sourceRow = source !== undefined && participates(source.part, row);
+        if (participates(part, row)) {
+          if (escapes.escaped(j)) {
+            if (slot) slot[j] = escapes.values.length;
+            escapes.values.push(readLiteral(j));
+          } else {
+            if (!sourceRow) {
+              throw new DecodeError("range", `${path}[${j}]: derived source does not participate in this array row`);
+            }
+            const value = source.values(s);
+            const code = typeof value === "string" ? profile.codeOf(derived.source, value) : undefined;
+            if (code === undefined) {
+              throw new DecodeError("range", `${path}[${j}]: derived source value is outside its dictionary`);
+            }
+            checkProfileLength(derived.values[code - 1]!, j);
+            if (slot) slot[j] = code;
           }
-          const value = source.values(s);
-          const code = typeof value === "string" ? profile.codeOf(derived.source, value) : undefined;
-          if (code === undefined) {
-            throw new DecodeError("range", `${path}[${j}]: derived source value is outside its dictionary`);
-          }
-          checkProfileLength(derived.values[code - 1]!, j);
-          slot[j] = code;
+          j++;
         }
-        j++;
+        if (sourceRow) s++;
       }
-      if (sourceRow) s++;
-    }
+    };
+    // escaped values follow in row order, each at least its length byte: a body too short
+    // for them fails on its first bad row or its end, before allocating
+    if (r.remaining() < escapes.count) resolve(null);
+    r.need(escapes.count);
+    const slot = new Int32Array(count);
+    resolve(slot);
     return (k) => (escapes.escaped(k) ? escapes.values[slot[k]!]! : derived.values[slot[k]! - 1]!);
   }
 
-  r.need(count);
-  const lengths = new Array<number>(count);
+  // each length costs at least one byte, so the lengths grow with the bytes read, not the count
+  const lengths: number[] = [];
   let total = 0;
   for (let i = 0; i < count; i++) {
     const raw = readUleb(r);
     if (raw > BigInt(r.limits.maxByteLength)) {
       throw new DecodeError("limit", `${path}[${i}]: string length exceeds limit`);
     }
-    lengths[i] = Number(raw);
+    lengths.push(Number(raw));
     total += lengths[i]!;
     if (total > r.limits.maxByteLength) {
       throw new DecodeError("limit", `${path}: packed column total exceeds limit`);

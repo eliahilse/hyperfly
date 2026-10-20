@@ -493,3 +493,64 @@ describe("deflate candidacy respects the byte limit (python port finding)", () =
     expect(body[1]).toBe(0x00);
   });
 });
+
+describe("doubly-invalid columns report their first failure", () => {
+  const STRINGS: IRNode = {
+    kind: "array",
+    element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+
+  function codeOf(run: () => unknown): string {
+    try {
+      run();
+    } catch (err) {
+      expect(err).toBeInstanceOf(HyperflyError);
+      return (err as HyperflyError).code;
+    }
+    throw new Error("expected decode to fail");
+  }
+
+  test("an overlong int value is varint even when the column outruns the body", () => {
+    const IR: IRNode = {
+      kind: "array",
+      element: { kind: "struct", fields: [{ name: "t", type: { kind: "int" } }] },
+    };
+    const codec = compileIR(IR, { plan: "columnar" });
+    expect(codeOf(() => codec.decodeBody(fromHex("03008000")))).toBe("varint");
+  });
+
+  test("a packed length past maxByteLength is limit even when the lengths outrun the body", () => {
+    const codec = compileIR(STRINGS, { plan: "columnar" });
+    expect(codeOf(() => codec.decodeBody(fromHex("0a028180808001")))).toBe("limit");
+  });
+
+  test("a derived row outside the source dictionary is range before later escapes are read", () => {
+    const IR: IRNode = {
+      kind: "array",
+      element: {
+        kind: "struct",
+        fields: [
+          { name: "a", type: { kind: "string" } },
+          { name: "b", type: { kind: "string" } },
+        ],
+      },
+    };
+    const profile = {
+      version: 2 as const,
+      shared: { columns: [{ leaf: 0, dict: ["x"] }, { leaf: 1, derived: { source: 0, values: ["y"] } }] },
+    };
+    const codec = compileIR(IR, { plan: "columnar", profile });
+    expect(codeOf(() => codec.decodeBody(fromHex("0200017a017804010201ff")))).toBe("range");
+    expect(codeOf(() => codec.decodeBody(fromHex("0300017a01780178040206")))).toBe("range");
+    expect(codec.decodeBody(fromHex("020001780178040102017a"))).toEqual([
+      { a: "x", b: "y" },
+      { a: "x", b: "z" },
+    ]);
+  });
+
+  test("a dictionary code out of range is range even when the escapes outrun the body", () => {
+    const codec = compileIR(STRINGS, { plan: "columnar", profile: { version: 1, shared: { columns: [{ leaf: 0, dict: ["a"] }] } } });
+    expect(codeOf(() => codec.decodeBody(fromHex("04010202")))).toBe("range");
+    expect(codeOf(() => codec.decodeBody(fromHex("040102")))).toBe("truncated");
+  });
+});
