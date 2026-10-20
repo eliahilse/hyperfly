@@ -97,20 +97,37 @@ jobs:
 
       - run: pytest python/tests -q
 
-  # the oldest supported Python with the oldest pydantic the package declares
+  # the Python suite on pydantic 2.5 (the declared floor, on the oldest Python), 2.8, 2.10 and the latest release
   python-floor:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "python-floor", python: "3.10", pydantic: "2.5" }
+          - { name: "pydantic (2.8)", python: "3.12", pydantic: "2.8" }
+          - { name: "pydantic (2.10)", python: "3.12", pydantic: "2.10" }
+          - { name: "pydantic (latest)", python: "3.12", pydantic: "" }
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python }}
 
-      - run: pip install "./python[test]" "pydantic==2.5.*"
+      - if: matrix.pydantic != ''
+        run: pip install "./python[test]" "pydantic==${{ matrix.pydantic }}.*"
 
-      - run: python -c "import pydantic; assert pydantic.VERSION.startswith('2.5.'), pydantic.VERSION"
+      - if: matrix.pydantic == ''
+        run: pip install "./python[test]"
+
+      - if: matrix.pydantic != ''
+        run: python -c "import pydantic; assert pydantic.VERSION.startswith('${{ matrix.pydantic }}.'), pydantic.VERSION"
+
+      - if: matrix.pydantic == ''
+        run: python -c "import pydantic; print(pydantic.VERSION)"
 
       - run: pytest python/tests -q
 
