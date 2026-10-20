@@ -404,13 +404,21 @@ def read_body(
     if content_length is not None and _exceeds(content_length, max_bytes):
         raise RequestError(413, "too-large")
     if isinstance(body, (bytes, bytearray, memoryview)):
-        if memoryview(body).nbytes > max_bytes:
-            raise RequestError(413, "too-large")
-        return bytes(body)
+        try:
+            with memoryview(body) as view:
+                if view.nbytes > max_bytes:
+                    raise RequestError(413, "too-large")
+                return body if type(body) is bytes else view.tobytes()
+        except (MemoryError, RequestError):
+            raise
+        except Exception as error:
+            raise RequestError(400, "unreadable") from error
     chunks: list[bytes] = []
     length = 0
     try:
         iterator = iter(body)
+    except MemoryError:
+        raise
     except Exception as error:
         raise RequestError(400, "unreadable") from error
     while True:
@@ -418,13 +426,20 @@ def read_body(
             chunk = next(iterator)
         except StopIteration:
             break
+        except MemoryError:
+            raise
         except Exception as error:
             raise RequestError(400, "unreadable") from error
         try:
-            view = memoryview(chunk)
-        except TypeError as error:
+            # copied and released before the next pull: a producer may reuse its buffer
+            with memoryview(chunk) as view:
+                size = view.nbytes
+                data = b"" if length + size > max_bytes else chunk if type(chunk) is bytes else view.tobytes()
+        except MemoryError:
+            raise
+        except Exception as error:
             raise RequestError(400, "unreadable") from error
-        length += view.nbytes
+        length += size
         if length > max_bytes:
             close = getattr(iterator, "close", None)
             if callable(close):
@@ -433,8 +448,8 @@ def read_body(
                 except Exception:
                     pass
             raise RequestError(413, "too-large")
-        if view.nbytes:
-            chunks.append(chunk if type(chunk) is bytes else view.tobytes())
+        if size:
+            chunks.append(data)
     return b"".join(chunks)
 
 

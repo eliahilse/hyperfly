@@ -1,5 +1,6 @@
 import json
 import math
+import sys
 import time
 import tracemalloc
 from enum import Enum, IntEnum
@@ -921,3 +922,65 @@ def test_string_hyperfly_responses_encode_like_text_encoder(body):
 def test_string_hyperfly_response_replaces_lone_surrogates():
     body = "hf\x01" + "\ud800" * 16
     assert decode_response(HYPERFLY_MEDIA_TYPE, body, CodecRegistry([CODEC_A])) == ("unknown-codec", "efbfbd" * 5 + "ef")
+
+
+def test_a_producer_may_reuse_and_resize_its_buffer():
+    def stream():
+        chunk = bytearray(b"[1")
+        yield chunk
+        chunk.clear()
+        chunk.extend(b"]")
+        yield chunk
+
+    assert read_body(stream()) == b"[1]"
+    assert _request(stream()) == ("json", [1])
+
+
+def test_a_producer_may_mutate_its_buffer_between_yields():
+    def stream():
+        chunk = bytearray(b"[1")
+        yield chunk
+        chunk[:] = b",2"
+        yield chunk
+        chunk[:] = b"]"
+        yield memoryview(chunk)
+
+    assert read_body(stream()) == b"[1,2]"
+
+
+def _released_view():
+    view = memoryview(b"[1]")
+    view.release()
+    return view
+
+
+@pytest.mark.parametrize("body", [lambda: [_released_view()], _released_view])
+def test_a_released_buffer_is_unreadable(body):
+    for call in (read_body, _request):
+        with pytest.raises(RequestError) as raised:
+            call(body())
+        assert (raised.value.status, raised.value.reason) == (400, "unreadable")
+        assert isinstance(raised.value.__cause__, ValueError)
+
+
+class _Buffer:
+    def __init__(self, error):
+        self.error = error
+
+    def __buffer__(self, flags):
+        raise self.error
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="__buffer__ needs 3.12")
+def test_a_failing_buffer_protocol_is_unreadable_but_memory_errors_propagate():
+    with pytest.raises(RequestError) as raised:
+        read_body([_Buffer(RuntimeError("gone"))])
+    assert raised.value.status == 400 and isinstance(raised.value.__cause__, RuntimeError)
+    with pytest.raises(MemoryError):
+        read_body([_Buffer(MemoryError())])
+
+
+def test_interrupts_and_memory_errors_from_the_stream_propagate():
+    for error in (KeyboardInterrupt, MemoryError):
+        with pytest.raises(error):
+            read_body(Chunks([], fail=error()))

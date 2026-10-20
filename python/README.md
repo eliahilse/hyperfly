@@ -166,8 +166,10 @@ compiled with `validate=True`, raised as `EncodeError` on the encode paths and
 
 `RequestError` is separate: it is not a `HyperflyError` and has no `code`. It is how
 `read_body` and `decode_request` refuse a request, carrying `status` (400, 413 or
-415), a stable `reason` and the response `headers`, and it wraps the `DecodeError`
-or stream error that caused it as `__cause__`.
+415), a stable `reason` and the response `headers`. Only a 400 wraps a cause: the
+`DecodeError` for a body that fails to decode (so a JSON parse error is the
+`__cause__` of that `DecodeError`, one hop further down), or the stream or buffer
+error for an unreadable body. A 413 or 415 has no `__cause__`.
 
 ## Conformance
 
