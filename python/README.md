@@ -157,7 +157,7 @@ route that legitimately ships denser payloads raises them on both peers.
 | `max_depth` | 64 | struct, array and nullable nesting |
 | `max_items` | 2^24 | items in one array |
 | `max_byte_length` | 2^28 | bytes in one string or bytes value |
-| `max_amplification` | 32 | items in one array per remaining body byte |
+| `max_amplification` | 32 | items in one array: at most `max_amplification` × (remaining bytes + 1), or one item per remaining bit instead for a row-encoded array of non-zero-bit elements |
 | `max_total_items` | 2^24 | items across every array in one body, and at most `max_amplification` × (body length + 1) |
 | `max_total_bytes` | 2^26 | decoded bytes of every string and bytes value in one body, counting literals, enum members and dictionary, grammar and derived values |
 | `max_byte_amplification` | 64 | those decoded bytes per body byte: at most `max_byte_amplification` × (body length + 1) |

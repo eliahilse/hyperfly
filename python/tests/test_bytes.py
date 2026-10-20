@@ -307,5 +307,61 @@ def _assert_fast_limit(codec, body):
         tracemalloc.stop()
     assert err.value.code == "limit"
     assert "byte budget" in str(err.value)
-    assert elapsed < 0.5
+    assert elapsed < 0.2
     assert peak < 8 << 20
+
+
+LANE = {"num": {"base": 10, "len": 1, "case": "lower"}}
+CHAIN = _profile(
+    {"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]},
+    {"leaf": 1, "dict": ["x", "y"], "derived": {"source": 0, "values": ["x", "y"]}},
+    {"leaf": 2, "derived": {"source": 1, "values": ["p", "q"]}},
+    {"leaf": 3, "derived": {"source": 1, "values": ["p", "q"]}},
+)
+
+
+@pytest.mark.parametrize("count", [1, 9, 300])
+def test_derived_columns_share_their_sources(count):
+    ir = _array(*(_field(name, "string") for name in "sabc"))
+    codec = compile_ir(ir, plan="columnar", profile=CHAIN)
+    rows = []
+    for i in range(count):
+        s = ["00", "10", "37"][i % 3] if i % 11 else "zz"
+        a = {"00": "x", "10": "y"}.get(s, "w") if i % 7 else "v"
+        b = {"x": "p", "y": "q"}.get(a, "o")
+        rows.append({"s": s, "a": a, "b": b, "c": b if i % 5 else "n"})
+    body = codec.encode_body(rows)
+    assert codec.decode_body(body) == rows
+    assert codec.encode_body(codec.decode_body(body)) == body
+
+
+GRAMMAR_SOURCE = _profile(
+    {"leaf": 0, "dict": ["00", "10"], "grammar": [LANE, LANE]},
+    {"leaf": 1, "derived": {"source": 0, "values": ["x", "y"]}},
+)
+OPTIONAL_SOURCE = _profile({"leaf": 0, "dict": ["x"]}, {"leaf": 1, "derived": {"source": 0, "values": ["y"]}})
+OPTIONAL_PAIR = _array({"name": "s", "type": {"kind": "string"}, "optional": True}, _field("d", "string"))
+
+
+@pytest.mark.parametrize(
+    "ir, profile, body, expected",
+    [
+        # s renders 00 and 10 from one varying lane, so d derives x and y
+        (TWO, GRAMMAR_SOURCE, "02" "0300" "02000204" "020000" "0400", [{"a": "00", "b": "x"}, {"a": "10", "b": "y"}]),
+        # 30 matches the grammar but not the dictionary
+        (TWO, GRAMMAR_SOURCE, "02" "0300" "0200020c" "020000" "0400", "range"),
+        # the escape z is outside the dictionary
+        (TWO, DERIVED, "02" "010101017a" "0400", "range"),
+        (OPTIONAL_PAIR, OPTIONAL_SOURCE, "02" "03" "010103" "0400", [{"s": "x", "d": "y"}, {"s": "x", "d": "y"}]),
+        # s is absent from row 1
+        (OPTIONAL_PAIR, OPTIONAL_SOURCE, "02" "01" "010101" "0400", "range"),
+    ],
+)
+def test_derived_sources_outside_the_dictionary(ir, profile, body, expected):
+    codec = compile_ir(ir, plan="columnar", profile=profile)
+    if isinstance(expected, list):
+        assert codec.decode_body(bytes.fromhex(body)) == expected
+        return
+    with pytest.raises(HyperflyError) as err:
+        codec.decode_body(bytes.fromhex(body))
+    assert err.value.code == expected

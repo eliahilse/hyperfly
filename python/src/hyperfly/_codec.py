@@ -454,6 +454,8 @@ class _Ctx:
         "derived_bytes",
         "longest_entry",
         "longest_derived",
+        "uniform_entries",
+        "uniform_derived",
         "enum_bytes",
     )
 
@@ -525,6 +527,9 @@ class _Ctx:
         }
         self.longest_entry = {ordinal: max(sizes) for ordinal, sizes in self.entry_bytes.items()}
         self.longest_derived = {ordinal: max(sizes) for ordinal, sizes in self.derived_bytes.items()}
+        # the dictionaries and derivations whose values all have one length
+        self.uniform_entries = {ordinal for ordinal, sizes in self.entry_bytes.items() if len(set(sizes[1:])) == 1}
+        self.uniform_derived = {ordinal for ordinal, sizes in self.derived_bytes.items() if len(set(sizes[1:])) == 1}
         self.enum_bytes: dict[int, tuple[int, ...]] = {}
 
     def column_count(self, node: dict[str, Any]) -> int:
@@ -1440,10 +1445,11 @@ def _framed(packed: array | None, base: int, count: int, node: dict[str, Any], p
             values.outside = None if floor <= base <= ceil else 0
             return values
         offsets: array = packed
+        make = (lambda: offsets) if base == 0 else (lambda: map(add, offsets, repeat(base)))
         outside = None
         if base + min(offsets) < floor or base + max(offsets) > ceil:
-            outside = _first_outside(lambda: map(add, offsets, repeat(base)), floor, ceil)
-        return _Values(lambda: map(add, offsets, repeat(base)), outside=outside)
+            outside = _first_outside(make, floor, ceil)
+        return _Values(make, outside=outside)
     if packed is None:
         if not floor <= base <= ceil:
             _range_fail(node, path, 0, base)
@@ -1804,7 +1810,10 @@ def _decode_string_column(
             escape_failure or failure,
             path,
             (count - escaped) * ctx.longest_entry[ordinal] + _span(starts, ends),
-            lambda: sum(map(sizes.__getitem__, codes)) + sum(escape_lengths()),
+            lambda: (
+                (count - escaped) * sizes[1] if ordinal in ctx.uniform_entries else sum(map(sizes.__getitem__, codes))
+            )
+            + sum(escape_lengths()),
         )
         table = ctx.tables[ordinal]
 
@@ -1889,8 +1898,10 @@ def _decode_string_column(
             literal = map(lookup.get, _texts(buf, starts, ends), repeat(0))
             if escaped == count:
                 return array("H", literal)
-            derived = map(ctx.grammar_codes(ordinal, lookup).get, keys(), repeat(0))
-            return array("H", _merge(rows, derived, literal) if escaped else derived)
+            derived = _lane_codes(lanes, bounds, ctx.grammar_codes(ordinal, lookup))
+            if not escaped:
+                return derived if type(derived) is array else array("H", derived)
+            return array("H", _merge(rows, derived, literal))
 
         return _Values(rendered, codes=grammar_codes)
 
@@ -1928,7 +1939,10 @@ def _decode_string_column(
         else:
             make = derived_lengths
         def derived_total() -> int:
-            conformed = sizes[source] * (count - escaped) if isinstance(source, int) else sum(derived_lengths())
+            if isinstance(source, int) or ordinal in ctx.uniform_derived:
+                conformed = sizes[source if isinstance(source, int) else 1] * (count - escaped)
+            else:
+                conformed = sum(derived_lengths())
             return conformed + sum(escape_lengths())
 
         bound = (count - escaped) * ctx.longest_derived[ordinal] + _span(starts, ends)
@@ -1944,10 +1958,17 @@ def _decode_string_column(
             values = map(table.__getitem__, conforming())
             return _merge(rows, values, _texts(buf, starts, ends)) if escaped else values
 
-        return _Values(
-            derived_values,
-            codes=lambda lookup: array("H", map(lookup.get, derived_values(), repeat(0))),
-        )
+        def derived_codes(lookup: dict[str, int]) -> array:
+            literal = map(lookup.get, _texts(buf, starts, ends), repeat(0))
+            if escaped == count:
+                return array("H", literal)
+            by_code = [0, *(lookup.get(value, 0) for value in derivation["values"])]
+            if escaped:
+                return array("H", _merge(rows, map(by_code.__getitem__, conforming()), literal))
+            recoded = _recode(source, by_code)
+            return recoded if type(recoded) is array else array("H", recoded)
+
+        return _Values(derived_values, codes=derived_codes)
 
     lengths, err = read_ulebs(r, count)
     limit = r.limits.max_byte_length
@@ -1999,12 +2020,66 @@ def _joined_utf8(data: bytes, starts: array, total: int) -> bool:
     return 1 not in heads.translate(_CONTINUATION)
 
 
+def _lane_codes(lanes: list[_Values], bounds: list[dict[str, Any]], keys: dict[Any, int]) -> Iterable[int]:
+    """The dictionary codes of a grammar column's matched rows, from their lanes. When
+    one lane varies and the others are constant, a table indexed by that lane's value
+    replaces a lookup per row, and a byte-wide lane translates in one step."""
+    varying = [i for i, lane in enumerate(lanes) if lane.const is _ABSENT]
+    if len(varying) > 1:
+        return map(keys.get, zip(*(lane.make() for lane in lanes)), repeat(0))
+    fixed = [lane.const for lane in lanes]
+    if not varying:
+        return repeat(keys.get(fixed[0] if len(fixed) == 1 else tuple(fixed), 0))
+    (i,) = varying
+    if len(lanes) == 1:
+        by_value = keys
+    else:
+        by_value = {
+            key[i]: code for key, code in keys.items() if all(part == fixed[j] for j, part in enumerate(key) if j != i)
+        }
+    values = lanes[i].make()
+    size = bounds[i]["max"] + 1
+    if size > 1 << 16:
+        return map(by_value.get, values, repeat(0))
+    table = [0] * size
+    for value, code in by_value.items():
+        table[value] = code
+    return _recode(values, table)
+
+
+def _recode(values: Iterable[int], table: list[int]) -> Iterable[int]:
+    """table[value] for every value, in one translate for bytes through a byte table."""
+    if type(values) is array and values.typecode == "B" and len(table) <= 256 and max(table) < 256:
+        return array("B", bytes(values).translate(bytes(table).ljust(256, b"\0")))
+    return map(table.__getitem__, values)
+
+
 def _too_long(path: str, index: int) -> DecodeError:
     return DecodeError("limit", f"{path}[{index}]: reconstructed string length exceeds limit")
 
 
 def _zeros(codes: array) -> Iterator[int]:
     return compress(itertools.count(), map(not_, codes))
+
+
+_ZERO_FLAGS = bytes.maketrans(bytes(range(256)), b"\1" + bytes(255))
+_FULL_FLAGS = bytes.maketrans(bytes(range(256)), bytes(255) + b"\1")
+
+
+def _missing_flags(codes: array) -> bytes:
+    """One byte per code, 1 where it is 0 or _NOT_PARTICIPATING. A two-byte code is
+    either when its low and high bytes, taken as two integers, OR to zero or AND to 0xFF."""
+    data = codes.tobytes()
+    if codes.itemsize == 1:
+        return data.translate(_ZERO_FLAGS)
+    if codes.itemsize != 2:
+        return bytes(map(_MISSING_CODES.__contains__, codes))
+    count = len(codes)
+    low = int.from_bytes(data[0::2], "little")
+    high = int.from_bytes(data[1::2], "little")
+    zero = int.from_bytes((low | high).to_bytes(count, "little").translate(_ZERO_FLAGS), "little")
+    full = int.from_bytes((low & high).to_bytes(count, "little").translate(_FULL_FLAGS), "little")
+    return (zero | full).to_bytes(count, "little")
 
 
 def _first_derived_failure(
@@ -2017,12 +2092,13 @@ def _first_derived_failure(
         missing = first if codes in _MISSING_CODES else None
         too_long = first if codes in long_codes else None
     elif not escaped:
-        missing = next(compress(itertools.count(), map(_MISSING_CODES.__contains__, codes)), None)
+        found = _missing_flags(codes).find(1)
+        missing = None if found < 0 else found
         too_long = (
             next(compress(itertools.count(), map(long_codes.__contains__, codes)), None) if long_codes else None
         )
     else:
-        missing = _lowest(_flag_bits(bytes(map(_MISSING_CODES.__contains__, codes))) & ~escapes)
+        missing = _lowest(_flag_bits(_missing_flags(codes)) & ~escapes)
         too_long = _lowest(_flag_bits(bytes(map(long_codes.__contains__, codes))) & ~escapes) if long_codes else None
     if missing is not None and (too_long is None or missing <= too_long):
         if (codes if isinstance(codes, int) else codes[missing]) == _NOT_PARTICIPATING:
@@ -2077,6 +2153,7 @@ def _decode_columnar(
     # columns stay packed, typed or arithmetic until the whole body has decoded, so a
     # malformed later column fails before any earlier one expands per row
     columns: list[_Column] = []
+    sources: dict[Any, int | array] = {}
     max_depth = r.limits.max_depth
     for leaf_index, (suffix, name, nesting, optional, nullable, t) in enumerate(ctx.leaf_plans[id(leaves)]):
         field_path = path + suffix
@@ -2114,7 +2191,9 @@ def _decode_columnar(
                 field_path,
                 ctx,
                 ordinal,
-                partial(_source_codes, ctx, columns, ordinal_base, count, part) if ordinal in ctx.derivations else None,
+                partial(_source_codes, ctx, columns, ordinal_base, count, sources, part)
+                if ordinal in ctx.derivations
+                else None,
             )
         elif kind == "enum":
             values = _decode_enum_column(r, t, participating, field_path, ctx)
@@ -2137,24 +2216,40 @@ def _decode_columnar(
 
 
 def _source_codes(
-    ctx: _Ctx, columns: list[_Column], ordinal_base: int, count: int, part: int | None, ordinal: int
+    ctx: _Ctx,
+    columns: list[_Column],
+    ordinal_base: int,
+    count: int,
+    found: dict[Any, int | array],
+    part: int | None,
+    ordinal: int,
 ) -> int | array:
     """A derivation source's dictionary codes at the rows a derived column with
     participation `part` covers: 0 outside the dictionary, _NOT_PARTICIPATING where
-    the source is absent."""
+    the source is absent. Every derived column that reads one source with the same
+    participation shares one result, held in `found`."""
+    known = found.get((ordinal, part))
+    if known is not None:
+        return known
+    codes: Any = found.get(ordinal)
     _presence, _nulls, source_part, values = columns[ordinal - ordinal_base]
-    assert values.codes is not None
-    codes: Any = values.codes(ctx.codes[ordinal])
+    if codes is None:
+        assert values.codes is not None
+        codes = found[ordinal] = values.codes(ctx.codes[ordinal])
     if source_part is None:
         if part is None or isinstance(codes, int):
-            return codes
-        return array("H", compress(codes, _selector(part, count)))
-    source_rows = _selector(source_part, count)
-    if isinstance(codes, int):
-        by_row: Iterable[int] = map((_NOT_PARTICIPATING, codes).__getitem__, source_rows)
+            result = codes
+        else:
+            result = array("H", compress(codes, _selector(part, count)))
     else:
-        by_row = _merge(source_rows, repeat(_NOT_PARTICIPATING), codes)
-    return array("H", by_row if part is None else compress(by_row, _selector(part, count)))
+        source_rows = _selector(source_part, count)
+        if isinstance(codes, int):
+            by_row: Iterable[int] = map((_NOT_PARTICIPATING, codes).__getitem__, source_rows)
+        else:
+            by_row = _merge(source_rows, repeat(_NOT_PARTICIPATING), codes)
+        result = array("H", by_row if part is None else compress(by_row, _selector(part, count)))
+    found[(ordinal, part)] = result
+    return result
 
 
 _Shape = tuple[list[str], list[Any]]

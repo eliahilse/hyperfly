@@ -196,6 +196,20 @@ HOSTILE = [
         "a08d06ff" + "00" * 4000,
         "marker",
     ),
+    (
+        "six derived columns of one grammar source",
+        _array(_field("s", "string"), *(_field(f"d{i}", "string") for i in range(6)), _field("n", "int")),
+        _profile(
+            {
+                "leaf": 0,
+                "dict": ["00", "10"],
+                "grammar": [{"num": {"base": 10, "len": 1, "case": "lower"}}] * 2,
+            },
+            *({"leaf": i + 1, "derived": {"source": 0, "values": ["x", "y"]}} for i in range(6)),
+        ),
+        ROWS_400K + "0300020001" + "00" * 50000 + "020000" + "0400" * 6 + "ff",
+        "marker",
+    ),
 ]
 
 
@@ -217,7 +231,7 @@ def test_hostile_bodies_fail_fast_and_small(ir, profile, body, code):
     finally:
         tracemalloc.stop()
     assert err.value.code == code
-    assert elapsed < 0.5
+    assert elapsed < 0.2
     assert peak < 8 << 20
 
 
