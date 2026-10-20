@@ -244,7 +244,8 @@ def _serialize_model_bytes(value: Any, handler: Callable[[Any], Any]) -> Any:
     return _base64(value) if isinstance(value, (bytes, bytearray)) else handler(value)
 
 
-def _declared_json_schema(annotation: Any) -> dict[str, Any]:
+def _declared_json_schema(annotation: Any) -> dict[str, Any] | None:
+    """Recover only bytes leaves and containers made entirely of bytes leaves."""
     while get_origin(annotation) is Annotated:
         annotation = get_args(annotation)[0]
     origin = get_origin(annotation)
@@ -254,11 +255,23 @@ def _declared_json_schema(annotation: Any) -> dict[str, Any]:
         args = get_args(annotation)
         inner = [item for item in args if item is not type(None)]
         if len(args) == 2 and len(inner) == 1:
-            return {"type": "nullable", "schema": _declared_json_schema(inner[0])}
+            schema = _declared_json_schema(inner[0])
+            return {"type": "nullable", "schema": schema} if schema is not None else None
     if origin is list:
         args = get_args(annotation)
-        return {"type": "list", "items_schema": _declared_json_schema(args[0] if args else None)}
-    return getattr(annotation, "__pydantic_core_schema__", {"type": "any"})
+        schema = _declared_json_schema(args[0]) if args else None
+        return {"type": "list", "items_schema": schema} if schema is not None else None
+    if origin is tuple:
+        from pydantic_core import core_schema
+
+        args = get_args(annotation)
+        if len(args) == 2 and args[1] is Ellipsis:
+            schema = _declared_json_schema(args[0])
+            return dict(core_schema.tuple_variable_schema(schema)) if schema is not None else None
+        items = [_declared_json_schema(item) for item in args]
+        if items and all(item is not None for item in items):
+            return dict(core_schema.tuple_positional_schema([item for item in items if item is not None]))
+    return None
 
 
 def _build_model_json(cls: type[Any]) -> _ModelJSON:
@@ -322,11 +335,15 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
         elif kind == "definition-ref":
             copied["schema_ref"] = child(definitions[node["schema_ref"]])["ref"]
         elif kind == "function-plain":
-            inner = child(plain_inner if plain_inner is not None else _declared_json_schema(annotation))
-            plain[identity] = {
-                "type": "function-wrap", "function": lambda value, handler: handler(value),
-                "schema": inner, "when_used": "json",
-            }
+            declared_schema = _declared_json_schema(annotation)
+            # Model-containing declarations retain pydantic's dynamic serializer,
+            # including subclass fields and serializers on the runtime model.
+            if declared_schema is not None:
+                inner = child(plain_inner if plain_inner is not None else declared_schema)
+                plain[identity] = {
+                    "type": "function-wrap", "function": lambda value, handler: handler(value),
+                    "schema": inner, "when_used": "json",
+                }
         elif kind in ("definitions", "model", "nullable", "default", "function-before", "function-after", "function-wrap"):
             declared = annotation
             if kind == "definitions":
@@ -352,7 +369,12 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
             copied["items_schema"] = child(node["items_schema"], args[0] if args else None)
         elif kind in ("tuple", "tuple-positional", "tuple-variable"):
             items = node.get("items_schema", [])
-            copied["items_schema"] = child(items) if isinstance(items, dict) else [child(item) for item in items]
+            args = get_args(annotation) if get_origin(annotation) is tuple else ()
+            copied["items_schema"] = (
+                child(items, args[0] if args else None) if isinstance(items, dict) else [
+                    child(item, args[index] if index < len(args) else None) for index, item in enumerate(items)
+                ]
+            )
             if node.get("extras_schema") is not None:
                 copied["extras_schema"] = child(node["extras_schema"])
         return copied
