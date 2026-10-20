@@ -1,6 +1,7 @@
 use crate::ir::{
-    column_count, fingerprint_of, has_payload, serialize_artifact, validate, validate_profile,
-    Derivation, Field, GrammarCase, GrammarToken, Literal, Node, Plan, Profile,
+    check_artifact_nesting, column_count, dismantle, fingerprint_of, has_payload,
+    serialize_artifact, validate, validate_profile, Derivation, Field, GrammarCase, GrammarToken,
+    Literal, Node, Plan, Profile,
 };
 use crate::value::Value;
 use crate::wire::*;
@@ -245,27 +246,26 @@ fn enum_width(member_count: usize) -> Result<u8> {
 }
 
 fn validate_columnar_layout(node: &Node) -> Result<()> {
-    match node {
-        Node::Array { element, .. } => {
-            if let Some(leaves) = columnar_leaves(element) {
-                for leaf in leaves {
-                    if let Node::Enum(members) = &leaf.field.ty {
-                        enum_width(members.len())?;
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Array { element, .. } => {
+                if let Some(leaves) = columnar_leaves(element) {
+                    for leaf in leaves {
+                        if let Node::Enum(members) = &leaf.field.ty {
+                            enum_width(members.len())?;
+                        }
                     }
+                } else {
+                    stack.push(element);
                 }
-                return Ok(());
             }
-            validate_columnar_layout(element)
+            Node::Nullable(inner) => stack.push(inner),
+            Node::Struct(fields) => stack.extend(fields.iter().rev().map(|f| &f.ty)),
+            _ => {}
         }
-        Node::Nullable(inner) => validate_columnar_layout(inner),
-        Node::Struct(fields) => {
-            for field in fields {
-                validate_columnar_layout(&field.ty)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 fn type_accepts_null(node: &Node) -> bool {
@@ -477,7 +477,8 @@ impl Codec {
     /// Compiles `ir` with the plan, limits, packing, and profile in `options`.
     ///
     /// Returns [`ErrorCode::Ir`] for an invalid schema, layout, profile, or a
-    /// profile supplied with [`Plan::Row`].
+    /// profile supplied with [`Plan::Row`], and for a schema or profile whose
+    /// canonical artifact would nest JSON containers deeper than 512.
     ///
     /// ```
     /// use hyperfly_core::{Codec, CompileOptions, Field, Node, Plan, Value};
@@ -509,6 +510,10 @@ impl Codec {
             pack,
             profile,
         } = options;
+        if let Err(e) = check_artifact_nesting(&ir, profile.as_ref()) {
+            dismantle(ir);
+            return Err(e);
+        }
         validate(&ir, "$")?;
         if plan == Plan::Columnar {
             validate_columnar_layout(&ir)?;
@@ -866,6 +871,7 @@ impl Codec {
                         format!("{path}: array payload size underflow"),
                     )
                 })?;
+                self.check_amplification(items.len(), payload_bytes, path)?;
                 if has_payload(element) {
                     let affordable = u128::try_from(payload_bytes)
                         .ok()
@@ -883,7 +889,7 @@ impl Codec {
                         );
                     }
                 }
-                self.check_amplification(items.len(), payload_bytes, path)
+                Ok(())
             }
             Node::Struct(fields) => {
                 let Value::Object(_) = value else {
@@ -1131,21 +1137,9 @@ impl Codec {
                     write_bitmap(out, &bits);
                 }
                 Node::Str => {
-                    let mut strings = Vec::with_capacity(input.participating.len());
-                    for (i, v) in input.participating.iter().enumerate() {
-                        match v {
-                            Value::Str(s) => strings.push(s.as_str()),
-                            _ => {
-                                return err(
-                                    ErrorCode::Type,
-                                    format!("{field_path}[{i}]: expected string"),
-                                )
-                            }
-                        }
-                    }
                     enc_string_column(
                         out,
-                        &strings,
+                        &input.participating,
                         &input.slots,
                         &inputs,
                         ordinal_base,
@@ -2637,7 +2631,7 @@ fn write_escape_header(payload: &mut Vec<u8>, escaped: &[bool]) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn enc_string_column(
     out: &mut Vec<u8>,
-    values: &[&str],
+    participating: &[&Value],
     slots: &[usize],
     inputs: &[ColumnInput<'_>],
     ordinal_base: usize,
@@ -2650,11 +2644,15 @@ fn enc_string_column(
     derivation: Option<&Derivation>,
     all_codes: &HashMap<usize, HashMap<String, u64>>,
 ) -> Result<()> {
-    if values.is_empty() {
+    if participating.is_empty() {
         out.push(0);
         return Ok(());
     }
-    for (i, value) in values.iter().enumerate() {
+    let mut strings = Vec::with_capacity(participating.len());
+    for (i, value) in participating.iter().enumerate() {
+        let Value::Str(value) = value else {
+            return err(ErrorCode::Type, format!("{path}[{i}]: expected string"));
+        };
         let len = u64::try_from(value.len()).map_err(|_| {
             Error::new(
                 ErrorCode::Limit,
@@ -2668,7 +2666,9 @@ fn enc_string_column(
             );
         }
         budget.charge_bytes(len, &format!("{path}[{i}]"))?;
+        strings.push(value.as_str());
     }
+    let values = strings.as_slice();
 
     let mut candidates: Vec<(u8, Vec<u8>)> = Vec::new();
     candidates.push((0x00, escaped_payload(values, &vec![true; values.len()])?));

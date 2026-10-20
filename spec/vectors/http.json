@@ -1,0 +1,787 @@
+{
+  "description": "HTTP JSON vectors for negotiation-v1 §2 (fallback representation, strict UTF-8 responses and JSON numbers) and §4 (request representation and body bounds). jsonFallback.valid rows encode the codec value to JSON whose parsed value compares equal under ir to that of json (numbers compared as binary64, with -0 and 0 equal; spelling, whitespace and key order are not compared) and decode json under ir back to the same value; unknown struct keys are ignored. jsonFallback.invalid rows decode json under ir and fail with error. Values marked {\"$bytes\":\"<hex>\"} are raw bytes, as in bytes.json; markers are fixture notation only. responses rows decode the complete body hex (no hyperfly envelope for JSON) with contentType. requests rows decode body hex with contentType, optional contentLength and maxBytes (default 1048576); optional ir supplies the application-identified codec for JSON conversion. In both responses and requests, expected is {\"kind\":\"json\",\"value\":...} on success, {\"error\":\"json\"} on a response decoding failure, or {\"status\":N} on a request rejection. contentLength is passed to the parser verbatim as a string, not through a platform Headers object that trims it. Requests without ir have no codec. All hex is lowercase. Strings in json are JSON text, not pre-parsed values; conversion failures are json for response decoding and 400 for requests.",
+  "jsonFallback": {
+    "valid": [
+      {
+        "name": "bytes-empty",
+        "ir": {
+          "kind": "bytes"
+        },
+        "value": {
+          "$bytes": ""
+        },
+        "json": "\"\""
+      },
+      {
+        "name": "bytes-one-padding-two",
+        "ir": {
+          "kind": "bytes"
+        },
+        "value": {
+          "$bytes": "00"
+        },
+        "json": "\"AA==\""
+      },
+      {
+        "name": "bytes-two-padding-one",
+        "ir": {
+          "kind": "bytes"
+        },
+        "value": {
+          "$bytes": "0001"
+        },
+        "json": "\"AAE=\""
+      },
+      {
+        "name": "bytes-three-no-padding",
+        "ir": {
+          "kind": "bytes"
+        },
+        "value": {
+          "$bytes": "000102"
+        },
+        "json": "\"AAEC\""
+      },
+      {
+        "name": "bytes-standard-alphabet",
+        "ir": {
+          "kind": "bytes"
+        },
+        "value": {
+          "$bytes": "fbffff"
+        },
+        "json": "\"+///\""
+      },
+      {
+        "name": "nested-bytes-and-value-model",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "payload",
+              "type": {
+                "kind": "bytes"
+              }
+            },
+            {
+              "name": "chunks",
+              "type": {
+                "kind": "array",
+                "element": {
+                  "kind": "bytes"
+                }
+              }
+            },
+            {
+              "name": "flag",
+              "type": {
+                "kind": "bool"
+              }
+            },
+            {
+              "name": "count",
+              "type": {
+                "kind": "int"
+              }
+            },
+            {
+              "name": "ratio",
+              "type": {
+                "kind": "float64"
+              }
+            },
+            {
+              "name": "text",
+              "type": {
+                "kind": "string"
+              }
+            },
+            {
+              "name": "tag",
+              "type": {
+                "kind": "literal",
+                "value": 1
+              }
+            },
+            {
+              "name": "state",
+              "type": {
+                "kind": "enum",
+                "members": [
+                  "ready",
+                  "done"
+                ]
+              }
+            },
+            {
+              "name": "nil",
+              "type": {
+                "kind": "literal",
+                "value": null
+              }
+            },
+            {
+              "name": "nullable",
+              "type": {
+                "kind": "nullable",
+                "inner": {
+                  "kind": "bytes"
+                }
+              }
+            },
+            {
+              "name": "optional",
+              "type": {
+                "kind": "bytes"
+              },
+              "optional": true
+            },
+            {
+              "name": "fieldNull",
+              "type": {
+                "kind": "bytes"
+              },
+              "nullable": true
+            },
+            {
+              "name": "child",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "data",
+                    "type": {
+                      "kind": "bytes"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "value": {
+          "child": {
+            "data": {
+              "$bytes": "ff"
+            }
+          },
+          "fieldNull": null,
+          "nullable": null,
+          "nil": null,
+          "state": "ready",
+          "tag": 1.0,
+          "text": "hi\n\"é",
+          "ratio": 1.5,
+          "count": 3.0,
+          "flag": true,
+          "chunks": [
+            {
+              "$bytes": ""
+            },
+            {
+              "$bytes": "0001"
+            }
+          ],
+          "payload": {
+            "$bytes": "000102"
+          }
+        },
+        "json": "{\"payload\":\"AAEC\",\"chunks\":[\"\",\"AAE=\"],\"flag\":true,\"count\":3,\"ratio\":1.5,\"text\":\"hi\\n\\\"é\",\"tag\":1,\"state\":\"ready\",\"nil\":null,\"nullable\":null,\"fieldNull\":null,\"child\":{\"data\":\"/w==\"}}"
+      },
+      {
+        "name": "nullable-bytes-present",
+        "ir": {
+          "kind": "nullable",
+          "inner": {
+            "kind": "bytes"
+          }
+        },
+        "value": {
+          "$bytes": "ff"
+        },
+        "json": "\"/w==\""
+      },
+      {
+        "name": "float-integral",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": 1.0,
+        "json": "1"
+      },
+      {
+        "name": "float-negative-zero",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": -0.0,
+        "json": "0"
+      },
+      {
+        "name": "float-1e-6",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": 1e-06,
+        "json": "0.000001"
+      },
+      {
+        "name": "float-1e-7",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": 1e-07,
+        "json": "1e-7"
+      },
+      {
+        "name": "float-1e20",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": 1e+20,
+        "json": "100000000000000000000"
+      },
+      {
+        "name": "float-1e21",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": 1e+21,
+        "json": "1e+21"
+      },
+      {
+        "name": "optional-bytes-present",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "data",
+              "type": {
+                "kind": "bytes"
+              },
+              "optional": true
+            }
+          ]
+        },
+        "value": {
+          "data": {
+            "$bytes": "ff"
+          }
+        },
+        "json": "{\"data\":\"/w==\"}"
+      },
+      {
+        "name": "nullable-flag-bytes-present",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "data",
+              "type": {
+                "kind": "bytes"
+              },
+              "nullable": true
+            }
+          ]
+        },
+        "value": {
+          "data": {
+            "$bytes": "ff"
+          }
+        },
+        "json": "{\"data\":\"/w==\"}"
+      },
+      {
+        "name": "int-decimal-token",
+        "ir": {
+          "kind": "int"
+        },
+        "value": 3,
+        "json": "3.0"
+      },
+      {
+        "name": "int-exponent-token",
+        "ir": {
+          "kind": "int"
+        },
+        "value": 3,
+        "json": "3e0"
+      },
+      {
+        "name": "literal-integer-decimal-token",
+        "ir": {
+          "kind": "literal",
+          "value": 1
+        },
+        "value": 1,
+        "json": "1.0"
+      },
+      {
+        "name": "struct-extra-key-ignored",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "data",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        },
+        "value": {
+          "data": true
+        },
+        "json": "{\"data\":true,\"extra\":\"ignored\"}"
+      }
+    ],
+    "invalid": [
+      {
+        "name": "bytes-missing-padding",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AA\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-excess-padding",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AA===\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-padding-required",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AAE\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-padding-for-full-group",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AAEC=\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-invalid-length",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"A\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-whitespace",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\" AA==\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-line-break",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AA==\\n\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-url-alphabet",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"-___\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-nonzero-pad-bits-two",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AB==\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-nonzero-pad-bits-one",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "\"AAB=\"",
+        "error": "json"
+      },
+      {
+        "name": "bytes-non-string",
+        "ir": {
+          "kind": "bytes"
+        },
+        "json": "[0]",
+        "error": "json"
+      },
+      {
+        "name": "array-bytes-noncanonical",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "bytes"
+          }
+        },
+        "json": "[\"AB==\"]",
+        "error": "json"
+      },
+      {
+        "name": "nullable-bytes-noncanonical",
+        "ir": {
+          "kind": "nullable",
+          "inner": {
+            "kind": "bytes"
+          }
+        },
+        "json": "\"AB==\"",
+        "error": "json"
+      },
+      {
+        "name": "child-struct-bytes-noncanonical",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "child",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "data",
+                    "type": {
+                      "kind": "bytes"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "json": "{\"child\":{\"data\":\"AB==\"}}",
+        "error": "json"
+      },
+      {
+        "name": "int-fractional",
+        "ir": {
+          "kind": "int"
+        },
+        "json": "1.5",
+        "error": "json"
+      },
+      {
+        "name": "int-string",
+        "ir": {
+          "kind": "int"
+        },
+        "json": "\"1\"",
+        "error": "json"
+      },
+      {
+        "name": "int-boolean",
+        "ir": {
+          "kind": "int"
+        },
+        "json": "true",
+        "error": "json"
+      },
+      {
+        "name": "enum-unknown-member",
+        "ir": {
+          "kind": "enum",
+          "members": [
+            "ready",
+            "done"
+          ]
+        },
+        "json": "\"unknown\"",
+        "error": "json"
+      },
+      {
+        "name": "field-null-for-non-nullable",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "data",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        },
+        "json": "{\"data\":null}",
+        "error": "json"
+      },
+      {
+        "name": "field-required-missing",
+        "ir": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "data",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        },
+        "json": "{}",
+        "error": "json"
+      },
+      {
+        "name": "int-non-finite",
+        "ir": {
+          "kind": "int"
+        },
+        "json": "1e400",
+        "error": "json"
+      },
+      {
+        "name": "int-beyond-safe-domain",
+        "ir": {
+          "kind": "int"
+        },
+        "json": "9007199254740992",
+        "error": "json"
+      },
+      {
+        "name": "int-declared-bound",
+        "ir": {
+          "kind": "int",
+          "min": 0,
+          "max": 10
+        },
+        "json": "11.0",
+        "error": "json"
+      },
+      {
+        "name": "literal-mismatch",
+        "ir": {
+          "kind": "literal",
+          "value": 1
+        },
+        "json": "2.0",
+        "error": "json"
+      }
+    ]
+  },
+  "responses": [
+    {
+      "name": "json-invalid-utf8",
+      "contentType": "application/json",
+      "hex": "22ff22",
+      "expected": {
+        "error": "json"
+      }
+    },
+    {
+      "name": "json-malformed",
+      "contentType": "application/json",
+      "hex": "7b",
+      "expected": {
+        "error": "json"
+      }
+    }
+  ],
+  "requests": [
+    {
+      "name": "content-length-nbsp-ignored",
+      "contentType": "application/json",
+      "contentLength": " 2 ",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "kind": "json",
+        "value": 0
+      }
+    },
+    {
+      "name": "content-length-above-bound",
+      "contentType": "application/json",
+      "contentLength": "2",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "content-length-sp-htab-above-bound",
+      "contentType": "application/json",
+      "contentLength": " \t2\t ",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "content-length-invalid-received-bound",
+      "contentType": "application/json",
+      "contentLength": "+2",
+      "maxBytes": 1,
+      "hex": "3130",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "json-bytes-base64",
+      "contentType": "application/json",
+      "ir": {
+        "kind": "bytes"
+      },
+      "hex": "2241413d3d22",
+      "expected": {
+        "kind": "json",
+        "value": {
+          "$bytes": "00"
+        }
+      }
+    },
+    {
+      "name": "json-bytes-noncanonical",
+      "contentType": "application/json",
+      "ir": {
+        "kind": "bytes"
+      },
+      "hex": "2241423d3d22",
+      "expected": {
+        "status": 400
+      }
+    },
+    {
+      "name": "content-length-plus-ignored",
+      "contentType": "application/json",
+      "contentLength": "+2",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "kind": "json",
+        "value": 0
+      }
+    },
+    {
+      "name": "content-length-leading-zeros-within-bound",
+      "contentType": "application/json",
+      "contentLength": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "kind": "json",
+        "value": 0
+      }
+    },
+    {
+      "name": "content-length-understates-received-bound",
+      "contentType": "application/json",
+      "contentLength": "1",
+      "maxBytes": 1,
+      "hex": "3130",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "content-length-26-digits",
+      "contentType": "application/json",
+      "contentLength": "99999999999999999999999999",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "content-length-internal-space-ignored",
+      "contentType": "application/json",
+      "contentLength": "2 2",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "kind": "json",
+        "value": 0
+      }
+    },
+    {
+      "name": "content-length-internal-space-received-bound",
+      "contentType": "application/json",
+      "contentLength": "2 2",
+      "maxBytes": 1,
+      "hex": "3130",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "content-length-sp-htab-only-ignored",
+      "contentType": "application/json",
+      "contentLength": " \t \t ",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "kind": "json",
+        "value": 0
+      }
+    },
+    {
+      "name": "content-length-sp-htab-only-received-bound",
+      "contentType": "application/json",
+      "contentLength": " \t \t ",
+      "maxBytes": 1,
+      "hex": "3130",
+      "expected": {
+        "status": 413
+      }
+    },
+    {
+      "name": "json-string-without-codec",
+      "contentType": "application/json",
+      "hex": "2241423d3d22",
+      "expected": {
+        "kind": "json",
+        "value": "AB=="
+      }
+    },
+    {
+      "name": "json-invalid-utf8",
+      "contentType": "application/json",
+      "hex": "22ff22",
+      "expected": {
+        "status": 400
+      }
+    },
+    {
+      "name": "json-malformed",
+      "contentType": "application/json",
+      "hex": "7b",
+      "expected": {
+        "status": 400
+      }
+    },
+    {
+      "name": "json-nested-bytes-noncanonical",
+      "contentType": "application/json",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bytes"
+        }
+      },
+      "hex": "5b2241423d3d225d",
+      "expected": {
+        "status": 400
+      }
+    }
+  ]
+}

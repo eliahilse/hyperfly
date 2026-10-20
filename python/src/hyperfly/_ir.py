@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, NoReturn, cast
+import math
+from collections.abc import Mapping
+from functools import partial
+from typing import Any, Callable, NoReturn, cast
 
 from ._wire import INT_MAX, INT_MIN, HyperflyError
 
 LEAF_KINDS = frozenset({"bool", "int", "float64", "string", "bytes", "enum", "literal"})
 _PLAN_VERSION = {"row": 1, "columnar": 5}
+MAX_NESTING = 512
 
 
 def _fail(path: str, message: str) -> NoReturn:
@@ -22,15 +26,82 @@ def _is_safe_int(v: Any) -> bool:
 
 def normalize_integers(value: Any) -> None:
     """In place on validated IR: integral floats become the ints they denote, -0.0 becomes 0."""
-    if isinstance(value, dict):
-        for key, inner in value.items():
-            if type(inner) is float:
-                value[key] = int(inner)
-            else:
-                normalize_integers(inner)
-    elif isinstance(value, (list, tuple)):
-        for inner in value:
-            normalize_integers(inner)
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key, inner in item.items():
+                if type(inner) is float:
+                    item[key] = int(inner)
+                else:
+                    stack.append(inner)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+
+
+def json_copy(value: Any) -> Any:
+    """Copy JSON-shaped data without recursion: dicts become plain dicts, lists and
+    tuples keep their type, and a container shared in the input stays shared."""
+    order: list[Any] = []
+    seen: set[int] = set()
+    finished: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(value, False)]
+    while stack:
+        item, done = stack.pop()
+        if done:
+            order.append(item)
+            finished.add(id(item))
+        elif isinstance(item, (dict, list, tuple)):
+            if id(item) in seen:
+                # met again before it finished: it contains itself
+                if id(item) not in finished:
+                    raise ValueError("cannot copy cyclic data")
+                continue
+            seen.add(id(item))
+            stack.append((item, True))
+            stack.extend(
+                (inner, False)
+                for inner in (item.values() if isinstance(item, dict) else item)
+                if isinstance(inner, (dict, list, tuple))
+            )
+    # keyed by the ids of live input containers, which no other live object shares, so a
+    # lookup misses exactly for the values that are not copied
+    copies: dict[int, Any] = {}
+    get = copies.get
+    for item in order:
+        if isinstance(item, dict):
+            copies[id(item)] = {key: get(id(inner), inner) for key, inner in item.items()}
+        elif isinstance(item, tuple):
+            copies[id(item)] = tuple([get(id(inner), inner) for inner in item])
+        else:
+            copies[id(item)] = [get(id(inner), inner) for inner in item]
+    return get(id(value), value)
+
+
+def check_artifact_nesting(ir: Any) -> None:
+    """Reject IR whose canonical artifact would nest JSON containers deeper than
+    MAX_NESTING (wire-v0 section 4), without recursion. The artifact object is depth 1
+    and the IR depth 2; only the containers canonical JSON keeps are counted."""
+    stack = [(ir, 2)]
+    while stack:
+        node, depth = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("kind")
+        reached = depth
+        if kind == "nullable":
+            stack.append((node.get("inner"), depth + 1))
+        elif kind == "array":
+            stack.append((node.get("element"), depth + 1))
+        elif kind == "enum":
+            reached = depth + 1
+        elif kind == "struct":
+            fields = node.get("fields")
+            if isinstance(fields, (list, tuple)):
+                reached = depth + 2 if fields else depth + 1
+                stack.extend((f.get("type"), depth + 3) for f in fields if isinstance(f, dict))
+        if reached > MAX_NESTING:
+            _too_deep()
 
 
 _SCALAR_KEYS = frozenset({"kind"})
@@ -73,6 +144,20 @@ def _check_field_name(name: str, path: str) -> None:
 
 def validate_ir(node: Any, path: str = "$") -> None:
     """Validate a v0 schema; raise code ``ir`` prefixed with the failing path."""
+    check_artifact_nesting(node)
+    # depth-first in declared order: a field and then its whole type are checked
+    # before the next field, so the first failure is the one recursion would report
+    stack: list[_Check] = [(_check_node, node, path)]
+    while stack:
+        check, current, current_path = stack.pop()
+        stack.extend(reversed(check(current, current_path)))
+
+
+_Check = tuple[Callable[[Any, str], list[Any]], Any, str]
+
+
+def _check_node(node: Any, path: str) -> list[_Check]:
+    """Check one node; return the checks of its children, in order."""
     if not isinstance(node, dict):
         _fail(path, "IR node must be an object")
     kind = node.get("kind")
@@ -80,7 +165,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
         _fail(path, "IR kind must be a string")
     if kind in ("bool", "float64", "string", "bytes"):
         _check_keys(node, _SCALAR_KEYS, path)
-        return
+        return []
     if kind == "int":
         _check_keys(node, _INT_KEYS, path)
         lo, hi = node.get("min"), node.get("max")
@@ -90,7 +175,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
             _fail(path, "int max must be a safe integer in the v0 domain")
         if lo is not None and hi is not None and lo > hi:
             _fail(path, "int min exceeds max")
-        return
+        return []
     if kind == "literal":
         _check_keys(node, _LITERAL_KEYS, path)
         if "value" not in node:
@@ -100,7 +185,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
             _fail(path, "literal must be string, boolean, null, or a safe integer")
         if type(v) is str:
             _check_string(v, path, "literal string")
-        return
+        return []
     if kind == "enum":
         _check_keys(node, _ENUM_KEYS, path)
         members = node.get("members")
@@ -118,7 +203,7 @@ def validate_ir(node: Any, path: str = "$") -> None:
             if m in seen:
                 _fail(path, f'duplicate enum member "{m}"')
             seen.add(m)
-        return
+        return []
     if kind == "nullable":
         _check_keys(node, _NULLABLE_KEYS, path)
         inner = node.get("inner")
@@ -128,47 +213,58 @@ def validate_ir(node: Any, path: str = "$") -> None:
             _fail(path, "nullable(nullable) is invalid")
         if inner.get("kind") == "literal" and inner.get("value") is None:
             _fail(path, "nullable(literal null) has two encodings for null")
-        validate_ir(inner, path + "?")
-        return
+        return [(_check_node, inner, path + "?")]
     if kind == "array":
         _check_keys(node, _ARRAY_KEYS, path)
         length: Any = node.get("length")
         if "length" in node and (not _is_safe_int(length) or length < 0):
             _fail(path, "fixed array length must be a non-negative safe integer")
-        validate_ir(node.get("element"), path + "[]")
-        return
+        return [(_check_node, node.get("element"), path + "[]")]
     if kind == "struct":
         _check_keys(node, _STRUCT_KEYS, path)
         fields = node.get("fields")
         if not isinstance(fields, (list, tuple)):
             _fail(path, "struct fields must be an array")
-        seen = set()
-        for f in fields:
-            if not isinstance(f, dict):
-                _fail(path, "struct fields must be objects")
-            _check_keys(f, _FIELD_KEYS, path)
-            name = f.get("name")
-            if type(name) is not str or not name:
-                _fail(path, "field names must be non-empty strings")
-            _check_string(name, path, "field name")
-            _check_field_name(name, path)
-            if name in seen:
-                _fail(path, f'duplicate field "{name}"')
-            seen.add(name)
-            field_path = f"{path}.{name}"
-            for flag in ("optional", "nullable"):
-                if flag in f and type(f[flag]) is not bool:
-                    _fail(field_path, f"{flag} flag must be a boolean")
-            field_type = f.get("type")
-            if not isinstance(field_type, dict):
-                _fail(field_path, "field type must be an IR object")
-            if f.get("nullable") and field_type.get("kind") == "nullable":
-                _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
-            if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
-                _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
-            validate_ir(field_type, field_path)
-        return
+        return _check_fields(set(), fields, 0, None, path)
     _fail(path, f"unknown IR kind {kind}")
+
+
+def _check_fields(seen: set[str], fields: Any, start: int, _node: Any, path: str) -> list[_Check]:
+    """Check fields from `start` on; at a type with IR children, check that whole type
+    before the remaining fields."""
+    for index in range(start, len(fields)):
+        f = fields[index]
+        if not isinstance(f, dict):
+            _fail(path, "struct fields must be objects")
+        _check_keys(f, _FIELD_KEYS, path)
+        name = f.get("name")
+        if type(name) is not str or not name:
+            _fail(path, "field names must be non-empty strings")
+        _check_string(name, path, "field name")
+        _check_field_name(name, path)
+        if name in seen:
+            _fail(path, f'duplicate field "{name}"')
+        seen.add(name)
+        field_path = f"{path}.{name}"
+        for flag in ("optional", "nullable"):
+            if flag in f and type(f[flag]) is not bool:
+                _fail(field_path, f"{flag} flag must be a boolean")
+        field_type = f.get("type")
+        if not isinstance(field_type, dict):
+            _fail(field_path, "field type must be an IR object")
+        if f.get("nullable") and field_type.get("kind") == "nullable":
+            _fail(f"{path}.{name}", "nullable flag on a nullable type is ambiguous")
+        if f.get("nullable") and field_type.get("kind") == "literal" and field_type.get("value") is None:
+            _fail(f"{path}.{name}", "nullable flag on a null literal has two encodings for null")
+        kind = field_type.get("kind")
+        if isinstance(kind, str) and kind in _PARENT_KINDS:
+            rest = partial(_check_fields, seen, fields, index + 1)
+            return [(_check_node, field_type, field_path), (rest, None, path)]
+        _check_node(field_type, field_path)
+    return []
+
+
+_PARENT_KINDS = frozenset({"nullable", "array", "struct"})
 
 
 def _esc(s: str) -> str:
@@ -204,6 +300,11 @@ def _literal(v: Any) -> str:
 
 def serialize_node(node: dict[str, Any]) -> str:
     """Return canonical JSON for a validated IR node (wire-v0 section 2)."""
+    return _node_json(node)
+
+
+def _leaf_json(node: dict[str, Any]) -> str | None:
+    """Canonical JSON of a node without IR children, or None for one with them."""
     kind = node["kind"]
     if kind in ("bool", "float64", "string", "bytes"):
         return '{"kind":"' + cast(str, kind) + '"}'
@@ -218,22 +319,67 @@ def serialize_node(node: dict[str, Any]) -> str:
         return f'{{"kind":"literal","value":{_literal(node["value"])}}}'
     if kind == "enum":
         return '{"kind":"enum","members":[' + ",".join(_esc(m) for m in node["members"]) + "]}"
-    if kind == "nullable":
-        return f'{{"kind":"nullable","inner":{serialize_node(node["inner"])}}}'
-    if kind == "array":
-        out = f'{{"kind":"array","element":{serialize_node(node["element"])}'
-        if node.get("length") is not None:
-            out += f',"length":{_int(node["length"])}'
-        return out + "}"
-    fields = []
-    for f in node["fields"]:
-        text = f'{{"name":{_esc(f["name"])},"type":{serialize_node(f["type"])}'
-        if f.get("optional"):
-            text += ',"optional":true'
-        if f.get("nullable"):
-            text += ',"nullable":true'
-        fields.append(text + "}")
-    return '{"kind":"struct","fields":[' + ",".join(fields) + "]}"
+    return None
+
+
+def _node_json(node: dict[str, Any]) -> str:
+    """Canonical JSON for IR, refusing any whose artifact would nest deeper than
+    MAX_NESTING (the artifact object is depth 1, the IR depth 2)."""
+    out: list[str] = []
+    # text to emit, and (node, depth) for IR nodes still to render
+    stack: list[Any] = [(node, 2)]
+    while stack:
+        item = stack.pop()
+        if type(item) is str:
+            out.append(item)
+            continue
+        current, depth = item
+        kind = current["kind"]
+        leaf = _leaf_json(current)
+        if leaf is not None:
+            if depth + (kind == "enum") > MAX_NESTING:
+                _too_deep()
+            out.append(leaf)
+            continue
+        if depth > MAX_NESTING:
+            _too_deep()
+        if kind == "nullable":
+            out.append('{"kind":"nullable","inner":')
+            stack += ("}", (current["inner"], depth + 1))
+        elif kind == "array":
+            out.append('{"kind":"array","element":')
+            length = current.get("length")
+            stack += ("}" if length is None else f',"length":{_int(length)}}}', (current["element"], depth + 1))
+        else:
+            fields = current["fields"]
+            # fields array, field objects, then their type objects
+            if depth + (3 if fields else 1) > MAX_NESTING:
+                _too_deep()
+            enum_too_deep = depth + 4 > MAX_NESTING
+            parts: list[Any] = []
+            run = ['{"kind":"struct","fields":[']
+            sep = ""
+            for f in fields:
+                field_type = f["type"]
+                flags = (',"optional":true' if f.get("optional") else "") + (',"nullable":true' if f.get("nullable") else "")
+                leaf = _leaf_json(field_type)
+                if leaf is None:
+                    run.append(f'{sep}{{"name":{_esc(f["name"])},"type":')
+                    parts += ("".join(run), (field_type, depth + 3))
+                    run = [flags + "}"]
+                else:
+                    if enum_too_deep and field_type["kind"] == "enum":
+                        _too_deep()
+                    run.append(f'{sep}{{"name":{_esc(f["name"])},"type":{leaf}{flags}}}')
+                sep = ","
+            run.append("]}")
+            parts.append("".join(run))
+            stack.extend(reversed(parts))
+    return "".join(out)
+
+
+def _too_deep() -> NoReturn:
+    raise HyperflyError("ir", f"artifact nests deeper than {MAX_NESTING}")
 
 
 MAX_DICT_ENTRIES = 16383
@@ -278,7 +424,7 @@ def serialize_shared(shared: dict[str, Any]) -> str:
 def serialize_artifact(ir: dict[str, Any], layout: str = "row", profile: dict[str, Any] | None = None) -> str:
     """Serialize validated IR, layout and optional profile as canonical artifact JSON."""
     version = _PLAN_VERSION[layout]
-    head = f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{serialize_node(ir)}'
+    head = f'{{"wire":1,"plan":{{"layout":"{layout}","version":{version}}},"ir":{_node_json(ir)}'
     if profile is None:
         return head + "}"
     return head + ',"profile":' + serialize_shared(profile["shared"]) + "}"
@@ -295,9 +441,26 @@ def _enumerate_column_refs(ir: dict[str, Any]) -> list[tuple[str, int]]:
     Array identities are positional rather than based on object identity: one aliased
     schema node used at two positions still denotes two distinct arrays.
     """
+    from ._codec import _columnar_eligible, _flatten_leaves
+
     out: list[tuple[str, int]] = []
-    next_array = [0]
-    _walk_column_refs(ir, out, next_array)
+    next_array = 0
+    stack = [ir]
+    while stack:
+        node = stack.pop()
+        kind = node["kind"]
+        if kind == "array":
+            if _columnar_eligible(node):
+                leaves = _flatten_leaves(node["element"])
+                if leaves is not None:
+                    out.extend((field["type"]["kind"], next_array) for _segs, field in leaves)
+                    next_array += 1
+                    continue
+            stack.append(node["element"])
+        elif kind == "nullable":
+            stack.append(node["inner"])
+        elif kind == "struct":
+            stack.extend(reversed([f["type"] for f in node["fields"]]))
     return out
 
 
@@ -307,56 +470,81 @@ def column_count(node: dict[str, Any]) -> int:
     are threaded positionally rather than looked up by node identity."""
     from ._codec import _columnar_eligible, _flatten_leaves
 
-    kind = node["kind"]
-    if kind == "array":
-        if _columnar_eligible(node):
-            leaves = _flatten_leaves(node["element"])
-            if leaves is not None:
-                return len(leaves)
-        return column_count(node["element"])
-    if kind == "nullable":
-        return column_count(node["inner"])
-    if kind == "struct":
-        return sum(column_count(f["type"]) for f in node["fields"])
-    return 0
-
-
-def _walk_column_refs(
-    node: dict[str, Any], out: list[tuple[str, int]], next_array: list[int]
-) -> None:
-    from ._codec import _columnar_eligible, _flatten_leaves
-
-    kind = node["kind"]
-    if kind == "array":
-        if _columnar_eligible(node):
-            leaves = _flatten_leaves(node["element"])
-            if leaves is not None:
-                array = next_array[0]
-                next_array[0] += 1
-                for _segs, field in leaves:
-                    out.append((field["type"]["kind"], array))
-                return
-        _walk_column_refs(node["element"], out, next_array)
-        return
-    if kind == "nullable":
-        _walk_column_refs(node["inner"], out, next_array)
-        return
-    if kind == "struct":
-        for f in node["fields"]:
-            _walk_column_refs(f["type"], out, next_array)
-        return
+    count = 0
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        kind = current["kind"]
+        if kind == "array":
+            if _columnar_eligible(current):
+                leaves = _flatten_leaves(current["element"])
+                if leaves is not None:
+                    count += len(leaves)
+                    continue
+            stack.append(current["element"])
+        elif kind == "nullable":
+            stack.append(current["inner"])
+        elif kind == "struct":
+            stack.extend(f["type"] for f in current["fields"])
+    return count
 
 
 def validate_profile(ir: dict[str, Any], profile: Any) -> None:
-    """Validate the IR then its columnar profile; raise code ``ir`` on invalid data.
+    """Validate the IR, the profile as JSON data, then the profile against the IR;
+    raise code ``ir`` on invalid data.
 
     Profile errors have the same ``profile:`` prefix as compilation errors.
     """
     try:
         validate_ir(ir)
-        _validate_profile(ir, profile)
+        _validate_profile(ir, snapshot_profile(profile))
     except RecursionError:
         _fail("$", "IR or profile nesting exceeds Python's recursion limit")
+
+
+_PROFILE_CONTAINERS = (list, tuple, set, frozenset, Mapping)
+
+
+def snapshot_profile(profile: Any) -> Any:
+    """A copy of the profile document, which must be acyclic JSON data: plain dicts with
+    string keys, lists, strings, booleans, None, ints and finite floats. Advisory hints
+    may nest to any depth; they are not part of the artifact."""
+
+    def fail(message: str) -> NoReturn:
+        _fail("profile", message)
+
+    holder: list[Any] = [None]
+    active: set[int] = set()
+    # (value, parent, key); a None parent marks leaving the container `value`
+    stack: list[tuple[Any, Any, Any]] = [(profile, holder, 0)]
+    while stack:
+        item, parent, key = stack.pop()
+        if parent is None:
+            active.discard(item)
+            continue
+        if type(parent) is dict and type(key) is not str:
+            fail("JSON keys must be strings")
+        kind = type(item)
+        if item is None or kind is str or kind is bool or kind is int or (kind is float and math.isfinite(item)):
+            parent[key] = item
+            continue
+        if not (kind is dict or kind is list or isinstance(item, _PROFILE_CONTAINERS)):
+            fail("must contain only JSON data")
+        if id(item) in active:
+            fail("must not contain cycles")
+        if kind is not dict and kind is not list:
+            fail("must contain only plain objects and arrays")
+        active.add(id(item))
+        stack.append((id(item), None, None))
+        copy: Any
+        if kind is list:
+            copy = [None] * len(item)
+            stack.extend((item[i], copy, i) for i in range(len(item) - 1, -1, -1))
+        else:
+            copy = {}
+            stack.extend((inner, copy, k) for k, inner in reversed(item.items()))
+        parent[key] = copy
+    return holder[0]
 
 
 def _validate_profile(ir: dict[str, Any], profile: Any) -> None:
@@ -547,12 +735,24 @@ def fingerprint_of(artifact: str) -> bytes:
 
 def has_payload(node: dict[str, Any]) -> bool:
     """Whether one element of this type always consumes at least one bit on the wire."""
-    kind = node["kind"]
-    if kind == "literal":
-        return False
-    if kind == "struct":
-        return any(f.get("optional") or f.get("nullable") or has_payload(f["type"]) for f in node["fields"])
-    if kind == "array":
-        length = node.get("length")
-        return length is None or (length > 0 and has_payload(node["element"]))
-    return True
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        kind = current["kind"]
+        if kind == "literal":
+            continue
+        if kind == "struct":
+            for f in current["fields"]:
+                if f.get("optional") or f.get("nullable"):
+                    return True
+                stack.append(f["type"])
+            continue
+        if kind == "array":
+            length = current.get("length")
+            if length is None:
+                return True
+            if length > 0:
+                stack.append(current["element"])
+            continue
+        return True
+    return False

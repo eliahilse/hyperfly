@@ -79,7 +79,23 @@ fn portable_field_name(name: &str) -> bool {
     !is_index
 }
 
+enum Pending<'a> {
+    Node(&'a Node, String),
+    Fields(&'a [Field], std::collections::HashSet<&'a str>, String),
+}
+
 pub fn validate(node: &Node, path: &str) -> Result<()> {
+    let mut stack = vec![Pending::Node(node, path.to_owned())];
+    while let Some(pending) = stack.pop() {
+        match pending {
+            Pending::Node(node, path) => validate_node(node, path, &mut stack)?,
+            Pending::Fields(fields, seen, path) => validate_field(fields, seen, path, &mut stack)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_node<'a>(node: &'a Node, path: String, stack: &mut Vec<Pending<'a>>) -> Result<()> {
     match node {
         Node::Bool | Node::Float64 | Node::Str | Node::Bytes => Ok(()),
         Node::Int { min, max } => {
@@ -144,7 +160,8 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
                     format!("{path}: nullable(literal null) has two encodings for null"),
                 );
             }
-            validate(inner, &format!("{path}?"))
+            stack.push(Pending::Node(inner, format!("{path}?")));
+            Ok(())
         }
         Node::Array { element, length } => {
             if let Some(n) = length {
@@ -155,38 +172,123 @@ pub fn validate(node: &Node, path: &str) -> Result<()> {
                     );
                 }
             }
-            validate(element, &format!("{path}[]"))
+            stack.push(Pending::Node(element, format!("{path}[]")));
+            Ok(())
         }
         Node::Struct(fields) => {
-            let mut seen = std::collections::HashSet::new();
-            for f in fields {
-                if f.name.is_empty() || !seen.insert(&f.name) {
-                    return err(ErrorCode::Ir, format!("{path}: invalid field names"));
-                }
-                if !portable_field_name(&f.name) {
-                    return err(
-                        ErrorCode::Ir,
-                        format!("{path}.{}: field name is not portable", f.name),
-                    );
-                }
-                if f.nullable && matches!(f.ty, Node::Nullable(_)) {
-                    return err(
-                        ErrorCode::Ir,
-                        format!("{path}.{}: nullable flag on a nullable type", f.name),
-                    );
-                }
-                if f.nullable && matches!(f.ty, Node::Literal(Literal::Null)) {
-                    return err(
-                        ErrorCode::Ir,
-                        format!(
-                            "{path}.{}: nullable flag on a null literal has two encodings for null",
-                            f.name
-                        ),
-                    );
-                }
-                validate(&f.ty, &format!("{path}.{}", f.name))?;
-            }
+            stack.push(Pending::Fields(
+                fields,
+                std::collections::HashSet::new(),
+                path,
+            ));
             Ok(())
+        }
+    }
+}
+
+fn validate_field<'a>(
+    fields: &'a [Field],
+    mut seen: std::collections::HashSet<&'a str>,
+    path: String,
+    stack: &mut Vec<Pending<'a>>,
+) -> Result<()> {
+    let Some((f, rest)) = fields.split_first() else {
+        return Ok(());
+    };
+    if f.name.is_empty() || !seen.insert(&f.name) {
+        return err(ErrorCode::Ir, format!("{path}: invalid field names"));
+    }
+    if !portable_field_name(&f.name) {
+        return err(
+            ErrorCode::Ir,
+            format!("{path}.{}: field name is not portable", f.name),
+        );
+    }
+    if f.nullable && matches!(f.ty, Node::Nullable(_)) {
+        return err(
+            ErrorCode::Ir,
+            format!("{path}.{}: nullable flag on a nullable type", f.name),
+        );
+    }
+    if f.nullable && matches!(f.ty, Node::Literal(Literal::Null)) {
+        return err(
+            ErrorCode::Ir,
+            format!(
+                "{path}.{}: nullable flag on a null literal has two encodings for null",
+                f.name
+            ),
+        );
+    }
+    let child = format!("{path}.{}", f.name);
+    stack.push(Pending::Fields(rest, seen, path));
+    stack.push(Pending::Node(&f.ty, child));
+    Ok(())
+}
+
+const MAX_ARTIFACT_NESTING: usize = 512;
+
+fn profile_nesting(profile: &Profile) -> usize {
+    profile
+        .columns
+        .iter()
+        .map(|c| {
+            let grammar = c.grammar.as_deref();
+            if grammar.is_some_and(|g| g.iter().any(|t| matches!(t, GrammarToken::Num(_)))) {
+                7
+            } else if c.derived.is_some() || grammar.is_some_and(|g| !g.is_empty()) {
+                6
+            } else if c.dict.is_some() || grammar.is_some() {
+                5
+            } else {
+                4
+            }
+        })
+        .max()
+        .unwrap_or(3)
+}
+
+/// Rejects an artifact that would nest JSON containers deeper than 512, without recursion.
+pub fn check_artifact_nesting(ir: &Node, profile: Option<&Profile>) -> Result<()> {
+    let mut deepest = profile.map_or(2, profile_nesting);
+    let mut stack = vec![(ir, 2usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if deepest > MAX_ARTIFACT_NESTING {
+            break;
+        }
+        deepest = deepest.max(depth);
+        match node {
+            Node::Enum(_) => deepest = deepest.max(depth + 1),
+            Node::Nullable(inner) => stack.push((inner, depth + 1)),
+            Node::Array { element, .. } => stack.push((element, depth + 1)),
+            Node::Struct(fields) => {
+                deepest = deepest.max(if fields.is_empty() {
+                    depth + 1
+                } else {
+                    depth + 2
+                });
+                stack.extend(fields.iter().map(|f| (&f.ty, depth + 3)));
+            }
+            _ => {}
+        }
+    }
+    if deepest > MAX_ARTIFACT_NESTING {
+        return err(
+            ErrorCode::Ir,
+            format!("$: artifact nests deeper than {MAX_ARTIFACT_NESTING}"),
+        );
+    }
+    Ok(())
+}
+
+/// Drops `node` without recursion, for schemas too deep for the recursive drop.
+pub fn dismantle(node: Node) {
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        match node {
+            Node::Nullable(inner) => stack.push(*inner),
+            Node::Array { element, .. } => stack.push(*element),
+            Node::Struct(fields) => stack.extend(fields.into_iter().map(|f| f.ty)),
+            _ => {}
         }
     }
 }
@@ -205,7 +307,8 @@ fn esc(s: &str, out: &mut String) {
 }
 
 /// Appends canonical schema JSON to `out`, preserving declared field and member order.
-/// Does not validate `node`; use [`crate::Codec::compile`] to validate a schema.
+/// Does not validate `node` and recurses over it; use [`crate::Codec::compile`] first to
+/// validate a schema and bound its depth.
 pub fn serialize_node(node: &Node, out: &mut String) {
     match node {
         Node::Bool => out.push_str(r#"{"kind":"bool"}"#),
@@ -508,8 +611,8 @@ pub fn serialize_shared(profile: &Profile, out: &mut String) {
 }
 
 /// Returns canonical JSON for wire major 1, `plan`, `ir`, and optional shared profile content.
-/// Profile version is not serialized. Does not validate inputs; use
-/// [`crate::Codec::compile`] to validate them.
+/// Profile version is not serialized. Does not validate inputs and recurses over `ir`; use
+/// [`crate::Codec::compile`] first to validate them and bound the depth of `ir`.
 pub fn serialize_artifact(ir: &Node, plan: Plan, profile: Option<&Profile>) -> String {
     let mut out = String::new();
     out.push_str(&format!(

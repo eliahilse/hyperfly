@@ -10,6 +10,22 @@ import { MAX_ARTIFACT_NESTING } from "../src/nesting.js";
 import { HEADER_SIZE } from "../src/codec.js";
 import { DecodeError, HyperflyError } from "../src/errors.js";
 
+function hostileValues(): [string, unknown][] {
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  const trapping = new Proxy({}, { getPrototypeOf() { throw new Error("no prototype"); } });
+  return [["a revoked proxy", revocable.proxy], ["a proxy whose getPrototypeOf throws", trapping]];
+}
+
+function thrown(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected a throw");
+}
+
 const STRUCT: IRNode = {
   kind: "struct",
   fields: [
@@ -76,6 +92,56 @@ describe("canonical artifact", () => {
   test("string escaping in canonical form", () => {
     const ir: IRNode = { kind: "literal", value: 'a"b\\c\nd' };
     expect(serializeArtifact(ir)).toContain('"value":"a\\"b\\\\c\\u000ad"');
+  });
+});
+
+describe("serializeArtifact input checks", () => {
+  const STRINGS: IRNode = {
+    kind: "array", element: { kind: "struct", fields: [{ name: "s", type: { kind: "string" } }] },
+  };
+  const shared = { columns: [{ leaf: 0, dict: ["hello"] }] };
+
+  test.each([
+    { kind: "int", min: NaN },
+    { kind: "int", max: Infinity },
+    { kind: "nope" },
+    { kind: "struct", fields: [{ name: "a" }] },
+  ].map((ir) => [ir] as const))("rejects %p with the code compileIR uses", (ir) => {
+    const run = () => serializeArtifact(ir as never);
+    expect(run).toThrow(HyperflyError);
+    expect(run).toThrow(expect.objectContaining({ code: "ir" }));
+    expect(() => compileIR(ir as never)).toThrow(expect.objectContaining({ code: "ir" }));
+  });
+
+  test("rejects an unknown layout as options", () => {
+    expect(() => serializeArtifact(STRUCT, "table" as never)).toThrow(expect.objectContaining({ code: "options" }));
+  });
+
+  test("rejects a profile on the row plan and malformed profiles as ir", () => {
+    expect(() => serializeArtifact(STRINGS, "row", { shared })).toThrow(expect.objectContaining({ code: "ir" }));
+    for (const profile of [false, 0, "", { shared: { columns: [{ leaf: 9, dict: ["x"] }] } }]) {
+      expect(() => serializeArtifact(STRINGS, "columnar", profile as never)).toThrow(expect.objectContaining({ code: "ir" }));
+    }
+  });
+
+  test("reports a throwing profile getter as ir with the cause, as compileIR does", () => {
+    const cause = new Error("cannot read hints");
+    const profile = { version: 1 as const, shared, get hints(): never { throw cause; } };
+    for (const run of [
+      () => serializeArtifact(STRINGS, "columnar", profile),
+      () => compileIR(STRINGS, { plan: "columnar", profile }),
+    ]) {
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "ir", cause }));
+    }
+  });
+
+  test("matches the compiled artifact, with and without a profile", () => {
+    expect(serializeArtifact(STRUCT)).toBe(compileIR(STRUCT).artifact);
+    const profiled = compileIR(STRINGS, { plan: "columnar", profile: { version: 1, shared } });
+    expect(serializeArtifact(STRINGS, "columnar", { shared })).toBe(profiled.artifact);
+    expect(serializeArtifact(STRINGS, "columnar", profiled.profile)).toBe(profiled.artifact);
+    expect(serializeArtifact(STRINGS, "columnar", null as never)).toBe(compileIR(STRINGS, { plan: "columnar" }).artifact);
   });
 });
 
@@ -196,6 +262,23 @@ describe("compile options", () => {
     }
   });
 
+  test.each(hostileValues())("wraps %s thrown while checking the options object", (_, cause) => {
+    for (const options of [
+      new Proxy({}, { getPrototypeOf() { throw cause; } }),
+      { limits: new Proxy({}, { ownKeys() { throw cause; } }) },
+    ]) {
+      const error = thrown(() => compileIR(STRUCT, options));
+      expect(error).toBeInstanceOf(HyperflyError);
+      expect((error as HyperflyError).code).toBe("options");
+      expect((error as HyperflyError).cause).toBe(cause);
+    }
+  });
+
+  test.each(hostileValues())("rethrows %s thrown while reading the IR unchanged", (_, cause) => {
+    const ir = Object.defineProperty({}, "kind", { get() { throw cause; } });
+    expect(thrown(() => compileIR(ir as never))).toBe(cause);
+  });
+
   test("wraps throwing limit and pack hook getters", () => {
     const cause = new Error("cannot read nested option");
     for (const options of [
@@ -300,7 +383,7 @@ describe("profile JSON data", () => {
   cyclic.self = cyclic;
   const cyclicArray: unknown[] = [];
   cyclicArray.push(cyclicArray);
-  let deep: unknown = {};
+  let deep: unknown = { value: undefined };
   for (let i = 0; i < 10000; i++) deep = { nested: deep };
 
   test.each([
@@ -336,6 +419,14 @@ describe("profile JSON data", () => {
     const run = () => compileIR(ir, { plan: "columnar", profile: { version: 1, shared, hints } });
     expect(run).toThrow(HyperflyError);
     expect(run).toThrow(expect.objectContaining({ code: "ir", cause }));
+  });
+
+  test.each(hostileValues())("wraps %s thrown by a profile getter with an ir error", (_, cause) => {
+    const hints = { get value() { throw cause; } };
+    const error = thrown(() => compileIR(ir, { plan: "columnar", profile: { version: 1, shared, hints } }));
+    expect(error).toBeInstanceOf(HyperflyError);
+    expect((error as HyperflyError).code).toBe("ir");
+    expect((error as HyperflyError).cause).toBe(cause);
   });
 
   test("accepts JSON hints at the nesting bound and freezes a snapshot", () => {

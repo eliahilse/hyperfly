@@ -465,6 +465,13 @@ def to_ir(model: type[BaseModel]) -> dict[str, Any]:
         _unsupported("$", "expected a pydantic BaseModel subclass")
     if "root" in getattr(model, "model_fields", {}) and type(model).__name__ == "ModelMetaclass" and _is_root_model(model):
         _unsupported("$", "RootModel has no v0 struct encoding — wrap the value in a field")
+    try:
+        return _bounded_struct(model)
+    except RecursionError:
+        _unsupported("$", "models nested too deeply have no v0 encoding")
+
+
+def _bounded_struct(model: type[BaseModel]) -> dict[str, Any]:
     bounds = _BoundSchemas()
     node = _struct_of(model, "$", bounds)
     if id(node) in bounds.pending:
@@ -479,7 +486,7 @@ def to_ir(model: type[BaseModel]) -> dict[str, Any]:
         schema = bounds.schemas[model]
         try:
             _apply_bounds(node, schema, {}, bounds, "$")
-        except UnsupportedSchemaError:
+        except (UnsupportedSchemaError, RecursionError):
             raise
         except Exception:
             _clear_bounds(node)
