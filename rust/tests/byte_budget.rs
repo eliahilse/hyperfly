@@ -192,27 +192,22 @@ fn byte_amplification_arithmetic_saturates() {
 #[test]
 fn grammar_lane_out_of_range_reports_lane_and_row() {
     let codec = |base, len| {
-        Codec::compile_with_profile(
+        Codec::compile(
             column(Node::Str),
-            Plan::Columnar,
-            Limits::default(),
-            false,
-            Some(Profile {
-                version: 2,
-                columns: vec![ProfileColumn {
-                    leaf: 0,
-                    dict: None,
-                    grammar: Some(vec![
+            CompileOptions::new()
+                .with_plan(Plan::Columnar)
+                .with_pack(false)
+                .with_profile(Profile::new(
+                    2,
+                    vec![ProfileColumn::new(0).with_grammar(vec![
                         GrammarToken::Lit("id".into()),
                         GrammarToken::Num(GrammarNum {
                             base,
                             len,
                             case: GrammarCase::Lower,
                         }),
-                    ]),
-                    derived: None,
-                }],
-            }),
+                    ])],
+                )),
         )
         .unwrap()
     };
@@ -231,7 +226,7 @@ fn grammar_lane_out_of_range_reports_lane_and_row() {
         ),
     ] {
         let error = codec.decode_body(&body).unwrap_err();
-        assert_eq!(error.code, ErrorCode::Range);
-        assert_eq!(error.message, message);
+        assert_eq!(error.code(), ErrorCode::Range);
+        assert_eq!(error.message(), message);
     }
 }
