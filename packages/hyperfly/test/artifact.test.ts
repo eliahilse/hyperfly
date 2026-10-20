@@ -153,7 +153,7 @@ describe("loadArtifact", () => {
     },
   );
 
-  test("forwards decode limits and pack hooks", () => {
+  test("forwards limits and pack hooks", () => {
     const limited = loadArtifact(codec.artifact, codec.fingerprint, { limits: { maxItems: 1 }, pack: false });
     expect(() => limited.decode(codec.encode(sample))).toThrow(expect.objectContaining({ code: "limit" }));
     const columnar = compileIR(ROWS, { plan: "columnar", pack: false });

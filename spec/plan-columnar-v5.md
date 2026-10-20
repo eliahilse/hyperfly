@@ -1,14 +1,13 @@
 # Hyperfly plan `columnar` — v5
 
-Status: draft. Extends `spec/wire-v0.md`; everything there (envelope, varints,
-bitmaps, scalar encodings, limits, canonical serialization) applies unchanged.
+Status: stable. The contract is frozen for hyperfly 1.x; see
+[Stability](wire-v0.md#stability). Extends `spec/wire-v0.md`; everything there
+(envelope, varints, bitmaps, scalar encodings, limits, canonical
+serialization) applies unchanged.
 The artifact is
 `{"wire":1,"plan":{"layout":"columnar","version":5},"ir":…,"profile":…}` — a
 different fingerprint than the row plan for the same IR, so the two never mix
-on the wire. (v1 through v3 were never released; columnar@4 shipped, and a
-registry that retains a v4 codec keeps decoding v4 artifacts — the plan
-version is inside the fingerprint, so the two versions never mix on the
-wire.)
+on the wire. The 1.x contract covers columnar version 5 only.
 
 ## 1. Scope
 
@@ -385,7 +384,7 @@ exists:
 {"wire":1,"plan":{"layout":"columnar","version":5},"ir":<node>,"profile":<shared>}
 ```
 
-serialized with the §5 rules and these fixed key orders, absent keys omitted:
+serialized with the wire-v0 §5 rules and these fixed key orders, absent keys omitted:
 
 ```
 shared    {"columns":[<column>,…]}
@@ -441,3 +440,10 @@ Two operational cautions:
   a profiled route leaks a coarse membership signal about its own dictionary.
   This is a persistent, cross-request variant of the compression-oracle
   problem, and it is why dictionary coding is opt-in per route.
+
+## 7. Stability
+
+Columnar@5 is frozen for hyperfly 1.x under wire-v0
+[Stability](wire-v0.md#stability). New columnar versions or profile column
+kinds are new artifacts with new fingerprints; they MUST NOT change an
+existing artifact's bytes or fingerprint.
