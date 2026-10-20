@@ -108,11 +108,15 @@ def test_unreadable_options_are_options_errors_with_a_cause():
         def __getattribute__(self, name):
             raise AttributeError(name)
 
-    for options in ({"pack": Unreadable()}, {"limits": Opaque()}):
+    class Misleading(dict):
+        def get(self, *args):
+            raise HyperflyError("ir", "boom")
+
+    for options in ({"pack": Unreadable()}, {"limits": Opaque()}, {"pack": Misleading()}):
         with pytest.raises(HyperflyError) as err:
             compile_ir(None, **options)
         assert (err.value.code, str(err.value)) == ("options", "options: could not read compile options")
-        assert isinstance(err.value.__cause__, (TypeError, AttributeError))
+        assert isinstance(err.value.__cause__, (TypeError, AttributeError, HyperflyError))
 
 
 def test_options_are_read_once():
@@ -155,6 +159,12 @@ def test_plan_and_limit_subclasses():
         label: str = "route"
 
     compile_ir(BOOL_IR, limits=Labelled())
+    class Count(int):
+        def __int__(self):
+            return 2
+
+    with pytest.raises(EncodeError):
+        compile_ir({"kind": "array", "element": {"kind": "bool"}}, limits=Limits(max_items=Count(1))).encode_body([True, True])
     Cap = IntEnum("Cap", {"ONE": 1})
     with pytest.raises(EncodeError):
         compile_ir({"kind": "array", "element": {"kind": "bool"}}, limits=Limits(max_items=Cap.ONE)).encode_body([True, True])
@@ -173,6 +183,7 @@ class Flag(BaseModel):
 @pytest.mark.parametrize("options, message", [
     ({"validate": 1}, "validate: must be a boolean"),
     ({"validate": None}, "validate: must be a boolean"),
+    ({"validate": 0}, "validate: must be a boolean"),
     ({"plan": "rows"}, "plan: must be row or columnar"),
     ({"limits": Limits(max_items=-1)}, "limits.max_items: must be a non-negative safe integer"),
 ])

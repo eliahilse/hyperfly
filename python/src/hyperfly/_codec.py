@@ -1524,9 +1524,11 @@ def checked_options(plan: Any, limits: Any, pack: Any) -> tuple[str, Limits, Any
     raises code "options" before the IR is read."""
     try:
         return _checked_options(plan, limits, pack)
-    except (HyperflyError, MemoryError):
+    except MemoryError:
         raise
     except Exception as error:
+        if type(error) is HyperflyError and error.code == "options":
+            raise
         raise HyperflyError("options", "options: could not read compile options") from error
 
 
@@ -1538,7 +1540,7 @@ def _checked_options(plan: Any, limits: Any, pack: Any) -> tuple[str, Limits, An
         values = {}
         for name in _LIMIT_FIELDS:
             value = getattr(limits, name)
-            number = int(value) if isinstance(value, int) and not isinstance(value, bool) else -1
+            number = int.__index__(value) if isinstance(value, int) and not isinstance(value, bool) else -1
             if not 0 <= number <= INT_MAX:
                 raise HyperflyError("options", f"limits.{name}: must be a non-negative safe integer")
             values[name] = number

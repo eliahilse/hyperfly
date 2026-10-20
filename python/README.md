@@ -165,11 +165,12 @@ compiled with `validate=True`, raised as `EncodeError` on the encode paths and
 `DecodeError` on the decode paths.
 
 `options` is a malformed compile option, raised by `compile_ir` and the pydantic
-`compile` before the schema is read: a `limits` given as anything but a `Limits`, or
-with a field that is not an integer from 0 to 2^53 - 1; a `plan` other than `"row"` or
-`"columnar"`; a `pack` other than `None`, `False` or a mapping whose `deflate` and
-`inflate` are callables or absent; a non-boolean `validate`; or an option that raises
-when read (the error is its `__cause__`). Each option is read once.
+`compile` before the schema is read: a `limits` that is neither `None` nor a `Limits`,
+or has a field that is not an integer from 0 to 2^53 - 1; a `plan` other than `"row"`
+or `"columnar"`; a `pack` other than `None`, `False` or a mapping whose `deflate` and
+`inflate` are each a callable, `None` or absent; a `validate` other than `True` or
+`False`; or an option that raises when read (the error is its `__cause__`). Each
+option is read once.
 
 `RequestError` is separate: it is not a `HyperflyError` and has no `code`. It is how
 `read_body` and `decode_request` refuse a request, carrying `status` (400, 413 or

@@ -256,7 +256,7 @@ def compile(  # noqa: A001 - mirrors the documented API
     profile: dict[str, Any] | None = None,
 ) -> _ModelCodec:
     plan, limits, pack = checked_options(plan, limits, pack)
-    if not isinstance(validate, bool):
+    if validate is not True and validate is not False:
         raise HyperflyError("options", "validate: must be a boolean")
     codec = compile_ir(to_ir(model), plan=plan, limits=limits, pack=pack, profile=profile)
     return _ModelCodec(codec, model, validate)
