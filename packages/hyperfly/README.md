@@ -434,7 +434,7 @@ production traffic has been measured yet.
 ## Guarantees
 
 - **Exact-schema compatibility.** Any change to the canonical IR, the plan or the
-  shared profile (not its training `hints`) is a new fingerprint. Zod refinements and string/array length constraints
+  shared profile (not its advisory `hints`) is a new fingerprint. Zod refinements and string/array length constraints
   are not part of the IR, so they do not change it. A mismatch fails before the body
   is parsed; it never misreads.
 - **Canonical output.** Encoding is canonical for a given implementation, version and set of pack hooks;
