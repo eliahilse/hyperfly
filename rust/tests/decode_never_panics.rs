@@ -267,6 +267,7 @@ fn cases() -> &'static [Case] {
             max_items: 4,
             max_byte_length: 4,
             max_amplification: 2,
+            ..Limits::default()
         };
         vec![
             case(
