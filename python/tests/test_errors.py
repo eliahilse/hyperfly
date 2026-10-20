@@ -1,5 +1,6 @@
 import dataclasses
 import math
+from enum import IntEnum
 
 import pytest
 from pydantic import BaseModel
@@ -96,6 +97,67 @@ def test_options_are_checked_before_the_ir():
     with pytest.raises(HyperflyError) as err:
         compile_ir(None, plan="rows")
     assert err.value.code == "options"
+
+
+def test_unreadable_options_are_options_errors_with_a_cause():
+    class Unreadable(dict):
+        def get(self, *args):
+            raise TypeError("unreadable")
+
+    class Opaque(Limits):
+        def __getattribute__(self, name):
+            raise AttributeError(name)
+
+    for options in ({"pack": Unreadable()}, {"limits": Opaque()}):
+        with pytest.raises(HyperflyError) as err:
+            compile_ir(None, **options)
+        assert (err.value.code, str(err.value)) == ("options", "options: could not read compile options")
+        assert isinstance(err.value.__cause__, (TypeError, AttributeError))
+
+
+def test_options_are_read_once():
+    class Flaky(dict):
+        calls = 0
+
+        def get(self, *args):
+            self.calls += 1
+            return None if self.calls <= 2 else 42
+
+    class Growing(Limits):
+        reads = 0
+
+        def __getattribute__(self, name):
+            if name == "max_items":
+                type(self).reads += 1
+                return 1 if type(self).reads == 1 else 100
+            return super().__getattribute__(name)
+
+    ir = {"kind": "array", "element": {"kind": "bool"}}
+    compile_ir(ir, pack=Flaky()).encode_body([True])
+    codec = compile_ir(ir, limits=Growing())
+    with pytest.raises(EncodeError) as err:
+        codec.encode_body([True, False])
+    assert err.value.code == "limit"
+
+
+def test_plan_and_limit_subclasses():
+    class Plan(str):
+        __hash__ = None
+
+    assert compile_ir(BOOL_IR, plan=Plan("row")).encode_body(True) == compile_ir(BOOL_IR).encode_body(True)
+    Bare = type("Bare", (Limits,), {"__dataclass_fields__": {}})
+    with pytest.raises(HyperflyError) as err:
+        compile_ir(BOOL_IR, limits=Bare(max_items=-1))
+    assert err.value.code == "options"
+
+    @dataclasses.dataclass(frozen=True)
+    class Labelled(Limits):
+        label: str = "route"
+
+    compile_ir(BOOL_IR, limits=Labelled())
+    Cap = IntEnum("Cap", {"ONE": 1})
+    with pytest.raises(EncodeError):
+        compile_ir({"kind": "array", "element": {"kind": "bool"}}, limits=Limits(max_items=Cap.ONE)).encode_body([True, True])
 
 
 def test_well_formed_pack_options_compile():
