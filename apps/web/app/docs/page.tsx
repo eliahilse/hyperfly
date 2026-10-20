@@ -84,14 +84,15 @@ export default function DocsPage() {
             <span className="section-index">01</span>
             <h2 className="section-title" id="install-title">Install</h2>
             <p className="section-lead">
-              Zod 4 is needed only for the Zod adapter. Python&apos;s core package has no Pydantic
-              dependency; use the extra for the Pydantic example below.
+              Pre-releases are published under npm&apos;s <code>next</code> tag and need
+              {" "}<code>--pre</code> with pip. Zod 4 is needed only for the Zod adapter. Python&apos;s
+              core package has no Pydantic dependency; use the extra for the Pydantic example below.
             </p>
           </div>
-          <CodeBlock label="terminal">{`npm install hyperfly zod
-pip install hyperfly
+          <CodeBlock label="terminal">{`npm install hyperfly@next zod
+pip install --pre hyperfly
 # With the Pydantic adapter (Pydantic >= 2.5):
-pip install "hyperfly[pydantic]"`}</CodeBlock>
+pip install --pre "hyperfly[pydantic]"`}</CodeBlock>
         </section>
 
         <section className="section" id="compile" aria-labelledby="compile-title">
@@ -242,7 +243,11 @@ async function getEvents(url: string) {
   if (decoded.kind === "unknown-codec") throw new Error("Unadvertised codec");
   const offer = result.headers.get("hyperfly-offer");
   if (decoded.kind === "json" && offer && !registry.has(offer)) {
-    const codec = await fetchArtifact(new URL(url).origin, offer);
+    // an offer is advisory: a failed upgrade leaves this client on JSON, not failing the request
+    const codec = await fetchArtifact(new URL(url).origin, offer).catch((error: unknown) => {
+      console.warn("hyperfly artifact fetch failed", error);
+      return undefined;
+    });
     if (codec) registry.add(codec);
   }
   return decoded.value;

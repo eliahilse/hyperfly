@@ -1010,7 +1010,7 @@ h3 {
     border-right: 0;
   }
 
-  .nav-links a:not(:nth-last-child(-n + 2)) {
+  .nav-links a:not(:nth-last-child(-n + 3)) {
     display: none;
   }
 
