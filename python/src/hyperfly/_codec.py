@@ -4,8 +4,9 @@ import copy
 import math
 import struct
 import zlib
+from array import array
 from bisect import bisect_left
-from typing import Any
+from typing import Any, Callable
 
 from ._ir import (
     LEAF_KINDS,
@@ -24,6 +25,7 @@ from ._wire import (
     DecodeError,
     EncodeError,
     FingerprintMismatchError,
+    ItemBudget,
     Limits,
     Reader,
     read_bitmap,
@@ -54,12 +56,10 @@ def _bound_amplification(r: Reader, count: int, path: str) -> None:
         )
 
 
-def _bound_by_input(r: Reader, count: int, element: dict[str, Any], path: str) -> None:
-    """Apply the row plan's one-bit floor, falling back to amplification for
-    genuinely zero-payload elements."""
-    if count == 0:
-        return
-    if not has_payload(element):
+def _bound_by_input(r: Reader, count: int, zero_bit: bool, path: str) -> None:
+    """Apply the row encoding's one-bit floor, falling back to amplification for
+    zero-bit elements."""
+    if zero_bit:
         _bound_amplification(r, count, path)
         return
     if count > r.remaining() * 8:
@@ -240,6 +240,48 @@ def _columnar_eligible(node: dict[str, Any]) -> bool:
     return node["element"].get("kind") == "struct" and _flatten_leaves(node["element"]) is not None
 
 
+_Leaves = list[tuple[tuple[str, ...], dict[str, Any]]]
+
+
+def _index_arrays(node: dict[str, Any], columnar: bool, out: dict[int, tuple[_Leaves | None, bool]]) -> None:
+    """Per array node: its columnar leaves (None when row-encoded) and whether its element is zero-bit."""
+    kind = node["kind"]
+    if kind == "array":
+        element = node["element"]
+        if id(node) not in out:
+            leaves = _flatten_leaves(element) if columnar and element.get("kind") == "struct" else None
+            out[id(node)] = (leaves, not has_payload(element))
+        _index_arrays(element, columnar, out)
+    elif kind == "nullable":
+        _index_arrays(node["inner"], columnar, out)
+    elif kind == "struct":
+        for f in node["fields"]:
+            _index_arrays(f["type"], columnar, out)
+
+
+class _Lazy:
+    """Column values computed per row on access, so a column whose rows cost no
+    input bits holds nothing per row until every column has decoded."""
+
+    __slots__ = ("count", "at")
+
+    def __init__(self, count: int, at: Callable[[int], Any]) -> None:
+        self.count = count
+        self.at = at
+
+    def __len__(self) -> int:
+        return self.count
+
+    def __getitem__(self, index: int) -> Any:
+        if not 0 <= index < self.count:
+            raise IndexError(index)
+        return self.at(index)
+
+
+def _repeat(value: Any, count: int) -> _Lazy:
+    return _Lazy(count, lambda _index: value)
+
+
 def _decimal_mantissa(v: float, pow10: int) -> float:
     # returns a float so callers can reject non-finite scaling before int conversion
     if v > 0:
@@ -280,9 +322,12 @@ class _Ctx:
         "codes",
         "grammars",
         "derivations",
+        "arrays",
     )
 
-    def __init__(self, limits: Limits, columnar: bool, deflate, inflate, profile=None) -> None:
+    def __init__(self, ir: dict[str, Any], limits: Limits, columnar: bool, deflate, inflate, profile=None) -> None:
+        self.arrays: dict[int, tuple[_Leaves | None, bool]] = {}
+        _index_arrays(ir, columnar, self.arrays)
         self.dicts: dict[int, list[str]] = {}
         self.codes: dict[int, dict[str, int]] = {}
         self.grammars: dict[int, list[dict[str, Any]]] = {}
@@ -306,7 +351,16 @@ class _Ctx:
         self.inflate = inflate
 
 
-def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, depth: int, ctx: _Ctx, column: int = 0) -> None:
+def _encode_node(
+    out: bytearray,
+    node: dict[str, Any],
+    value: Any,
+    path: str,
+    depth: int,
+    ctx: _Ctx,
+    budget: ItemBudget,
+    column: int = 0,
+) -> None:
     if depth > ctx.max_depth:
         _efail("depth", path, f"nesting deeper than {ctx.max_depth}")
     kind = node["kind"]
@@ -348,10 +402,11 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
             out.append(0)
         else:
             out.append(1)
-            _encode_node(out, node["inner"], value, path, depth + 1, ctx, column)
+            _encode_node(out, node["inner"], value, path, depth + 1, ctx, budget, column)
     elif kind == "array":
-        if ctx.columnar and _columnar_eligible(node):
-            _encode_columnar(out, node, value, path, depth, ctx, column)
+        leaves = ctx.arrays[id(node)][0]
+        if leaves is not None:
+            _encode_columnar(out, node, value, path, depth, ctx, budget, leaves, column)
             return
         if type(value) is not list:
             _efail("type", path, "expected array")
@@ -363,9 +418,10 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
                 _efail("type", path, f"fixed array expects {length} items, got {len(value)}")
         else:
             write_uleb(out, len(value))
+        budget.charge(len(value), path, EncodeError)
         payload_start = len(out)
         for i, item in enumerate(value):
-            _encode_node(out, node["element"], item, f"{path}[{i}]", depth + 1, ctx, column)
+            _encode_node(out, node["element"], item, f"{path}[{i}]", depth + 1, ctx, budget, column)
         _check_amplification(len(value), len(out) - payload_start, ctx, path)
     elif kind == "struct":
         if not isinstance(value, dict):
@@ -394,7 +450,7 @@ def _encode_node(out: bytearray, node: dict[str, Any], value: Any, path: str, de
             v = value[f["name"]]
             if v is None and f.get("nullable"):
                 continue
-            _encode_node(out, f["type"], v, f"{path}.{f['name']}", depth + 1, ctx, base)
+            _encode_node(out, f["type"], v, f"{path}.{f['name']}", depth + 1, ctx, budget, base)
     else:
         _efail("type", path, f"unknown kind {kind}")
 
@@ -774,9 +830,10 @@ def _encode_columnar(
     path: str,
     depth: int,
     ctx: _Ctx,
+    budget: ItemBudget,
+    leaves: _Leaves,
     ordinal_base: int = 0,
 ) -> None:
-    element = node["element"]
     if type(value) is not list:
         _efail("type", path, "expected array")
     if len(value) > ctx.max_items:
@@ -787,6 +844,7 @@ def _encode_columnar(
             _efail("type", path, f"fixed array expects {length} items, got {len(value)}")
     else:
         write_uleb(out, len(value))
+    budget.charge(len(value), path, EncodeError)
     payload_start = len(out)
 
     rows: list[dict[str, Any]] = []
@@ -794,9 +852,6 @@ def _encode_columnar(
         if not isinstance(row, dict):
             _efail("type", f"{path}[{i}]", "expected object")
         rows.append(row)
-
-    leaves = _flatten_leaves(element)
-    assert leaves is not None
 
     def container(row: dict[str, Any], segs: tuple[str, ...], i: int) -> dict[str, Any]:
         obj = row
@@ -897,7 +952,7 @@ def _encode_columnar(
             _encode_enum_column(out, t, participating, field_path)
         else:
             for i, v in enumerate(participating):
-                _encode_node(out, t, v, f"{field_path}[{i}]", depth + 2, ctx)
+                _encode_node(out, t, v, f"{field_path}[{i}]", depth + 2, ctx, budget)
 
     _check_amplification(len(rows), len(out) - payload_start, ctx, path)
 
@@ -952,14 +1007,16 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
             _dfail("marker", path, f"invalid nullable marker 0x{marker:x}")
         return _decode_node(r, node["inner"], path, depth + 1, ctx, column)
     if kind == "array":
-        if ctx.columnar and _columnar_eligible(node):
-            return _decode_columnar(r, node, path, depth, ctx, column)
+        leaves, zero_bit = ctx.arrays[id(node)]
+        if leaves is not None:
+            return _decode_columnar(r, node, leaves, path, depth, ctx, column)
         length = node.get("length")
         if length is None:
             length = read_uleb(r)
         if length > r.limits.max_items:
             _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
-        _bound_by_input(r, length, node["element"], path)
+        _bound_by_input(r, length, zero_bit, path)
+        r.items.charge(length, path, DecodeError)
         return [_decode_node(r, node["element"], f"{path}[{i}]", depth + 1, ctx, column) for i in range(length)]
     if kind == "struct":
         optional = [f for f in node["fields"] if f.get("optional")]
@@ -992,7 +1049,7 @@ def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _C
     _dfail("marker", path, f"unknown kind {kind}")
 
 
-def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -> list[int]:
+def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -> Any:
     mode = r.u8()
     if mode > 4:
         _dfail("marker", path, f"invalid int column mode 0x{mode:x}")
@@ -1006,6 +1063,8 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
     if mode == 0x02:
         base = unzigzag(read_uleb(r))
         width = r.u8()
+        if width == 0:
+            return _repeat(_check_decoded(node, base, f"{path}[0]"), count)
         packed = _unpack_bits(r, count, width, path)
         return [_check_decoded(node, base + packed[i], f"{path}[{i}]") for i in range(count)]
     if mode == 0x03:
@@ -1015,6 +1074,9 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
         running = raw_first + lo if lo is not None else unzigzag(raw_first)
         base = unzigzag(read_uleb(r))
         width = r.u8()
+        if width == 0 and _in_bounds(node, running) and _in_bounds(node, running + (count - 1) * base):
+            # every value lies between the first and the last, so both ends bound them all
+            return range(running, running + count * base, base) if base else _repeat(running, count)
         packed = _unpack_bits(r, max(0, count - 1), width, path)
         acc = [_check_decoded(node, running, f"{path}[0]")]
         for i in range(1, count):
@@ -1060,6 +1122,11 @@ def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str) -
         prev += unzigzag(read_uleb(r))
         out.append(_check_decoded(node, prev, f"{path}[{i}]"))
     return out
+
+
+def _in_bounds(node: dict[str, Any], value: int) -> bool:
+    lo, hi = node.get("min"), node.get("max")
+    return INT_MIN <= value <= INT_MAX and (lo is None or value >= lo) and (hi is None or value <= hi)
 
 
 def _check_decoded(node: dict[str, Any], value: int, path: str) -> int:
@@ -1128,12 +1195,12 @@ def _decode_float_column(r: Reader, count: int, path: str) -> list[float]:
 
 def _decode_string_column(
     r: Reader,
-    slots: list[int],
+    slots: Any,
     source_value,
     path: str,
     ctx: _Ctx,
     ordinal: int = 0,
-) -> list[str]:
+) -> Any:
     count = len(slots)
     mode = r.u8()
     if mode > 4:
@@ -1220,6 +1287,12 @@ def _decode_string_column(
             )
             for lane_index, token in enumerate(numeric)
         ]
+        if escape_count == 0:
+            rules = ctx.grammars[ordinal]
+            rendered = _Lazy(count, lambda i: _render_grammar(rules, [lane[i] for lane in lanes]))
+            # every rendering of one grammar has the same length, so the first stands for all
+            check_profile_length(rendered[0], 0)
+            return rendered
         out = []
         matched = 0
         for i in range(count):
@@ -1291,8 +1364,10 @@ def _decode_string_column(
 
 def _decode_enum_column(
     r: Reader, node: dict[str, Any], count: int, path: str
-) -> list[str]:
+) -> Any:
     width = _bit_width(len(node["members"]) - 1)
+    if width == 0:
+        return _repeat(node["members"][0], count)
     indices = _unpack_bits(r, count, width, path)
     out = []
     for i, index in enumerate(indices):
@@ -1305,24 +1380,24 @@ def _decode_enum_column(
 def _decode_columnar(
     r: Reader,
     node: dict[str, Any],
+    leaves: _Leaves,
     path: str,
     depth: int,
     ctx: _Ctx,
     ordinal_base: int = 0,
 ) -> list[dict[str, Any]]:
-    element = node["element"]
     length = node.get("length")
     if length is None:
         length = read_uleb(r)
     if length > r.limits.max_items:
         _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
     _bound_amplification(r, length, path)
+    r.items.charge(length, path, DecodeError)
     count = length
 
-    leaves = _flatten_leaves(element)
-    assert leaves is not None
-
-    decoded = []
+    # columns stay packed, typed or lazy until all of them have decoded, so a
+    # malformed later column fails before any earlier one expands per row
+    decoded: list[dict[str, Any]] = []
 
     def source_value(ordinal: int, row: int) -> Any:
         local = ordinal - ordinal_base
@@ -1341,19 +1416,21 @@ def _decode_columnar(
         presence = read_bitmap(r, count, field_path) if field.get("optional") else None
         nulls = read_bitmap(r, count, field_path) if field.get("nullable") else None
 
-        slots = []
-        null_rows = []
-        for i in range(count):
-            present = presence[i] if presence is not None else True
-            is_null = nulls[i] if nulls is not None else False
-            if not present:
+        slots: Any = range(count)
+        null_rows: list[int] = []
+        if presence is not None or nulls is not None:
+            slots = []
+            for i in range(count):
+                present = presence[i] if presence is not None else True
+                is_null = nulls[i] if nulls is not None else False
+                if not present:
+                    if is_null:
+                        _dfail("bitmap", f"{path}[{i}].{leaf}", "null bit set for absent field")
+                    continue
                 if is_null:
-                    _dfail("bitmap", f"{path}[{i}].{leaf}", "null bit set for absent field")
-                continue
-            if is_null:
-                null_rows.append(i)
-                continue
-            slots.append(i)
+                    null_rows.append(i)
+                    continue
+                slots.append(i)
 
         if count > 0 and depth + len(segs) > r.limits.max_depth:
             _dfail("depth", path, f"nesting deeper than {r.limits.max_depth}")
@@ -1362,10 +1439,13 @@ def _decode_columnar(
 
         t = field["type"]
         kind = t["kind"]
+        values: Any
         if kind == "int":
             values = _decode_int_column(r, t, len(slots), field_path)
+            if type(values) is list:
+                values = array("q", values)
         elif kind == "float64":
-            values = _decode_float_column(r, len(slots), field_path)
+            values = array("d", _decode_float_column(r, len(slots), field_path))
         elif kind == "bool":
             values = read_bitmap(r, len(slots), field_path)
         elif kind == "string":
@@ -1379,6 +1459,8 @@ def _decode_columnar(
             )
         elif kind == "enum":
             values = _decode_enum_column(r, t, len(slots), field_path)
+        elif kind == "literal":
+            values = _repeat(t["value"], len(slots))
         else:
             values = [
                 _decode_node(
@@ -1455,7 +1537,7 @@ class Codec:
             deflate, inflate = _default_deflate, _default_inflate
         else:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
-        self._ctx = _Ctx(limits, plan == "columnar", deflate, inflate, self._profile)
+        self._ctx = _Ctx(ir, limits, plan == "columnar", deflate, inflate, self._profile)
 
     @property
     def fingerprint(self) -> str:
@@ -1481,7 +1563,11 @@ class Codec:
 
     def encode_body(self, value: Any) -> bytes:
         out = bytearray()
-        _encode_node(out, self._ir, value, "$", 0, self._ctx)
+        budget = ItemBudget(self._limits.max_total_items)
+        _encode_node(out, self._ir, value, "$", 0, self._ctx, budget)
+        cap = self._limits.item_budget(len(out))
+        if budget.total > cap:
+            raise EncodeError("limit", f"$: {budget.total} items exceed the item budget of {cap}")
         return bytes(out)
 
     def decode_body(self, data: bytes) -> Any:

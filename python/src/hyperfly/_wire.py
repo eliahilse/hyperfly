@@ -42,19 +42,38 @@ class Limits:
     max_depth: int = 64
     max_items: int = 2**24
     max_byte_length: int = 2**28
-    max_amplification: int = 4096
+    max_amplification: int = 32
+    max_total_items: int = 2**24
+
+    def item_budget(self, body_length: int) -> int:
+        """Items one body may declare across all its arrays: wire-v0 section 6."""
+        return min(self.max_total_items, self.max_amplification * (body_length + 1))
 
 
 DEFAULT_LIMITS = Limits()
 
 
+class ItemBudget:
+    __slots__ = ("cap", "total")
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.total = 0
+
+    def charge(self, count: int, path: str, error: type[HyperflyError]) -> None:
+        if count > self.cap - self.total:
+            raise error("limit", f"{path}: {self.total + count} items exceed the item budget of {self.cap}")
+        self.total += count
+
+
 class Reader:
-    __slots__ = ("buf", "pos", "limits")
+    __slots__ = ("buf", "pos", "limits", "items")
 
     def __init__(self, buf: bytes, limits: Limits) -> None:
         self.buf = buf
         self.pos = 0
         self.limits = limits
+        self.items = ItemBudget(limits.item_budget(len(buf)))
 
     def u8(self) -> int:
         if self.pos >= len(self.buf):
