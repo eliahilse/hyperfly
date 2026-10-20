@@ -1,5 +1,6 @@
 import json
 import sys
+import tracemalloc
 
 import pytest
 from conftest import calls
@@ -174,3 +175,73 @@ def test_content_length_rejects_before_acquiring_body_iterator(length):
         with pytest.raises(RequestError) as raised:
             read()
         assert (raised.value.status, raised.value.reason) == (413, "too-large")
+
+
+@pytest.mark.parametrize("direction", ["response", "request"])
+@pytest.mark.parametrize("depth,count", [(490, 50_000), (0, 200_000)])
+def test_json_array_conversion_memory_is_bounded_by_depth(direction, depth, count):
+    ir = {"kind": "int"}
+    for _ in range(max(1, depth)):
+        ir = {"kind": "array", "element": ir}
+    recursion_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(max(recursion_limit, 3000))
+        registry = CodecRegistry([compile_ir(ir)])
+    finally:
+        sys.setrecursionlimit(recursion_limit)
+    layers = max(1, depth)
+    body = b"[" * layers + b",".join([b"0"] * count) + b"]" * layers
+    if depth:
+        assert len(body) == 100_979
+    tracemalloc.start()
+    try:
+        kind, value = decode(direction, body, registry)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Includes JSON parsing and its output; queuing every child exceeds this bound.
+    assert peak < 6 << 20
+    assert kind == "json"
+    for _ in range(layers - 1):
+        value = value[0]
+    assert len(value) == count and all(type(item) is int and item == 0 for item in value)
+
+
+@pytest.mark.parametrize("direction", ["response", "request"])
+def test_json_conversion_uses_first_registered_schema(direction):
+    def schema(kind, name):
+        return {"kind": "struct", "fields": [{"name": "rows", "type": {
+            "kind": "array", "element": {"kind": "struct", "fields": [
+                {"name": name, "type": {"kind": kind}},
+            ]},
+        }}]}
+    integer = compile_ir(schema("int", "integer"))
+    number = compile_ir(schema("float64", "number"))
+    body = b'{"rows":[{"integer":3.0,"number":3}]}'
+    for codecs, name, expected_type in [([integer, number], "integer", int), ([number, integer], "number", float)]:
+        kind, value = decode(direction, body, CodecRegistry(codecs))
+        assert (kind, value) == ("json", {"rows": [{name: 3}]})
+        assert type(value["rows"][0][name]) is expected_type
+
+
+@pytest.mark.parametrize("direction", ["response", "request"])
+def test_json_enum_members_are_indexed_once_per_node(direction):
+    class Members(list):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+        def __contains__(self, item):
+            raise AssertionError("enum membership must use a set")
+
+    codec = compile_ir({"kind": "array", "element": {"kind": "enum", "members": [f"v{i}" for i in range(2000)]}})
+    members = Members(codec._ir["element"]["members"])
+    codec._ir["element"]["members"] = members
+    registry = CodecRegistry([codec])
+    body = json.dumps(["v1999"] * 8000).encode()
+    for _ in range(2):
+        assert decode(direction, body, registry) == ("json", ["v1999"] * 8000)
+    assert members.iterations == 2
+    assert codec._ir["element"]["members"] is members

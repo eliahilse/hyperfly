@@ -1565,3 +1565,89 @@ def test_read_body_releases_the_crossing_memoryview_before_closing_the_stream():
         read_body(stream(), max_bytes=4)
     assert raised.value.status == 413
     assert cleared == [True]
+
+
+@pytest.mark.parametrize("placement", ["root", "child", "list", "dict"])
+@pytest.mark.parametrize("container", ["scalar", "list", "dict", "model"])
+@pytest.mark.parametrize("payload", [b"test", b"\xfb\xff\xfe\x00"])
+def test_json_fallback_round_trips_bytes_in_model_extras(placement, container, payload):
+    from pydantic import ConfigDict
+
+    class Extra(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        number: int
+
+    def struct(**fields):
+        return {"kind": "struct", "fields": [{"name": name, "type": node} for name, node in fields.items()]}
+
+    payload_ir = {"kind": "bytes"}
+    extra_value = payload
+    decoded_value = payload
+    if container == "list":
+        extra_value = [payload]
+        decoded_value = [payload]
+        payload_ir = {"kind": "array", "element": payload_ir}
+    elif container == "dict":
+        extra_value = {"data": [payload]}
+        decoded_value = {"data": [payload]}
+        payload_ir = struct(data={"kind": "array", "element": payload_ir})
+    elif container == "model":
+        extra_value = Extra(number=2, payload=payload)
+        decoded_value = {"number": 2, "payload": payload}
+        payload_ir = struct(number={"kind": "int"}, payload=payload_ir)
+    value = Extra(number=1, payload=extra_value)
+    expected = {"number": 1, "payload": decoded_value}
+    ir = struct(number={"kind": "int"}, payload=payload_ir)
+    if placement == "child":
+        class Response(BaseModel):
+            child: Extra
+
+        value = Response(child=value)
+        expected = {"child": expected}
+        ir = struct(child=ir)
+    elif placement == "list":
+        class Response(BaseModel):
+            children: list[Extra]
+
+        value = Response(children=[value])
+        expected = {"children": [expected]}
+        ir = struct(children={"kind": "array", "element": ir})
+    elif placement == "dict":
+        class Response(BaseModel):
+            children: dict[str, Extra]
+
+        value = Response(children={"entry": value})
+        expected = {"children": {"entry": expected}}
+        ir = struct(children=struct(entry=ir))
+    registry = CodecRegistry([compile_ir(ir)])
+    body, headers = encode_for(negotiate(None, registry), value)
+    assert headers["Content-Type"] == "application/json"
+    assert _decode_json_pair(body, registry) == [("json", expected)] * 2
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_json_fallback_dumps_bytes_free_models_with_extras_once(monkeypatch, nested):
+    from pydantic import ConfigDict
+
+    class Extra(BaseModel):
+        model_config = ConfigDict(extra="allow")
+        number: int
+
+    class Response(BaseModel):
+        children: dict[str, list[Extra]]
+
+    extra = Extra(number=1, metadata={"items": ["text", 2, None]})
+    value = Response(children={"entry": [extra]}) if nested else extra
+    calls = []
+    dump = BaseModel.model_dump
+
+    def counted(self, **kwargs):
+        calls.append(kwargs)
+        return dump(self, **kwargs)
+
+    monkeypatch.setattr(BaseModel, "model_dump", counted)
+    for _ in range(2):
+        body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+        expected = {"number": 1, "metadata": {"items": ["text", 2, None]}}
+        assert json.loads(body) == ({"children": {"entry": [expected]}} if nested else expected)
+    assert calls == [{"mode": "json", "by_alias": True}] * 2

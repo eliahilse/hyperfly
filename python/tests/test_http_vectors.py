@@ -24,23 +24,30 @@ def revive(value):
     return value
 
 
-def same_value(actual, expected, ir=None):
+def same_value(actual, expected, ir=None, *, decoded=False):
     while ir is not None and ir["kind"] == "nullable":
         ir = ir["inner"]
     if isinstance(actual, bool) or isinstance(expected, bool):
         return type(actual) is type(expected) and actual == expected
     if isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
-        return float(actual) == float(expected)
+        if decoded and ir:
+            kind = ir["kind"]
+            if kind == "int" or (kind == "literal" and type(ir["value"]) in (int, float)):
+                if type(actual) is not int:
+                    return False
+            elif kind == "float64" and type(actual) is not float:
+                return False
+        return actual == expected
     if isinstance(actual, dict) and isinstance(expected, dict):
         fields = {field["name"]: field["type"] for field in ir["fields"]} if ir and ir["kind"] == "struct" else None
         keys = actual.keys() if fields is None else actual.keys() & fields.keys()
         expected_keys = expected.keys() if fields is None else expected.keys() & fields.keys()
         return keys == expected_keys and all(
-            same_value(actual[key], expected[key], fields[key] if fields is not None else None) for key in keys
+            same_value(actual[key], expected[key], fields[key] if fields is not None else None, decoded=decoded) for key in keys
         )
     if isinstance(actual, list) and isinstance(expected, list):
         element = ir["element"] if ir and ir["kind"] == "array" else None
-        return len(actual) == len(expected) and all(same_value(a, b, element) for a, b in zip(actual, expected))
+        return len(actual) == len(expected) and all(same_value(a, b, element, decoded=decoded) for a, b in zip(actual, expected))
     return type(actual) is type(expected) and actual == expected
 
 
@@ -62,7 +69,7 @@ def test_json_fallback_valid(row, direction):
     else:
         kind, actual = decode_json(direction, row["json"].encode("utf-8"), registry)
         assert kind == "json"
-        assert same_value(actual, value)
+        assert same_value(actual, value, row["ir"], decoded=True)
 
 
 @pytest.mark.parametrize("direction", ["response", "request"])
@@ -89,7 +96,7 @@ def test_response_vectors(row):
     else:
         kind, value = decode_response(row["contentType"], bytes.fromhex(row["hex"]), registry)
         assert kind == expected["kind"]
-        assert same_value(value, revive(expected["value"]))
+        assert same_value(value, revive(expected["value"]), row.get("ir"), decoded=True)
 
 
 @pytest.mark.parametrize("row", VECTORS["requests"], ids=lambda row: row["name"])
@@ -106,4 +113,18 @@ def test_request_vectors(row):
     else:
         kind, value = decode_request(row["contentType"], None, bytes.fromhex(row["hex"]), registry, **options)
         assert kind == expected["kind"]
-        assert same_value(value, revive(expected["value"]))
+        assert same_value(value, revive(expected["value"]), row.get("ir"), decoded=True)
+
+
+@pytest.mark.parametrize("ir,valid,wrong", [
+    ({"kind": "int"}, 3, 3.0),
+    ({"kind": "literal", "value": 3.0}, 3, 3.0),
+    ({"kind": "float64"}, 3.0, 3),
+])
+def test_decode_comparison_requires_numeric_types_at_every_depth(ir, valid, wrong):
+    schema = {"kind": "struct", "fields": [{"name": "rows", "type": {
+        "kind": "array", "element": {"kind": "nullable", "inner": ir},
+    }}]}
+    expected = {"rows": [valid]}
+    assert same_value({"rows": [valid]}, expected, schema, decoded=True)
+    assert not same_value({"rows": [wrong]}, expected, schema, decoded=True)

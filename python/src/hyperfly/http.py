@@ -16,7 +16,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Literal, NamedTuple, cast
+from typing import Any, Callable, Iterable, Iterator, Literal, NamedTuple, cast
 from weakref import WeakKeyDictionary
 
 from ._codec import HEADER_SIZE, MAGIC, WIRE_VERSION, Codec
@@ -44,6 +44,7 @@ _RANKS = {HYPERFLY_MEDIA_TYPE: 3, "application/*": 2, "*/*": 1}
 _QVALUE = re.compile(r"0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?")
 _JSON_SUFFIX = re.compile(r"[!#$%&'*+.^_`|~0-9a-z-]+/[!#$%&'*+.^_`|~0-9a-z-]+\+json")
 _MODEL_HAS_BYTES: WeakKeyDictionary[type[Any], bool] = WeakKeyDictionary()
+_MODEL_HAS_EXTRAS: WeakKeyDictionary[type[Any], bool] = WeakKeyDictionary()
 
 
 def parse_accept(header: str | None) -> list[str]:
@@ -230,6 +231,8 @@ def _model_has_bytes(cls: type[Any]) -> bool:
         return cached
     pending = [cls.__pydantic_core_schema__]
     seen: set[int] = set()
+    has_bytes = False
+    has_extras = False
     while pending:
         node = pending.pop()
         if id(node) in seen:
@@ -237,12 +240,43 @@ def _model_has_bytes(cls: type[Any]) -> bool:
         seen.add(id(node))
         if isinstance(node, dict):
             if node.get("type") in ("bytes", "any"):
-                _MODEL_HAS_BYTES[cls] = True
-                return True
+                has_bytes = True
+            if node.get("extra_fields_behavior") == "allow":
+                has_extras = True
             pending.extend(node.values())
         elif isinstance(node, (list, tuple)):
             pending.extend(node)
-    _MODEL_HAS_BYTES[cls] = False
+    _MODEL_HAS_BYTES[cls] = has_bytes
+    _MODEL_HAS_EXTRAS[cls] = has_extras
+    return has_bytes
+
+
+def _extras_have_bytes(value: Any) -> bool:
+    from pydantic import BaseModel
+
+    pending = [iter((value,))]
+    seen: set[int] = set()
+    while pending:
+        try:
+            item = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        if isinstance(item, (bytes, bytearray)):
+            return True
+        if id(item) in seen:
+            continue
+        if isinstance(item, BaseModel):
+            seen.add(id(item))
+            pending.append(iter(item.__dict__.values()))
+            if item.__pydantic_extra__:
+                pending.append(iter(item.__pydantic_extra__.values()))
+        elif isinstance(item, dict):
+            seen.add(id(item))
+            pending.append(iter(item.values()))
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            seen.add(id(item))
+            pending.append(iter(item))
     return False
 
 
@@ -303,7 +337,8 @@ def _json_value(value: Any) -> Any:
                     if not _is_utf8_error(error):
                         raise
                     return to_jsonable_python(_json_value(model_dump(mode="python", by_alias=True)))
-                if _model_has_bytes(type(value)):
+                if (_model_has_bytes(type(value))
+                        or (_MODEL_HAS_EXTRAS[type(value)] and _extras_have_bytes(value))):
                     plain = _overlay_model_bytes(plain, model_dump(mode="python", by_alias=True))
                 return _json_value(plain)
         value = model_dump(mode="json", by_alias=True)
@@ -342,7 +377,8 @@ def encode_for(
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
     JSON fallback writes bytes and bytearray values as standard padded base64,
     without requiring a codec. Models are dumped in JSON mode with bytes values
-    as standard padded base64. If a model's bytes are not UTF-8 and its JSON dump
+    as standard padded base64, including bytes in allowed extras and their
+    containers. If a model's bytes are not UTF-8 and its JSON dump
     fails, its Python dump is used; JSON-only serializers do not run in that case.
     """
     if decision.kind == "hyperfly" and decision.codec is not None:
@@ -438,87 +474,126 @@ def _loads(body: bytes | str) -> Any:
         raise DecodeError("json", f"malformed JSON body: {error}") from error
 
 
+@dataclass(slots=True)
+class _JsonPath:
+    parent: _JsonPath | None
+    key: str | int | None
+
+
+def _json_path(parent: _JsonPath | None, key: str | int | None) -> str:
+    parts = []
+    while True:
+        if key is not None:
+            parts.append(f"[{key}]" if isinstance(key, int) else f".{key}")
+        if parent is None:
+            break
+        key, parent = parent.key, parent.parent
+    return "$" + "".join(reversed(parts))
+
+
+def _array_children(node: dict[str, Any], items: list[Any]) -> Iterator[tuple[dict[str, Any], Any, str | int | None]]:
+    for index in range(len(items)):
+        yield node, items, index
+
+
+def _struct_children(node: dict[str, Any], items: dict[str, Any]) -> Iterator[tuple[dict[str, Any], Any, str | int | None]]:
+    for field in node["fields"]:
+        name = field["name"]
+        if name in items and not (field.get("nullable") and items[name] is None):
+            yield field["type"], items, name
+
+
 def _convert_json(value: Any, registry: CodecRegistry) -> Any:
     fingerprints = registry.fingerprints
     codec = registry.get(fingerprints[0]) if fingerprints else None
     if codec is None:
         return value
-    root = [value]
-    stack: list[tuple[dict[str, Any], Any, str | int, str]] = [(codec._ir, root, 0, "$")]
+    root = {None: value}
+    stack: list[tuple[Iterator[tuple[dict[str, Any], Any, str | int | None]], _JsonPath | None]] = [
+        (iter(((codec._ir, root, None),)), None),
+    ]
+    enums: dict[int, frozenset[str]] = {}
     while stack:
-        node, parent, key, path = stack.pop()
+        children, path = stack[-1]
+        try:
+            node, parent, key = next(children)
+        except StopIteration:
+            stack.pop()
+            continue
         item = parent[key]
         kind = node["kind"]
+        while kind == "nullable" and item is not None:
+            node = node["inner"]
+            kind = node["kind"]
         if kind == "bool":
             if type(item) is not bool:
-                raise DecodeError("json", f"{path}: expected boolean")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected boolean")
         elif kind == "int" or (kind == "literal" and type(node["value"]) in (int, float)):
             if (type(item) not in (int, float) or not INT_MIN <= item <= INT_MAX
                     or (type(item) is float and not item.is_integer())):
-                raise DecodeError("json", f"{path}: expected integral number in the safe integer domain")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected integral number in the safe integer domain")
             integer = int(item)
             if kind == "literal":
                 if integer != node["value"]:
-                    raise DecodeError("json", f"{path}: literal mismatch")
+                    raise DecodeError("json", f"{_json_path(path, key)}: literal mismatch")
             else:
                 lo, hi = node.get("min"), node.get("max")
                 if (lo is not None and integer < lo) or (hi is not None and integer > hi):
-                    raise DecodeError("json", f"{path}: integer outside declared bounds")
+                    raise DecodeError("json", f"{_json_path(path, key)}: integer outside declared bounds")
             parent[key] = integer
         elif kind == "float64":
             if type(item) not in (int, float):
-                raise DecodeError("json", f"{path}: expected number")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected number")
             try:
                 number = float(item)
             except OverflowError as error:
-                raise DecodeError("json", f"{path}: expected finite float64") from error
+                raise DecodeError("json", f"{_json_path(path, key)}: expected finite float64") from error
             if not math.isfinite(number):
-                raise DecodeError("json", f"{path}: expected finite float64")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected finite float64")
             parent[key] = number
         elif kind in ("string", "enum"):
             if type(item) is not str:
-                raise DecodeError("json", f"{path}: expected string")
-            if kind == "enum" and item not in node["members"]:
-                raise DecodeError("json", f"{path}: unknown enum member")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected string")
+            if kind == "enum":
+                members = enums.get(id(node))
+                if members is None:
+                    members = enums[id(node)] = frozenset(node["members"])
+                if item not in members:
+                    raise DecodeError("json", f"{_json_path(path, key)}: unknown enum member")
         elif kind == "literal":
             literal = node["value"]
             if type(item) is not type(literal) or item != literal:
-                raise DecodeError("json", f"{path}: literal mismatch")
+                raise DecodeError("json", f"{_json_path(path, key)}: literal mismatch")
         elif kind == "bytes":
             if not isinstance(item, str):
-                raise DecodeError("json", f"{path}: expected a base64 string")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected a base64 string")
             try:
                 decoded = base64.b64decode(item, validate=True)
                 if base64.b64encode(decoded).decode("ascii") != item:
                     raise ValueError("expected canonical padded base64")
             except (ValueError, binascii.Error) as error:
-                raise DecodeError("json", f"{path}: expected canonical padded base64") from error
+                raise DecodeError("json", f"{_json_path(path, key)}: expected canonical padded base64") from error
             parent[key] = decoded
-        elif kind == "nullable":
-            if item is not None:
-                stack.append((node["inner"], parent, key, path))
         elif kind == "array":
             if not isinstance(item, list):
-                raise DecodeError("json", f"{path}: expected array")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected array")
             if "length" in node and len(item) != node["length"]:
-                raise DecodeError("json", f"{path}: array length does not match declared length")
-            stack.extend((node["element"], item, index, f"{path}[{index}]") for index in reversed(range(len(item))))
+                raise DecodeError("json", f"{_json_path(path, key)}: array length does not match declared length")
+            stack.append((_array_children(node["element"], item), _JsonPath(path, key)))
         elif kind == "struct":
             if not isinstance(item, dict):
-                raise DecodeError("json", f"{path}: expected object")
+                raise DecodeError("json", f"{_json_path(path, key)}: expected object")
             converted: dict[str, Any] = {}
             parent[key] = converted
             for field in reversed(node["fields"]):
                 name = field["name"]
-                field_path = f"{path}.{name}"
                 if name not in item:
                     if not field.get("optional"):
-                        raise DecodeError("json", f"{field_path}: missing required field")
+                        raise DecodeError("json", f"{_json_path(path, key)}.{name}: missing required field")
                     continue
                 converted[name] = item[name]
-                if not (field.get("nullable") and item[name] is None):
-                    stack.append((field["type"], converted, name, field_path))
-    return root[0]
+            stack.append((_struct_children(node, converted), _JsonPath(path, key)))
+    return root[None]
 
 
 def decode_response(content_type: str | None, body: bytes | str, registry: CodecRegistry) -> tuple[str, Any]:
