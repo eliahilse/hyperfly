@@ -1,6 +1,6 @@
 {
   "name": "@hyperfly/rust",
-  "version": "0.1.0",
+  "version": "0.1.1-alpha.0",
   "private": true,
   "description": "Release metadata for the hyperfly-core crate. Changesets bumps this version and .github/scripts/sync-versions.ts writes it to Cargo.toml and Cargo.lock."
 }
