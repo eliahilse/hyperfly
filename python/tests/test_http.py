@@ -1,7 +1,11 @@
+import json
+import math
 import tracemalloc
+from enum import Enum, IntEnum
 
 import pytest
 from conftest import load
+from pydantic import BaseModel
 
 from hyperfly import CodecRegistry, compile_ir
 from hyperfly.http import (
@@ -13,6 +17,7 @@ from hyperfly.http import (
     parse_accept,
     serve_artifact,
 )
+from hyperfly.pydantic import compile as compile_model
 
 IR = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}]}
 IR_B = {"kind": "struct", "fields": [{"name": "id", "type": {"kind": "string"}}, {"name": "n", "type": {"kind": "int"}}]}
@@ -194,3 +199,116 @@ def test_rotation_keeps_every_client_served():
     registry.remove(CODEC_A.fingerprint)
     assert negotiate(new_client, registry).headers["Hyperfly-Codec"] == CODEC_B.fingerprint
     assert negotiate(old_client, registry).kind == "json"
+
+
+def test_json_fallback_serializes_models_in_json_mode():
+    class State(Enum):
+        online = "online"
+
+    class Response(BaseModel):
+        state: State
+        message: str
+
+    value = Response(state=State.online, message="héllo 🚀")
+    body, headers = encode_for(negotiate(None, CodecRegistry()), value)
+    assert body == '{"state":"online","message":"héllo 🚀"}'.encode("utf-8")
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_json_fallback_uses_model_dump_without_pydantic():
+    class Response:
+        def model_dump(self, *, mode, by_alias):
+            assert mode == "json" and by_alias
+            return {"value": math.inf}
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response())
+    assert body == b'{"value":null}'
+
+
+def test_json_fallback_replaces_nested_non_finite_values_without_mutation():
+    nested = [math.nan, {"positive": math.inf, "negative": -math.inf}, ["é", None, 2]]
+    value = {"values": nested, "finite": 1.5}
+    body, headers = encode_for(negotiate(None, CodecRegistry()), value)
+    assert body == '{"values":[null,{"positive":null,"negative":null},["é",null,2]],"finite":1.5}'.encode("utf-8")
+    assert headers["Content-Type"] == "application/json"
+    assert value["values"] is nested
+    assert math.isnan(nested[0])
+    assert nested[1] == {"positive": math.inf, "negative": -math.inf}
+
+
+def test_json_fallback_writes_enum_values_and_keys():
+    class Color(Enum):
+        red = "red"
+        ratio = 0.5
+
+    class Level(IntEnum):
+        high = 3
+
+    value = {"color": Color.red, "levels": [Level.high, Color.ratio], Color.red: 1, Level.high: 2, math.inf: 3}
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert body == b'{"color":"red","levels":[3,0.5],"red":1,"3":2,"Infinity":3}'
+
+
+def test_json_fallback_rejects_circular_values():
+    circular: list = []
+    circular.append(circular)
+    with pytest.raises(ValueError):
+        encode_for(negotiate(None, CodecRegistry()), circular)
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_json_fallback_replaces_root_non_finite_values(value):
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert body == b"null"
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("template", ["{}", '[{{"value":{}}}]'])
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_json_response_rejects_non_finite_tokens(token, template, as_bytes):
+    body = template.format(token)
+    if as_bytes:
+        body = body.encode("utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        decode_response("application/json", body, CodecRegistry())
+
+
+def test_json_response_accepts_non_finite_names_in_strings():
+    value = ["NaN", "Infinity", "-Infinity"]
+    assert decode_response("application/json", json.dumps(value), CodecRegistry()) == ("json", value)
+
+
+def test_model_codec_negotiation_and_artifact_discovery():
+    class Response(BaseModel):
+        id: str
+
+    codec = compile_model(Response, validate=True)
+    registry = CodecRegistry([codec])
+    assert registry.get(codec.fingerprint) is codec
+    decision = negotiate(accept_header([codec.fingerprint]), registry)
+    assert decision.codec is codec
+    value = Response(id="abc")
+    body, headers = encode_for(decision, value)
+    assert headers["Content-Type"] == HYPERFLY_MEDIA_TYPE
+    assert headers["Hyperfly-Codec"] == codec.fingerprint
+    assert decode_response(headers["Content-Type"], body, registry) == ("hyperfly", value)
+    served = serve_artifact(f"/.well-known/hyperfly/{codec.fingerprint}", registry)
+    assert served.status == 200
+    assert served.body == codec.artifact
+
+
+def test_json_fallback_uses_wire_aliases():
+    from pydantic import Field
+
+    class Response(BaseModel):
+        internal: str = Field(alias="external")
+
+    body, _ = encode_for(negotiate(None, CodecRegistry()), Response(external="hello"))
+    assert body == b'{"external":"hello"}'
+    assert Response.model_validate_json(body) == Response(external="hello")
+
+
+def test_json_fallback_escapes_lone_surrogates():
+    body, _ = encode_for(negotiate(None, CodecRegistry()), {"v": "\ud800", "w": "é"})
+    assert body == '{"v":"\\ud800","w":"é"}'.encode("utf-8")
+    assert json.loads(body) == {"v": "\ud800", "w": "é"}
