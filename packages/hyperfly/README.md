@@ -6,15 +6,13 @@ Your schema already fixes every field name, type, and bound. Your traffic alread
 reveals what the values usually look like. Hyperfly compiles both into a binary
 protocol for one exact route — and speaks JSON to anything that hasn't been told.
 
-> **Pre-release.** The wire format is specified and three implementations agree on
-> it byte-for-byte, but nothing is stable yet. Expect breaking changes before 1.0.
+The public API and wire format are stable for 1.x per [STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md).
 
 ```bash
-npm install hyperfly@next zod
+npm install hyperfly zod
 ```
 
-Pre-releases are published under the `next` tag. Zod 4 is needed only for `hyperfly/zod`; the codec and HTTP entry
-points do not require it.
+Zod 4 is needed only for `hyperfly/zod`; the codec and HTTP entry points do not require it.
 
 ## Two lines at the boundary
 

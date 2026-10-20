@@ -6,14 +6,14 @@ Typed APIs already know what their data can contain. Production traffic reveals 
 the data usually contains. Hyperfly uses both to compile a binary protocol for one
 exact route, instead of shipping generic JSON through a generic compressor.
 
-**Pre-release.** The wire format is specified, three implementations agree on it
-byte-for-byte, and the benchmarks below are reproducible, but nothing is stable yet:
-expect breaking changes before 1.0.
+The wire format is specified and the three implementations agree on it byte for byte;
+the public APIs and wire format are stable for 1.x per [STABILITY.md](STABILITY.md).
+The benchmarks below are reproducible.
 
 | Package | Install | Docs |
 |---|---|---|
-| TypeScript, Zod adapter, HTTP | `npm install hyperfly@next zod` | [packages/hyperfly](packages/hyperfly/README.md) |
-| Python, Pydantic adapter, HTTP | `pip install --pre "hyperfly[pydantic]"` | [python](python/README.md) |
+| TypeScript, Zod adapter, HTTP | `npm install hyperfly zod` | [packages/hyperfly](packages/hyperfly/README.md) |
+| Python, Pydantic adapter, HTTP | `pip install "hyperfly[pydantic]"` | [python](python/README.md) |
 | Rust codec | `cargo add hyperfly-core` | [rust](rust/README.md) |
 
 Zod and Pydantic are needed only for the schema adapters; the codec and HTTP layers

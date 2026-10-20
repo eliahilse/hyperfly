@@ -14,7 +14,7 @@ comparing fingerprints.
 
 ```toml
 [dependencies]
-hyperfly-core = "0.1"
+hyperfly-core = "1"
 ```
 
 ```rust

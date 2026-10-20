@@ -77,7 +77,7 @@ export default function Home() {
         </Link>
         <span className="nav-status">
           <span className="dot" aria-hidden="true" />
-          pre-release
+          1.0
         </span>
         <nav className="nav-links">
           <a href="#size">size</a>

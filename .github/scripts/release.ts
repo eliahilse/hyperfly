@@ -52,6 +52,9 @@ export const prerelease = (version: string) => version.includes("-")
 /** npm's dist-tag for a version: prereleases never move `latest` */
 export const distTag = (version: string) => (prerelease(version) ? "next" : "latest")
 
+/** gh release flags for a version: prereleases are marked as such and never become the latest release */
+export const releaseFlags = (version: string) => (prerelease(version) ? ["--prerelease", "--latest=false"] : [])
+
 /** the body of a CHANGELOG.md section for one version, or undefined when there is none */
 export function changelogSection(changelog: string, version: string): string | undefined {
   const lines = changelog.split("\n")
@@ -138,7 +141,7 @@ async function tagAndRelease(tag: string, commit: () => Promise<string>, version
     await $`git push origin ${`refs/tags/${tag}`}`
   }
   if (await released(tag)) return
-  const flags = prerelease(version) ? ["--prerelease", "--latest=false"] : []
+  const flags = releaseFlags(version)
   await $`gh release create ${tag} --title ${tag} --notes ${body} --verify-tag ${flags}`
 }
 

@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test"
 import { pep440, setLockVersion, setTomlVersion, tomlString } from "./sync-versions"
 
 describe("pep440", () => {
-  test("keeps a release version", () => expect(pep440("1.2.3")).toBe("1.2.3"))
+  test("keeps a release version", () => {
+    expect(pep440("1.0.0")).toBe("1.0.0")
+    expect(pep440("1.2.3")).toBe("1.2.3")
+  })
   test("maps alpha, beta and rc", () => {
     expect(pep440("1.0.0-alpha.0")).toBe("1.0.0a0")
     expect(pep440("1.0.0-alpha.12")).toBe("1.0.0a12")
