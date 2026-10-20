@@ -1858,7 +1858,8 @@ def test_json_fallback_publishes_one_complete_class_cache_entry(monkeypatch):
     class Meta(metaclass):
         def __setattr__(cls, name, entry):
             if name == http._MODEL_JSON_ATTRIBUTE:
-                assert entry.plan["active"] and entry.serializer is not None
+                from pydantic_core import SchemaSerializer
+                assert isinstance(entry.serializer, SchemaSerializer)
                 stores.append(entry)
                 super().__setattr__(name, entry)
                 published.set()
@@ -2300,6 +2301,9 @@ def test_json_fallback_preserves_alias_collision_winner(collision, bytes_first):
     value = model(payload=b"ab", **({"same": "public"} if collision == "extra" else {}))
     expected = value.model_dump(mode="json", by_alias=True)
     expected["sibling"] = "dGVzdA=="
+    if collision == "field" and not bytes_first:
+        # Pydantic chooses the last field; its declared bytes serializer applies.
+        expected["same"] = "YWI="
     assert json.loads(encode_for(negotiate(None, CodecRegistry()), value)[0]) == expected
 
 
@@ -2337,3 +2341,53 @@ def test_json_fallback_plain_tuple_key_keeps_original_json_rejection():
         encode_for(negotiate(None, CodecRegistry()), {(1, 2): "value"})
     assert raised.value.code == "json"
     assert isinstance(raised.value.__cause__, TypeError)
+
+
+@pytest.mark.parametrize("bytes_mode", ["utf8", "hex", "base64"])
+@pytest.mark.parametrize("aliases", ["chain", "swap"])
+@pytest.mark.parametrize("override", [
+    "default", "by_alias_false", "exclude_payload", "include_label",
+    "exclude_label", "include_payload", "reorder", "replace",
+])
+def test_json_fallback_dump_overrides_match_main_output(aliases, override, bytes_mode):
+    from pydantic import ConfigDict, Field
+
+    class Response(BaseModel):
+        model_config = ConfigDict(ser_json_bytes=bytes_mode)
+        payload: bytes = Field(serialization_alias="label")
+        label: str = Field(serialization_alias="caption" if aliases == "chain" else "payload")
+
+        def model_dump(self, **kwargs):
+            if override == "by_alias_false":
+                kwargs["by_alias"] = False
+            elif override.startswith("exclude_"):
+                kwargs["exclude"] = {override.removeprefix("exclude_")}
+            elif override.startswith("include_"):
+                kwargs["include"] = {override.removeprefix("include_")}
+            result = super().model_dump(**kwargs)
+            if override == "reorder":
+                return dict(reversed(list(result.items())))
+            if override == "replace":
+                return {**result, "label": "dump owns this"}
+            return result
+
+    value = Response(payload=b"hi", label="keep me")
+    caption = "caption" if aliases == "chain" else "payload"
+    expected = {
+        "default": {"label": "aGk=", caption: "keep me"},
+        "by_alias_false": {"payload": "aGk=", "label": "keep me"},
+        "exclude_payload": {caption: "keep me"},
+        "include_label": {caption: "keep me"},
+        "exclude_label": {"label": "aGk="},
+        "include_payload": {"label": "aGk="},
+        "reorder": {caption: "keep me", "label": "aGk="},
+        "replace": {"label": "dump owns this", caption: "keep me"},
+    }[override]
+    original = value.model_dump(mode="json", by_alias=True)
+    # Preserve origin/main's whole dump, normalizing only the declared bytes
+    # representation. The base64 config compares the whole body byte for byte.
+    original_bytes = {"utf8": "hi", "hex": "6869", "base64": "aGk="}[bytes_mode]
+    assert original == {key: original_bytes if item == "aGk=" else item for key, item in expected.items()}
+    body, _ = encode_for(negotiate(None, CodecRegistry()), value)
+    assert body == json.dumps(expected, separators=(",", ":")).encode()
+    assert value.model_dump(mode="json", by_alias=True) == original

@@ -226,11 +226,10 @@ class _JSONModel(metaclass=_JSONModelMeta):
 
 
 class _ModelJSON(NamedTuple):
-    plan: dict[str, Any]
     serializer: Any
 
 
-class _JSONOverlayError(Exception):
+class _JSONSerializerError(Exception):
     def __init__(self, error: Exception) -> None:
         self.error = error
 
@@ -258,23 +257,29 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
     config = root_schema.get("config")
     copies: dict[int, dict[str, Any]] = {}
     originals: dict[int, dict[str, Any]] = {}
-    plans: dict[int, dict[str, Any]] = {}
+    children: dict[int, list[int]] = {}
     references: dict[str, dict[str, Any]] = {}
+    active: set[int] = set()
 
-    def visit(node: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        if id(node) in copies:
-            return copies[id(node)], plans[id(node)]
+    def visit(node: dict[str, Any]) -> dict[str, Any]:
+        identity = id(node)
+        if identity in copies:
+            return copies[identity]
         copied = dict(node)
-        plan: dict[str, Any] = {"type": node["type"], "children": []}
-        copies[id(node)] = copied
-        originals[id(node)] = node
-        plans[id(node)] = plan
+        copies[identity] = copied
+        originals[identity] = node
+        children[identity] = []
         kind = node["type"]
         if node.get("serialization", {}).get("type") in ("function-plain", "function-wrap"):
             # Custom serializers own their whole output. Keep their original
             # subtree and config, including bytes passed through a wrap handler.
-            plan["type"] = "custom"
-            return copied, plan
+            return copied
+
+        def child(item: dict[str, Any]) -> dict[str, Any]:
+            result = visit(item)
+            children[identity].append(id(item))
+            return result
+
         if "ref" in node:
             copied["ref"] = node["ref"] + ":hyperfly-http"
             references[copied["ref"]] = copied
@@ -285,77 +290,43 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
                 copied["serialization"] = {
                     "type": "function-wrap", "function": _serialize_model_bytes, "when_used": "json",
                 }
+                active.add(identity)
         elif kind == "definition-ref":
-            child, child_plan = visit(definitions[node["schema_ref"]])
-            copied["schema_ref"] = child["ref"]
-            plan["children"] = [child_plan]
+            copied["schema_ref"] = child(definitions[node["schema_ref"]])["ref"]
         elif kind in ("definitions", "model", "nullable", "default", "function-before"):
-            copied["schema"], child_plan = visit(node["schema"])
-            plan["children"] = [child_plan]
+            copied["schema"] = child(node["schema"])
             if kind == "model":
                 copied["cls"] = _JSONModel
-                plan["cls"] = node["cls"]
-                plan["root"] = node.get("root_model", False)
         elif kind == "model-fields":
-            copied["fields"] = dict(node["fields"])
-            aliases: dict[str, int] = {}
-            for name, item in node["fields"].items():
-                if not item.get("serialization_exclude"):
-                    alias = item.get("serialization_alias")
-                    alias = name if alias is None else alias
-                    aliases[alias] = aliases.get(alias, 0) + 1
-            for item in node.get("computed_fields", []):
-                alias = item.get("alias")
-                alias = item["property_name"] if alias is None else alias
-                aliases[alias] = aliases.get(alias, 0) + 1
-            for name, item in node["fields"].items():
-                alias = item.get("serialization_alias")
-                alias = name if alias is None else alias
-                if item.get("serialization_exclude") or aliases[alias] > 1:
-                    continue
-                child, child_plan = visit(item["schema"])
-                copied["fields"][name] = {**item, "schema": child}
-                plan["children"].append((name, alias, child_plan))
+            copied["fields"] = {
+                name: item if item.get("serialization_exclude") else {**item, "schema": child(item["schema"])}
+                for name, item in node["fields"].items()
+            }
         elif kind == "list":
-            copied["items_schema"], child_plan = visit(node["items_schema"])
-            plan["children"] = [child_plan]
+            copied["items_schema"] = child(node["items_schema"])
         elif kind in ("tuple", "tuple-positional", "tuple-variable"):
             items = node.get("items_schema", [])
-            if isinstance(items, dict):
-                copied["items_schema"], child_plan = visit(items)
-                plan["children"] = [child_plan]
-                plan["variadic"] = 0
-            else:
-                pairs = [visit(item) for item in items]
-                copied["items_schema"] = [pair[0] for pair in pairs]
-                plan["children"] = [pair[1] for pair in pairs]
-                plan["variadic"] = node.get("variadic_item_index")
-                if node.get("extras_schema") is not None:
-                    copied["extras_schema"], child_plan = visit(node["extras_schema"])
-                    plan["variadic"] = len(plan["children"])
-                    plan["children"].append(child_plan)
-        return copied, plan
+            copied["items_schema"] = child(items) if isinstance(items, dict) else [child(item) for item in items]
+            if node.get("extras_schema") is not None:
+                copied["extras_schema"] = child(node["extras_schema"])
+        return copied
 
-    copied, plan = visit(schema)
-    # Compute reachability to skip bytes-free fields, including recursive models.
-    active = {id(item) for item in plans.values() if item["type"] == "bytes"}
+    copied = visit(schema)
+    # Only ancestors of a bytes serializer need runtime shape guards. Resolve
+    # recursive references to a fixed point and keep bytes-free models unchanged.
     while True:
         previous = len(active)
-        for item in plans.values():
-            children = item["children"]
-            if item["type"] == "model-fields":
-                children = [entry[2] for entry in children]
-            if any(id(child) in active for child in children):
-                active.add(id(item))
+        for identity, descendants in children.items():
+            if any(item in active for item in descendants):
+                active.add(identity)
         if len(active) == previous:
             break
-    for item in plans.values():
-        item["active"] = id(item) in active
-    if not plan["active"]:
-        return _ModelJSON(plan, None)
+    if id(schema) not in active:
+        return _ModelJSON(None)
 
-    def guard(original: dict[str, Any], copied: dict[str, Any], item: dict[str, Any]) -> None:
-        expected = item["cls"] if item["type"] == "model" else list if item["type"] == "list" else tuple
+    def guard(original: dict[str, Any], copied: dict[str, Any]) -> None:
+        kind = original["type"]
+        expected = original["cls"] if kind == "model" else list if kind == "list" else tuple
         serializer: Any = None
 
         def convert(value: Any, handler: Callable[[Any], Any], info: Any) -> Any:
@@ -381,26 +352,26 @@ def _build_model_json(cls: type[Any]) -> _ModelJSON:
             except Exception as error:
                 # Preserve errors that pydantic would otherwise wrap merely
                 # because they cross our private serializer function boundary.
-                raise _JSONOverlayError(error) from error
+                raise _JSONSerializerError(error) from error
 
         copied["serialization"] = {
             "type": "function-wrap", "function": serialize, "info_arg": True, "when_used": "json",
         }
 
-    for identity, item in plans.items():
+    for identity in active:
         if (
-            item["active"] and item["type"] in ("model", "list", "tuple", "tuple-positional", "tuple-variable")
+            originals[identity]["type"] in ("model", "list", "tuple", "tuple-positional", "tuple-variable")
             and "serialization" not in originals[identity]
         ):
-            guard(originals[identity], copies[identity], item)
-    # Keep the original definitions for paths outside the overlay contract.
+            guard(originals[identity], copies[identity])
+    # Keep the original definitions for paths outside the declared bytes subtrees.
     safe_schema = {
         "type": "definitions", "schema": copied,
         "definitions": list(definitions.values()) + list(references.values()),
     }
     if copied["type"] == "definitions":
         safe_schema["schema"] = copied["schema"]
-    return _ModelJSON(plan, SchemaSerializer(safe_schema, config))
+    return _ModelJSON(SchemaSerializer(safe_schema, config))
 
 
 def _model_json(cls: type[Any]) -> _ModelJSON:
@@ -411,51 +382,6 @@ def _model_json(cls: type[Any]) -> _ModelJSON:
         # form a collectible cycle, without a global cache keeping it alive.
         setattr(cls, _MODEL_JSON_ATTRIBUTE, cached)
     return cast(_ModelJSON, cached)
-
-
-def _overlay_model_bytes(plain: Any, source: Any, plan: dict[str, Any]) -> Any:
-    root = [plain]
-    pending: list[tuple[Any, Any, Any, dict[str, Any]]] = [(root, 0, source, plan)]
-    while pending:
-        parent, key, value, node = pending.pop()
-        if not node["active"] or value is None:
-            continue
-        target = parent[key]
-        kind = node["type"]
-        children = node["children"]
-        if kind == "bytes":
-            if isinstance(value, (bytes, bytearray)):
-                parent[key] = _base64(value)
-        elif kind == "model-fields":
-            if isinstance(target, dict):
-                extras = getattr(value, "__pydantic_extra__", None) or {}
-                for name, alias, child in children:
-                    if child["active"] and alias in target and alias not in extras:
-                        pending.append((target, alias, getattr(value, name, None), child))
-        elif kind == "model":
-            if isinstance(value, node["cls"]):
-                pending.append((parent, key, getattr(value, "root", None) if node["root"] else value, children[0]))
-        elif kind in ("definitions", "definition-ref", "nullable", "default", "function-before"):
-            pending.append((parent, key, value, children[0]))
-        elif (
-            kind in ("list", "tuple", "tuple-positional", "tuple-variable")
-            and isinstance(value, list if kind == "list" else tuple)
-            and isinstance(target, list) and len(value) == len(target)
-        ):
-            for index, item in enumerate(value):
-                if kind == "list":
-                    child = children[0]
-                else:
-                    variadic = node["variadic"]
-                    position = index
-                    if variadic is not None and index >= variadic:
-                        position = max(variadic, index - len(value) + len(children))
-                    if position >= len(children):
-                        continue
-                    child = children[position]
-                if child["active"]:
-                    pending.append((target, index, item, child))
-    return root[0]
 
 
 def _json_value(value: Any) -> Any:
@@ -471,12 +397,11 @@ def _json_value(value: Any) -> Any:
                 shadow = copy(value)
                 object.__setattr__(shadow, "__pydantic_serializer__", cached.serializer)
                 try:
-                    plain = shadow.model_dump(mode="json", by_alias=True)
+                    return shadow.model_dump(mode="json", by_alias=True)
                 except Exception as error:
-                    while isinstance(error.__cause__, _JSONOverlayError):
+                    while isinstance(error.__cause__, _JSONSerializerError):
                         error = error.__cause__.error
                     raise error
-                return _overlay_model_bytes(plain, value, cached.plan)
         return model_dump(mode="json", by_alias=True)
     if isinstance(value, (bytes, bytearray)):
         return _base64(value)
@@ -564,7 +489,7 @@ def encode_for(
     A value the codec refuses under its limits is answered in JSON, never an error
     (negotiation section 2); on_fallback hears about it so the route can be fixed.
     In JSON fallback, plain dicts, lists and tuples write bytes as standard padded
-    base64. Pydantic models write base64 at unambiguous declared bytes positions
+    base64. Pydantic models write base64 at declared bytes positions
     outside custom serializers, and follow JSON mode elsewhere, including Any
     and extras. Dict keys keep their JSON spelling.
     Serialization failures raise EncodeError with code ``json``.
