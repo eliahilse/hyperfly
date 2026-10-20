@@ -161,6 +161,8 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
 
 /** `inflateRaw` with the rebase threshold exposed, so tests can rebase as often as every step (7 bits). */
 export function inflateRebasing(data: Uint8Array, maxOutputLength: number, rebaseBits: number): Uint8Array {
+  // below 7 bits a rebase leaves the position past the threshold and the decoder stops advancing
+  if (!Number.isInteger(rebaseBits) || rebaseBits < 7) throw new RangeError(`rebase threshold ${rebaseBits} is not an integer of at least 7`);
   if (!Number.isSafeInteger(maxOutputLength) || maxOutputLength < 0) fail("invalid output limit");
   const n = data.length;
   const all = new Uint8Array(n + PAD);
@@ -198,7 +200,7 @@ export function inflateRebasing(data: Uint8Array, maxOutputLength: number, rebas
       if (p + len > m) fail("truncated stored block");
       if (o + len > cap) overflow(maxOutputLength);
       if (o + len > out.length) out = grow(out, o, o + len, cap);
-      out.set(buf.subarray(p, p + len), o);
+      out.set(data.subarray(base + p, base + p + len), o);
       o += len;
       pos = (p + len) * 8;
       continue;

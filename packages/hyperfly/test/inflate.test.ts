@@ -651,6 +651,13 @@ describe("inflateRaw: rebasing the bit position changes nothing", () => {
     }
   });
 
+  test("thresholds below 7 bits are refused", () => {
+    for (const bits of [-8, 0, 6, 7.5, Number.NaN]) {
+      expect(() => inflateRebasing(Uint8Array.of(3, 0), 0, bits)).toThrow(RangeError);
+    }
+    expect(inflateRebasing(Uint8Array.of(3, 0), 0, 7).length).toBe(0);
+  });
+
   test("long matches, large outputs and caps hit mid-match", () => {
     const w = fixedLit(new Bits().put(1, 1).put(1, 2), 0x61);
     for (let i = 0; i < 20_000; i++) fixedMatch(w, 258, 0);
