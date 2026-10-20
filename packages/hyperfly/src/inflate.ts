@@ -14,9 +14,9 @@ const CLEN_ORDER = Uint8Array.of(16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3,
 const LIT_ROOT = 10;
 const DIST_ROOT = 8;
 const CLEN_ROOT = 7;
-// bit positions stay below 2^32 so unsigned shifts can index bytes; above the default
-// maxByteLength (2^28), so only raised limits can reach it
-const MAX_INPUT = 2 ** 29 - 64;
+// bit positions are relative to a byte base that moves forward once they pass this,
+// so they stay far below 2^32 and unsigned shifts can index bytes
+const REBASE_BITS = 2 ** 30;
 const PAD = 16;
 
 const CODES = 0;
@@ -156,12 +156,19 @@ const symbolLengths = new Uint8Array(286 + 30);
  * after the final block) and fails as soon as output would pass `maxOutputLength`.
  */
 export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Array {
+  return inflateRebasing(data, maxOutputLength, REBASE_BITS);
+}
+
+/** `inflateRaw` with the rebase threshold exposed, so tests can rebase as often as every step (7 bits). */
+export function inflateRebasing(data: Uint8Array, maxOutputLength: number, rebaseBits: number): Uint8Array {
   if (!Number.isSafeInteger(maxOutputLength) || maxOutputLength < 0) fail("invalid output limit");
   const n = data.length;
-  if (n > MAX_INPUT) fail("input too large");
-  const buf = new Uint8Array(n + PAD);
-  buf.set(data);
-  const tbits = n * 8;
+  const all = new Uint8Array(n + PAD);
+  all.set(data);
+  let buf = all;
+  let base = 0;
+  let tbits = n * 8;
+  let limit = Math.min(tbits, rebaseBits);
   // a 258-byte match costs at least two bits, so no stream expands past 1032:1
   const cap = Math.min(maxOutputLength, n * 1032);
   let out = new Uint8Array(Math.min(cap, Math.max(4096, n * 4)));
@@ -173,17 +180,25 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
     last = header & 1;
     const type = (header >>> 1) & 3;
     pos += 3;
-    if (pos > tbits) fail("truncated");
+    if (pos > limit) {
+      if (pos > tbits) fail("truncated");
+      base += pos >>> 3;
+      pos &= 7;
+      buf = all.subarray(base);
+      tbits = (n - base) * 8;
+      limit = Math.min(tbits, rebaseBits);
+    }
     if (type === 0) {
+      const m = n - base;
       let p = (pos + 7) >>> 3;
-      if (p + 4 > n) fail("truncated stored block");
+      if (p + 4 > m) fail("truncated stored block");
       const len = buf[p]! | (buf[p + 1]! << 8);
       if ((len ^ 0xffff) !== (buf[p + 2]! | (buf[p + 3]! << 8))) fail("invalid stored block lengths");
       p += 4;
-      if (p + len > n) fail("truncated stored block");
+      if (p + len > m) fail("truncated stored block");
       if (o + len > cap) overflow(maxOutputLength);
       if (o + len > out.length) out = grow(out, o, o + len, cap);
-      out.set(data.subarray(p, p + len), o);
+      out.set(buf.subarray(p, p + len), o);
       o += len;
       pos = (p + len) * 8;
       continue;
@@ -250,66 +265,74 @@ export function inflateRaw(data: Uint8Array, maxOutputLength: number): Uint8Arra
     const lmask = lit.mask;
     const dfast = dist.fast;
     const dmask = dist.mask;
-    for (;;) {
+    codes: for (;;) {
+      for (;;) {
+        if (pos > limit) break;
+        const w = peek(buf, pos);
+        let e = lfast[w & lmask]!;
+        if (e === 0) {
+          e = slow(lit, buf, pos);
+          if (e < 0) fail("invalid literal/length code");
+        }
+        const elen = e & 15;
+        pos += elen;
+        const sym = e >>> 4;
+        if (sym < 256) {
+          if (o === out.length) {
+            if (o === cap) overflow(maxOutputLength);
+            out = grow(out, o, o + 1, cap);
+          }
+          out[o++] = sym;
+          continue;
+        }
+        if (sym === 256) break codes;
+        const li = sym - 257;
+        if (li >= 29) fail("invalid literal/length code");
+        const lx = LEN_EXTRA[li]!;
+        // a literal/length code and its extra bits fit the 25 bits peeked
+        const len = LEN_BASE[li]! + ((w >>> elen) & ((1 << lx) - 1));
+        pos += lx;
+        let d = dfast[peek(buf, pos) & dmask]!;
+        if (d === 0) {
+          d = slow(dist, buf, pos);
+          if (d < 0) fail("invalid distance code");
+        }
+        pos += d & 15;
+        const ds = d >>> 4;
+        if (ds >= 30) fail("invalid distance code");
+        const dx = DIST_EXTRA[ds]!;
+        const distance = DIST_BASE[ds]! + (peek(buf, pos) & ((1 << dx) - 1));
+        pos += dx;
+        if (distance > o) fail("distance too far back");
+        const end = o + len;
+        if (end > out.length) {
+          if (end > cap) overflow(maxOutputLength);
+          out = grow(out, o, end, cap);
+        }
+        let from = o - distance;
+        if (len <= 32) {
+          while (o < end) out[o++] = out[from++]!;
+        } else if (distance === 1) {
+          out.fill(out[from]!, o, end);
+          o = end;
+        } else {
+          // an overlapping copy repeats its period, so each pass can copy all of it written so far
+          while (o < end) {
+            const span = Math.min(o - from, end - o);
+            out.copyWithin(o, from, from + span);
+            o += span;
+          }
+        }
+      }
       if (pos > tbits) fail("truncated");
-      const w = peek(buf, pos);
-      let e = lfast[w & lmask]!;
-      if (e === 0) {
-        e = slow(lit, buf, pos);
-        if (e < 0) fail("invalid literal/length code");
-      }
-      const elen = e & 15;
-      pos += elen;
-      const sym = e >>> 4;
-      if (sym < 256) {
-        if (o === out.length) {
-          if (o === cap) overflow(maxOutputLength);
-          out = grow(out, o, o + 1, cap);
-        }
-        out[o++] = sym;
-        continue;
-      }
-      if (sym === 256) break;
-      const li = sym - 257;
-      if (li >= 29) fail("invalid literal/length code");
-      const lx = LEN_EXTRA[li]!;
-      // a literal/length code and its extra bits fit the 25 bits peeked
-      const len = LEN_BASE[li]! + ((w >>> elen) & ((1 << lx) - 1));
-      pos += lx;
-      let d = dfast[peek(buf, pos) & dmask]!;
-      if (d === 0) {
-        d = slow(dist, buf, pos);
-        if (d < 0) fail("invalid distance code");
-      }
-      pos += d & 15;
-      const ds = d >>> 4;
-      if (ds >= 30) fail("invalid distance code");
-      const dx = DIST_EXTRA[ds]!;
-      const distance = DIST_BASE[ds]! + (peek(buf, pos) & ((1 << dx) - 1));
-      pos += dx;
-      if (distance > o) fail("distance too far back");
-      const end = o + len;
-      if (end > out.length) {
-        if (end > cap) overflow(maxOutputLength);
-        out = grow(out, o, end, cap);
-      }
-      let from = o - distance;
-      if (len <= 32) {
-        while (o < end) out[o++] = out[from++]!;
-      } else if (distance === 1) {
-        out.fill(out[from]!, o, end);
-        o = end;
-      } else {
-        // an overlapping copy repeats its period, so each pass can copy all of it written so far
-        while (o < end) {
-          const span = Math.min(o - from, end - o);
-          out.copyWithin(o, from, from + span);
-          o += span;
-        }
-      }
+      base += pos >>> 3;
+      pos &= 7;
+      buf = all.subarray(base);
+      tbits = (n - base) * 8;
+      limit = Math.min(tbits, rebaseBits);
     }
   }
   if (pos > tbits) fail("truncated");
-  if ((pos + 7) >>> 3 !== n) fail("trailing bytes after the final block");
+  if ((pos + 7) >>> 3 !== n - base) fail("trailing bytes after the final block");
   return o === out.length ? out : out.subarray(0, o);
 }
