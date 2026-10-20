@@ -13,6 +13,9 @@ keywords = ["serialization", "binary", "codec", "columnar", "compression"]
 categories = ["encoding", "compression"]
 include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE", "NOTICE"]
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
 [dependencies]
 sha2 = "0.10"
 miniz_oxide = "0.8"

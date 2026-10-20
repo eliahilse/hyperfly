@@ -742,7 +742,7 @@ function encodeStringColumn(
   let packed: Uint8Array | null = null;
   let packedCost = Infinity;
   const totalBytes = bytes.reduce((n, value) => n + value.length, 0);
-  // §3: the deflate mode's total length obeys the decoder byte limits, so a
+  // §3: the deflate mode's total length obeys the byte limits, so a
   // column beyond them is not a candidate — the decoder would refuse the stream
   if (ctx.deflate && ctx.canInflate && totalBytes <= ctx.maxByteLength) {
     const total = totalBytes;

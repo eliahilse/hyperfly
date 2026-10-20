@@ -1,8 +1,8 @@
 use std::sync::OnceLock;
 
 use hyperfly_core::{
-    Codec, Derivation, Field, GrammarCase, GrammarNum, GrammarToken, Limits, Literal, Node, Plan,
-    Profile, ProfileColumn, Value, HEADER_SIZE,
+    Codec, CompileOptions, Derivation, Field, GrammarCase, GrammarNum, GrammarToken, Limits,
+    Literal, Node, Plan, Profile, ProfileColumn, Value, HEADER_SIZE,
 };
 use proptest::prelude::*;
 use proptest::test_runner::Config;
@@ -214,39 +214,24 @@ fn profiled_ir() -> Node {
 }
 
 fn profile() -> Profile {
-    Profile {
-        version: 2,
-        columns: vec![
-            ProfileColumn {
-                leaf: 0,
-                dict: Some(vec!["alice".into(), "bob".into()]),
-                grammar: None,
-                derived: None,
-            },
-            ProfileColumn {
-                leaf: 1,
-                dict: None,
-                grammar: None,
-                derived: Some(Derivation {
-                    source: 0,
-                    values: vec!["alice@example.com".into(), "bob@example.com".into()],
+    Profile::new(
+        2,
+        vec![
+            ProfileColumn::new(0).with_dict(vec!["alice".into(), "bob".into()]),
+            ProfileColumn::new(1).with_derived(Derivation {
+                source: 0,
+                values: vec!["alice@example.com".into(), "bob@example.com".into()],
+            }),
+            ProfileColumn::new(2).with_grammar(vec![
+                GrammarToken::Lit("ord_".into()),
+                GrammarToken::Num(GrammarNum {
+                    base: 16,
+                    len: 4,
+                    case: GrammarCase::Lower,
                 }),
-            },
-            ProfileColumn {
-                leaf: 2,
-                dict: None,
-                grammar: Some(vec![
-                    GrammarToken::Lit("ord_".into()),
-                    GrammarToken::Num(GrammarNum {
-                        base: 16,
-                        len: 4,
-                        case: GrammarCase::Lower,
-                    }),
-                ]),
-                derived: None,
-            },
+            ]),
         ],
-    }
+    )
 }
 
 fn profiled_value(rows: usize) -> Value {
@@ -292,24 +277,20 @@ fn case(codec: Codec, values: Vec<Value>) -> Case {
 fn cases() -> &'static [Case] {
     static CASES: OnceLock<Vec<Case>> = OnceLock::new();
     CASES.get_or_init(|| {
-        let tight = Limits {
-            max_depth: 3,
-            max_items: 4,
-            max_byte_length: 4,
-            max_amplification: 2,
-            ..Limits::default()
-        };
+        let mut tight = Limits::default();
+        tight.max_depth = 3;
+        tight.max_items = 4;
+        tight.max_byte_length = 4;
+        tight.max_amplification = 2;
         vec![
             case(
-                Codec::compile(row_ir(), Plan::Row, Limits::default(), true).unwrap(),
+                Codec::compile(row_ir(), CompileOptions::new()).unwrap(),
                 vec![row_value(1), row_value(2)],
             ),
             case(
                 Codec::compile(
                     array(Node::Nullable(Box::new(array(int())))),
-                    Plan::Row,
-                    tight,
-                    true,
+                    CompileOptions::new().with_limits(tight),
                 )
                 .unwrap(),
                 vec![Value::Array(vec![
@@ -318,7 +299,11 @@ fn cases() -> &'static [Case] {
                 ])],
             ),
             case(
-                Codec::compile(columnar_ir(true), Plan::Columnar, Limits::default(), true).unwrap(),
+                Codec::compile(
+                    columnar_ir(true),
+                    CompileOptions::new().with_plan(Plan::Columnar),
+                )
+                .unwrap(),
                 vec![
                     columnar_value(1, true),
                     columnar_value(9, true),
@@ -326,22 +311,29 @@ fn cases() -> &'static [Case] {
                 ],
             ),
             case(
-                Codec::compile(columnar_ir(true), Plan::Columnar, Limits::default(), false)
-                    .unwrap(),
+                Codec::compile(
+                    columnar_ir(true),
+                    CompileOptions::new()
+                        .with_plan(Plan::Columnar)
+                        .with_pack(false),
+                )
+                .unwrap(),
                 vec![columnar_value(12, true)],
             ),
             case(
-                Codec::compile(columnar_ir(false), Plan::Columnar, Limits::default(), true)
-                    .unwrap(),
+                Codec::compile(
+                    columnar_ir(false),
+                    CompileOptions::new().with_plan(Plan::Columnar),
+                )
+                .unwrap(),
                 vec![columnar_value(9, false)],
             ),
             case(
-                Codec::compile_with_profile(
+                Codec::compile(
                     profiled_ir(),
-                    Plan::Columnar,
-                    Limits::default(),
-                    true,
-                    Some(profile()),
+                    CompileOptions::new()
+                        .with_plan(Plan::Columnar)
+                        .with_profile(profile()),
                 )
                 .unwrap(),
                 vec![profiled_value(1), profiled_value(8)],
@@ -440,7 +432,7 @@ fn seeds_round_trip() {
 fn columnar_case_uses_the_columnar_layout() {
     let value = columnar_value(9, true);
     let body = |plan| {
-        Codec::compile(columnar_ir(true), plan, Limits::default(), true)
+        Codec::compile(columnar_ir(true), CompileOptions::new().with_plan(plan))
             .unwrap()
             .encode_body(&value)
             .unwrap()
