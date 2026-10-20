@@ -18,6 +18,7 @@ from hyperfly import (
     UnsupportedSchemaError, compile_ir,
 )
 from hyperfly.pydantic import ModelCodec, compile, to_ir
+from hyperfly.pydantic import _same_schema, _SchemaMismatch
 
 
 PYDANTIC_VERSION = tuple(int(part) for part in VERSION.split(".")[:2])
@@ -891,6 +892,96 @@ def test_field_schema_hook_moving_model_ref_is_a_bounds_barrier(
     assert instance.a.x == (-190 if model_validator_present else -90)
     assert codec.decode(codec.encode(instance)) == instance.model_dump()
     assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+@pytest.mark.parametrize("mode", ["after", "wrap"])
+@pytest.mark.parametrize("lower_bound", [0, 999])
+@pytest.mark.parametrize("plan", ["row", "columnar"])
+def test_field_hook_replacing_model_validator_with_modified_body_is_a_barrier(
+    mode, lower_bound, plan,
+):
+    def shift(value):
+        return value.model_copy(update={"x": value.x - 100})
+
+    def wrap(value, handler):
+        return shift(handler(value))
+
+    validator = shift if mode == "after" else wrap
+    inner = create_model("Inner", x=(int, Field(ge=10)), __validators__={
+        "shift": model_validator(mode=mode)(validator),
+    })
+
+    class Replace:
+        def __get_pydantic_core_schema__(self, source, handler):
+            schema = deepcopy(handler.resolve_ref_schema(handler(source)))
+            ref = schema.pop("ref")
+            body = schema["schema"]
+            body["schema"]["fields"]["x"]["schema"]["ge"] = lower_bound
+            if mode == "after":
+                return core_schema.no_info_after_validator_function(shift, body, ref=ref)
+            return core_schema.no_info_wrap_validator_function(wrap, body, ref=ref)
+
+    outer = create_model("Outer", a=(Annotated[inner, Replace()], ...))
+    assert to_ir(inner)["fields"][0]["type"] == {"kind": "int", "min": 10}
+    codec = compile(outer, validate=False, plan=plan)
+    assert codec.ir["fields"][0]["type"]["fields"][0]["type"] == {"kind": "int"}
+    instance = outer(a={"x": max(10, lower_bound)})
+    assert instance.a.x == max(10, lower_bound) - 100
+    assert codec.decode(codec.encode(instance)) == instance.model_dump()
+    assert codec.decode_body(codec.encode_body(instance)) == instance.model_dump()
+
+
+def test_model_schema_comparison_resolves_nested_and_recursive_definitions():
+    child = {"type": "definition-ref", "schema_ref": "node"}
+    node = {"type": "nullable", "schema": child, "ref": "node"}
+    leaf = {"type": "int", "ge": 10, "ref": "leaf"}
+    referenced = {"type": "definitions", "schema": {
+        "type": "list", "items_schema": child,
+        "metadata": ({"type": "definitions", "schema": {
+            "type": "definition-ref", "schema_ref": "leaf",
+        }, "definitions": [leaf]}, leaf),
+    }, "definitions": [node, leaf]}
+    inlined = {"metadata": (leaf, leaf), "items_schema": node, "type": "list"}
+    assert _same_schema(referenced, inlined, {}, {})
+    changed = deepcopy(inlined)
+    changed["metadata"][0]["ge"] = 999
+    assert not _same_schema(referenced, changed, {}, {})
+    # Independent registries must not let the model's own definition hide edits.
+    assert not _same_schema(child, child, {"node": leaf}, {"node": {**leaf, "ge": 0}})
+
+
+@pytest.mark.parametrize("alias", [False, True])
+def test_model_schema_comparison_matches_reference_cycles_by_name(alias):
+    ref = {"type": "definition-ref", "schema_ref": "node"}
+    definitions = {"node": ref}
+    if alias:
+        definitions = {"node": {"type": "definition-ref", "schema_ref": "alias"}, "alias": ref}
+    assert _same_schema(ref, ref, definitions, definitions)
+    other = {"type": "definition-ref", "schema_ref": "other"}
+    assert not _same_schema(ref, other, definitions, {"other": other})
+
+
+def test_model_schema_comparison_is_iterative_for_deep_descendants():
+    inlined = {"type": "int", "ge": 10, "ref": "leaf"}
+    definitions = {"leaf": inlined}
+    referenced = {"type": "definition-ref", "schema_ref": "leaf"}
+    for index in range(1500):
+        name = f"node{index}"
+        inlined = {"type": "nullable", "schema": inlined, "ref": name}
+        definitions[name] = {"type": "nullable", "schema": referenced, "ref": name}
+        referenced = {"type": "definition-ref", "schema_ref": name}
+    assert _same_schema(referenced, inlined, definitions, {})
+    assert not _same_schema(referenced, inlined, {**definitions, "leaf": {
+        "type": "int", "ge": 999, "ref": "leaf",
+    }}, {})
+
+
+@pytest.mark.parametrize("sequence", [False, True])
+def test_model_schema_comparison_rejects_unnamed_container_cycles(sequence):
+    schema = {"type": "int", "ge": 10}
+    schema["metadata"] = [schema] if sequence else schema
+    with pytest.raises(_SchemaMismatch):
+        _same_schema(schema, schema, {}, {})
 
 
 @pytest.mark.parametrize("plan", ["row", "columnar"])

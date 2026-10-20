@@ -127,22 +127,112 @@ def _model_validator(schema: dict[str, Any], model: type[BaseModel]) -> bool:
     )
 
 
+def _normalize_schema(schema: Any, definitions: dict[str, Any]) -> Any:
+    # Expand references on each path independently. Recursive references retain
+    # their names, while container cycles without a schema reference cannot match.
+    definitions = definitions.copy()
+    result: list[Any] = [None]
+    tasks: list[tuple[str, Any, Any, Any]] = [("visit", schema, result, 0)]
+    active_refs: set[str] = set()
+    active_containers: set[int] = set()
+    while tasks:
+        action, value, parent, key = tasks.pop()
+        if action == "leave-ref":
+            active_refs.remove(value)
+            continue
+        if action == "leave-container":
+            active_containers.remove(value)
+            continue
+        if action == "tuple":
+            parent[key] = tuple(parent[key])
+            continue
+        resolved_refs: set[str] = set()
+        seen: set[int] = set()
+        recursive_ref = None
+        while isinstance(value, dict) and value.get("type") in ("definitions", "definition-ref"):
+            if value["type"] == "definition-ref" and value["schema_ref"] in active_refs:
+                recursive_ref = value["schema_ref"]
+                break
+            if id(value) in seen:
+                raise _SchemaMismatch
+            seen.add(id(value))
+            if value["type"] == "definitions":
+                definitions.update((item["ref"], item) for item in value["definitions"])
+                value = value["schema"]
+            else:
+                ref = value["schema_ref"]
+                active_refs.add(ref)
+                resolved_refs.add(ref)
+                tasks.append(("leave-ref", ref, None, None))
+                value = definitions[ref]
+        if isinstance(value, dict) and "type" in value and "ref" in value:
+            ref = value["ref"]
+            if ref in active_refs and ref not in resolved_refs:
+                recursive_ref = ref
+            elif ref not in active_refs:
+                active_refs.add(ref)
+                tasks.append(("leave-ref", ref, None, None))
+        if recursive_ref is not None:
+            parent[key] = {"type": "definition-ref", "schema_ref": recursive_ref}
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            if id(value) in active_containers:
+                raise _SchemaMismatch
+            active_containers.add(id(value))
+            tasks.append(("leave-container", id(value), None, None))
+            if isinstance(value, dict):
+                normalized: Any = {}
+                children: typing.Iterable[tuple[Any, Any]] = value.items()
+            else:
+                normalized = [None] * len(value)
+                children = enumerate(value)
+                if isinstance(value, tuple):
+                    tasks.append(("tuple", None, parent, key))
+            parent[key] = normalized
+            tasks.extend(("visit", child, normalized, child_key) for child_key, child in children)
+        else:
+            parent[key] = value
+    return result[0]
+
+
+def _same_schema(
+    left: Any, right: Any, definitions: dict[str, Any], own_definitions: dict[str, Any],
+) -> bool:
+    pending = [(_normalize_schema(left, definitions), _normalize_schema(right, own_definitions))]
+    while pending:
+        left, right = pending.pop()
+        if isinstance(left, dict) and isinstance(right, dict):
+            if left.keys() != right.keys():
+                return False
+            pending.extend((value, right[key]) for key, value in left.items())
+        elif isinstance(left, (list, tuple)) and type(left) is type(right):
+            if len(left) != len(right):
+                return False
+            pending.extend(zip(left, right))
+        elif isinstance(left, (dict, list, tuple)) or isinstance(right, (dict, list, tuple)) or left != right:
+            return False
+    return True
+
+
 def _unwrap_model_validators(
     schema: dict[str, Any], own_schema: Any, model: type[BaseModel], definitions: dict[str, Any],
 ) -> dict[str, Any]:
     # Match the complete installed stack so an extra field wrapper using the
     # same callable as a model validator still forms a field-level barrier.
+    own_definitions = definitions.copy()
     seen: set[int] = set()
     while True:
-        own_schema = _resolve_schema(own_schema, definitions)
+        own_schema = _resolve_schema(own_schema, own_definitions)
         schema = _resolve_schema(schema, definitions)
         if id(schema) in seen or schema["type"] != own_schema["type"]:
             raise _SchemaMismatch
         seen.add(id(schema))
         if schema["type"] == "model":
-            # Class identity anchors the complete validator stack even when
-            # Pydantic replaces shared descendants with definition references.
             if schema.get("cls") is not model or own_schema.get("cls") is not model:
+                raise _SchemaMismatch
+            # Pydantic can inline shared descendants in the model's own schema.
+            # Only reference layout may differ, not the wrapped model body.
+            if not _same_schema(schema, own_schema, definitions, own_definitions):
                 raise _SchemaMismatch
             return schema
         if not schema["type"].startswith("function-") or not _model_validator(schema, model):
