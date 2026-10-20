@@ -210,6 +210,14 @@
         "json": "1"
       },
       {
+        "name": "float-negative-zero",
+        "ir": {
+          "kind": "float64"
+        },
+        "value": -0.0,
+        "json": "0"
+      },
+      {
         "name": "float-1e-6",
         "ir": {
           "kind": "float64"
@@ -656,6 +664,17 @@
       "name": "content-length-plus-ignored",
       "contentType": "application/json",
       "contentLength": "+2",
+      "maxBytes": 1,
+      "hex": "30",
+      "expected": {
+        "kind": "json",
+        "value": 0
+      }
+    },
+    {
+      "name": "content-length-leading-zeros-within-bound",
+      "contentType": "application/json",
+      "contentLength": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
       "maxBytes": 1,
       "hex": "30",
       "expected": {

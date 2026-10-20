@@ -115,8 +115,8 @@ floating-point representation.
 
 The JSON spelling is not part of the contract: whitespace, key order and
 number spelling may differ between writers. Values compared under a codec
-are compared as parsed values, with numbers as binary64. JSON does not
-preserve the sign of zero, so `-0` and `0` compare equal; a `float64` negative
+are compared as parsed values, with numbers as binary64. For this
+comparison, `-0` and `0` are equal; a `float64` negative
 zero is canonicalized to positive zero on encode anyway (wire-v0 §4.5).
 
 A client decoding a JSON response MUST decode the body as strict UTF-8
@@ -193,8 +193,10 @@ that applies wins:
    HTAB, the value is a non-empty run of ASCII digits and its value exceeds
    the bound, the server MUST reject with `413` before reading the body.
    Otherwise the header MUST be ignored for this purpose: it neither
-   rejects nor exempts, and the bound is enforced on bytes received. A digit
-   run too long for the host integer type exceeds any bound.
+   rejects nor exempts, and the bound is enforced on bytes received. The
+   digit run's decimal value is compared with the bound without overflow:
+   leading zeros do not change it, and a value too large for the host
+   integer type exceeds the bound.
 3. A hyperfly body is shorter than the envelope header, or its magic or major
    is wrong (wire-v0 §2): `400 Bad Request`.
 4. A hyperfly body arrives with a `Hyperfly-Codec` header whose value, with
