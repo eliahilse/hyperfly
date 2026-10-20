@@ -144,7 +144,7 @@ export function validateIR(node: IRNode, path = "$"): void {
   }
 }
 
-/** Whether one element of this type always consumes at least one bit on the wire. */
+/** False exactly for the zero-bit types of wire-v0 §6, which the one-bit floor does not cover. */
 export function hasPayload(node: IRNode): boolean {
   switch (node.kind) {
     case "literal":

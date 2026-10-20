@@ -2,7 +2,7 @@ import { fingerprintOf, serializeArtifact, toHex, type PlanLayout } from "./cano
 import { defaultPackHooks } from "./pack.js";
 import { indexProfile, validateProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
-import { encodeNode } from "./encode.js";
+import { checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError } from "./errors.js";
 import { validateIR, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
@@ -69,17 +69,22 @@ export function compileIR<T = unknown>(ir: IRNode, options: CompileOptions = {})
 
   const encodeBody = (value: T): Uint8Array => {
     const w = new Writer();
-    encodeNode(w, ir, value, "$", 0, {
+    const ctx: EncodeCtx = {
       maxDepth: limits.maxDepth,
       maxItems: limits.maxItems,
       maxByteLength: limits.maxByteLength,
       maxAmplification: limits.maxAmplification,
+      maxTotalItems: limits.maxTotalItems,
+      items: 0,
       columnar,
       deflate: pack.deflate,
       canInflate: pack.inflate !== undefined,
       profile: profileIndex,
-    });
-    return w.finish();
+    };
+    encodeNode(w, ir, value, "$", 0, ctx);
+    const body = w.finish();
+    checkItemBudget(ctx, body.length);
+    return body;
   };
 
   const decodeBody = (bytes: Uint8Array): T => {

@@ -197,8 +197,10 @@ describe("columnar seeded properties", () => {
         };
       });
       const ir: IRNode = { kind: "array", element: { kind: "struct", fields } };
-      const col = compileIR(ir, { plan: "columnar" });
-      const row = compileIR(ir);
+      // up to 39 rows of literal-only columns encode to no payload at all
+      const limits = { maxAmplification: 40 };
+      const col = compileIR(ir, { plan: "columnar", limits });
+      const row = compileIR(ir, { limits });
 
       const rowCount = Math.floor(rng() * 40);
       const value = Array.from({ length: rowCount }, () => {
@@ -226,7 +228,9 @@ describe("columnar seeded properties", () => {
     };
     const value = Array.from({ length: 500 }, (_, i) => ({ t: 1735689600000 + i * 300000 }));
     const row = compileIR(ir).encodeBody(value);
-    const col = compileIR(ir, { plan: "columnar" }).encodeBody(value);
+    // a constant step packs 500 rows into 11 bytes, past the default amplification bound
+    expect(() => compileIR(ir, { plan: "columnar" }).encodeBody(value)).toThrow("amplification");
+    const col = compileIR(ir, { plan: "columnar", limits: { maxAmplification: 64 } }).encodeBody(value);
     expect(col.length).toBeLessThan(row.length * 0.55);
   });
 });
