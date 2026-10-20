@@ -282,9 +282,9 @@ then the old codec can be removed once its traffic reaches zero. A new profile i
 
 ## Limits
 
-A few bytes of columnar or profiled body can describe millions of rows or megabytes of text, so a decoder bounds the
-work any input can demand. `DecodeLimits` follow [wire v0 §6](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md)
-and apply to encoding as well (`DEFAULT_LIMITS` holds the defaults):
+A few bytes of columnar or profiled body can describe millions of rows or megabytes of text, so codecs bound the
+work any input can demand. `Limits` follow [wire v0 §6](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md)
+and apply to encoding and decoding (`DEFAULT_LIMITS` holds the defaults):
 
 | Limit | Default | Bounds |
 |---|---|---|
@@ -341,7 +341,7 @@ try {
   codec.decode(bytes);
 } catch (error) {
   if (!(error instanceof HyperflyError)) throw error;
-  if (error.code === "limit" || error.code === "depth") console.warn("over the decode limits", error.message);
+  if (error.code === "limit" || error.code === "depth") console.warn("over the limits", error.message);
   else console.warn(`malformed body (${error.code})`, error.cause ?? error.message);
 }
 ```
@@ -375,7 +375,7 @@ ESM only, three entry points:
 
 - `hyperfly`: the codec. `compileIR`, `CodecRegistry`, `train`, `defaultPackHooks`, `serializeArtifact`,
   `validateIR`, `validateProfile`, `DEFAULT_LIMITS`, the error classes, and the `Codec`, `CompileOptions`,
-  `DecodeLimits`, `PackHooks`, `Profile`, `IRNode` and related types.
+  `Limits`, `PackHooks`, `Profile`, `IRNode` and related types.
 - `hyperfly/zod`: `compile` and `toIR` for Zod 4 schemas, with `InferOutput` and `ZodCompileOptions`. The only entry
   point that needs `zod`.
 - `hyperfly/http`: negotiation (`negotiate`, `encodeFor`, `respond`, `parseAccept`, `acceptHeader`), bodies
@@ -439,7 +439,7 @@ production traffic has been measured yet.
   is parsed; it never misreads.
 - **Canonical output.** Encoding is canonical for a given implementation, version and set of pack hooks;
   decoding what it emitted and encoding the result again reproduces the same bytes.
-- **Bounded decoding.** Nesting, item counts and byte lengths are limited. Per-body
+- **Bounded encoding and decoding.** Nesting, item counts and byte lengths are limited. Per-body
   item and byte budgets bound the sum of all array counts and of all decoded string
   and bytes lengths, and amplification bounds cap how many rows or bytes a hostile
   byte can demand, even when a constant column packs to zero bits.

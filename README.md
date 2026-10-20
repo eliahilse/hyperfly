@@ -57,7 +57,7 @@ implementation ports against [the golden vectors](spec/vectors), not against thi
 code.
 
 - [wire v0](spec/wire-v0.md) — envelope, varints, bitmaps, node encodings, canonical
-  artifacts, decoder limits
+  artifacts, limits
 - [plan columnar v5](spec/plan-columnar-v5.md) — column layout, frame-of-reference
   bit packing, scaled-decimal and XOR numerics, packed text, trained dictionaries,
   grammar lanes, derived columns

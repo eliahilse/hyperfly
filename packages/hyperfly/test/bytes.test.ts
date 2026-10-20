@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import vectors from "../../../spec/vectors/bytes.json" with { type: "json" };
-import { compileIR, DEFAULT_LIMITS, type DecodeLimits, type IRNode, type Profile } from "../src/index.js";
+import { compileIR, DEFAULT_LIMITS, type Limits, type IRNode, type Profile } from "../src/index.js";
 import { toHex } from "../src/canonical.js";
 import { HyperflyError } from "../src/errors.js";
 
@@ -8,7 +8,7 @@ interface ByteVector {
   name: string;
   plan: string;
   ir: unknown;
-  limits?: Partial<DecodeLimits>;
+  limits?: Partial<Limits>;
   profile?: unknown;
   inflate?: boolean;
   value?: unknown;
@@ -179,7 +179,7 @@ describe("byte budget charge points", () => {
 
   test("a dictionary hit is charged after its code range and maxByteLength checks", () => {
     const profile = { version: 1 as const, shared: { columns: [{ leaf: 0, dict: ["abcd"] }] } };
-    const at = (limits: Partial<DecodeLimits>) => compileIR(STRINGS, { plan: "columnar", profile, limits });
+    const at = (limits: Partial<Limits>) => compileIR(STRINGS, { plan: "columnar", profile, limits });
     expect(codeOf(() => at({ maxTotalBytes: 0 }).decodeBody(fromHex("01010202")))).toBe("range");
     expect(messageOf(() => at({ maxTotalBytes: 3 }).decodeBody(fromHex("01010101")))).toContain("byte budget");
     expect(messageOf(() => at({ maxTotalBytes: 3, maxByteLength: 3 }).decodeBody(fromHex("01010101")))).toContain(
@@ -193,7 +193,7 @@ describe("byte budget charge points", () => {
       version: 2 as const,
       shared: { columns: [{ leaf: 0, grammar: [{ lit: "id-" }, { num: { base: 10 as const, len: 2, case: "lower" as const } }] }] },
     };
-    const at = (limits: Partial<DecodeLimits> = {}) => compileIR(STRINGS, { plan: "columnar", profile, limits });
+    const at = (limits: Partial<Limits> = {}) => compileIR(STRINGS, { plan: "columnar", profile, limits });
 
     test("each matched row is charged its rendered length", () => {
       expect(at({ maxTotalBytes: 10 }).decodeBody(fromHex("020300000107"))).toEqual([{ s: "id-01" }, { s: "id-07" }]);
