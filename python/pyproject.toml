@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hyperfly"
-version = "1.0.0"
+version = "1.0.1"
 description = "Binary compression for typed APIs. Schema-compiled codecs with a fingerprinted wire format and transparent JSON fallback."
 readme = "README.md"
 license = "Apache-2.0"

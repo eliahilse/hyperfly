@@ -1,5 +1,11 @@
 # @hyperfly/python
 
+## 1.0.1
+
+### Patch Changes
+
+- 0093656: Decode Python payloads faster while preserving wire compatibility and validation errors. Encode behavior and supported Python versions remain unchanged.
+
 ## 1.0.0
 
 ### Major Changes
