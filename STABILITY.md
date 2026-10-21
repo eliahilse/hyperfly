@@ -24,7 +24,7 @@ add API and options. Patch releases fix bugs.
 
 Error codes are part of each package's public API. These include `limit`,
 `depth`, `ir` and `fingerprint`; TypeScript and Python also expose `options`,
-`validation` and `json`. Message text is not part of the contract.
+`validation` and `json`, and TypeScript exposes `artifact` for artifact loading. Message text is not part of the contract.
 Match on the code rather than the message.
 
 HTTP request failures are also part of the contract: the status codes

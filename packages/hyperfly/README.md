@@ -494,6 +494,16 @@ A future implementation ports against the
 [golden vectors](https://github.com/eliahilse/hyperfly/tree/main/spec/vectors), not
 against this code.
 
+## Stability
+
+From 1.0.0 this package follows semver. The wire format, IR, fingerprints, error
+codes, limits and negotiation are frozen for 1.x
+([wire v0, Stability](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md#stability)).
+[STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md) covers
+what counts as breaking, and
+[SECURITY.md](https://github.com/eliahilse/hyperfly/blob/main/SECURITY.md) covers
+vulnerability reporting.
+
 ## License
 
 [Apache License 2.0](./LICENSE)
