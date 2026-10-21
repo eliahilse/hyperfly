@@ -160,10 +160,25 @@ function jsonAt(cause: unknown, key: string): never {
   throw cause;
 }
 
+const jsonTypedArrayToBase64 = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "toBase64")?.value as ((this: Uint8Array) => string) | undefined;
+const jsonTypedArrayBuffer = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype) as object, "buffer")!.get!;
+
 function base64(bytes: Uint8Array): string {
+  // Native encoding reads and validates the typed-array slots directly.
+  if (typeof jsonTypedArrayToBase64 === "function") return jsonTypedArrayToBase64.call(bytes);
+  // The copy constructor validates the view and copies slots without reading
+  // user-provided length, iterator, constructor, or subarray properties.
+  const copy = new Uint8Array(bytes);
+  const length = byteLengthOf(copy);
+  if (length < 32) {
+    let raw = "";
+    for (let i = 0; i < length; i++) raw += String.fromCharCode(copy[i]!);
+    return btoa(raw);
+  }
+  const buffer = jsonTypedArrayBuffer.call(copy) as ArrayBuffer;
   const chunks: string[] = [];
-  for (let start = 0; start < bytes.length; start += 0x8000) {
-    chunks.push(String.fromCharCode(...bytes.subarray(start, start + 0x8000)));
+  for (let start = 0; start < length; start += 0x8000) {
+    chunks.push(String.fromCharCode(...new Uint8Array(buffer, start, Math.min(0x8000, length - start))));
   }
   return btoa(chunks.join(""));
 }
@@ -331,9 +346,29 @@ const bufferByteLengths = [ArrayBuffer, globalThis.SharedArrayBuffer]
   .filter((type) => typeof type === "function")
   .map((type) => Object.getOwnPropertyDescriptor(type.prototype, "byteLength")!.get!);
 
-/** The intrinsic getters recognize raw storage, shared or not, from other realms without trusting its tag. */
-function isRawArrayBuffer(value: object): boolean {
-  if (!("byteLength" in value)) return false;
+interface JsonIntrinsics {
+  isProxy(value: unknown): boolean;
+  isBoxedPrimitive?(value: unknown): boolean;
+}
+
+/** Runtime slot checks keep the preflight free of observable Proxy traps. */
+function jsonIntrinsics(): JsonIntrinsics | undefined {
+  const get = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule;
+  try {
+    const types = (get?.("node:util") as { types?: JsonIntrinsics } | undefined)?.types;
+    if (typeof types?.isProxy === "function") return types;
+  } catch {
+    // Native JSON traversal remains available without runtime Proxy detection.
+  }
+  return undefined;
+}
+
+const jsonSlots = jsonIntrinsics();
+const TypedArray = Object.getPrototypeOf(Uint8Array) as typeof Uint8Array;
+
+/** Intrinsic getters also recognize storage with a null prototype and storage from other realms. */
+function isRawArrayBuffer(value: object, prototype: object | null): boolean {
+  if (prototype === Object.prototype || prototype === Array.prototype) return false;
   for (const byteLength of bufferByteLengths) {
     try {
       byteLength.call(value);
@@ -345,14 +380,26 @@ function isRawArrayBuffer(value: object): boolean {
   return false;
 }
 
+/** Slot checks run first; a byte prototype without slots identifies a proxied or fabricated receiver. */
+function isProxiedByteStorage(value: object, prototype: object | null): boolean {
+  return prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null
+    && (value instanceof TypedArray || value instanceof ArrayBuffer || value instanceof DataView
+      || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer));
+}
+
 /** A bounded preflight keeps ordinary data on the native JSON.stringify fast path. */
-function mayContainBytes(value: object, depth = 0): boolean {
-  if (depth === 128 || ArrayBuffer.isView(value) || "toJSON" in value || isRawArrayBuffer(value)) return true;
+function mayContainBytes(value: object, state: { proxy: boolean }, depth = 0): boolean {
+  if (jsonSlots?.isProxy(value)) { state.proxy = true; return true; }
+  if (depth === 128 || ArrayBuffer.isView(value)) return true;
+  const prototype: object | null = Object.getPrototypeOf(value);
+  if (isRawArrayBuffer(value, prototype)) return true;
+  if (isProxiedByteStorage(value, prototype)) { state.proxy = true; return true; }
+  if ("toJSON" in value) return true;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
       const item: unknown = value[i];
       if (typeof item === "object" && item !== null) {
-        if (mayContainBytes(item, depth + 1)) return true;
+        if (mayContainBytes(item, state, depth + 1)) return true;
       } else if (typeof item === "function" || typeof item === "bigint") return true;
     }
   } else {
@@ -360,41 +407,141 @@ function mayContainBytes(value: object, depth = 0): boolean {
       if (!Object.hasOwn(value, key)) continue;
       const item: unknown = (value as Record<string, unknown>)[key];
       if (typeof item === "object" && item !== null) {
-        if (mayContainBytes(item, depth + 1)) return true;
+        if (mayContainBytes(item, state, depth + 1)) return true;
       } else if (typeof item === "function" || typeof item === "bigint") return true;
     }
   }
   return false;
 }
 
+/** JSON unboxes only these four internal-slot types, even across realms or with altered prototypes. */
+function unboxJson(value: object): unknown {
+  if (jsonSlots?.isBoxedPrimitive?.(value) === false) return value;
+  let number = false;
+  try { Number.prototype.valueOf.call(value); number = true; } catch { /* Not a Number wrapper. */ }
+  if (number) return +(value as unknown as number);
+  let string = false;
+  try { String.prototype.valueOf.call(value); string = true; } catch { /* Not a String wrapper. */ }
+  if (string) return `${value as unknown as string}`;
+  try { return Boolean.prototype.valueOf.call(value); } catch { /* Not a Boolean wrapper. */ }
+  try { return BigInt.prototype.valueOf.call(value); } catch { /* Not a BigInt wrapper. */ }
+  return value;
+}
+
+/** SerializeProperty in JSON order, retaining the single Get before toJSON so bytes cannot be hidden. */
+function stringifyWithBytes(input: unknown): string | undefined {
+  const ancestors = new Set<object>();
+  const path: (string | number)[] = [];
+  function fail(message: string, cause?: unknown): never {
+    throw new EncodeError("json", `$${path.map((key) => typeof key === "number" ? `[${key}]` : `.${key}`).join("")}: ${message}`, { cause });
+  }
+  function byteValue(value: object): string | undefined {
+    if (ArrayBuffer.isView(value)) {
+      if (isUint8Array(value)) {
+        try { return base64(value); } catch (cause) { fail("detached or out-of-bounds Uint8Array", cause); }
+      }
+      fail("unsupported byte storage or view; use Uint8Array");
+    }
+    const prototype: object | null = Object.getPrototypeOf(value);
+    if (isRawArrayBuffer(value, prototype)) fail("unsupported byte storage or view; use Uint8Array");
+    if (isProxiedByteStorage(value, prototype)) {
+      fail("proxied byte storage or view; pass the Uint8Array itself");
+    }
+    return undefined;
+  }
+  function serialize(original: unknown, key: string): unknown {
+    let value = original;
+    // Reject slot-less byte receivers before invoking methods such as Buffer.toJSON.
+    if (typeof original === "object" && original !== null && !ArrayBuffer.isView(original)) {
+      const prototype: object | null = Object.getPrototypeOf(original);
+      if (!isRawArrayBuffer(original, prototype) && isProxiedByteStorage(original, prototype)) {
+        fail("proxied byte storage or view; pass the Uint8Array itself");
+      }
+    }
+    if ((typeof value === "object" && value !== null) || typeof value === "function" || typeof value === "bigint") {
+      const toJSON: unknown = (value as { toJSON?: unknown }).toJSON;
+      if (typeof toJSON === "function") value = Reflect.apply(toJSON, value, [key]);
+      if (typeof original === "object" && original !== null) {
+        const bytes = byteValue(original);
+        if (bytes !== undefined) return bytes;
+      }
+    }
+    if (typeof value === "object" && value !== null) {
+      if (value !== original) {
+        const bytes = byteValue(value);
+        if (bytes !== undefined) return bytes;
+      }
+      value = unboxJson(value);
+    }
+    if (typeof value === "function" || typeof value === "symbol") return undefined;
+    if (typeof value === "bigint") throw new TypeError("Do not know how to serialize a BigInt");
+    if (typeof value !== "object" || value === null) return value;
+    if (ancestors.has(value)) throw new TypeError("Converting circular structure to JSON");
+    ancestors.add(value);
+    if (Array.isArray(value)) {
+      const length = Math.min(Math.max(Math.trunc(+(value.length as number)), 0) || 0, Number.MAX_SAFE_INTEGER);
+      const output: unknown[] = new Array(length);
+      Object.setPrototypeOf(output, null);
+      for (let i = 0; i < length; i++) {
+        path.push(i);
+        output[i] = serialize(value[i], String(i));
+        path.pop();
+      }
+      ancestors.delete(value);
+      return output;
+    }
+    const output = Object.create(null) as Record<string, unknown>;
+    for (const name of Object.keys(value)) {
+      path.push(name);
+      const item = serialize((value as Record<string, unknown>)[name], name);
+      path.pop();
+      output[name] = item;
+    }
+    ancestors.delete(value);
+    return output;
+  }
+  return JSON.stringify(serialize(input, ""));
+}
+
 /** JSON.stringify owns traversal and toJSON behavior; bytes convert independently of the schema. */
 function jsonReplacer() {
   const parents = new WeakMap<object, { holder: object; key: string }>();
-  function unsupported(holder: object, key: string): never {
+  function unsupported(holder: object, key: string, proxied = false, cause?: unknown): never {
     let path = "";
     for (let parent = parents.get(holder); parent; parent = parents.get(holder)) {
       path = (Array.isArray(holder) ? `[${key}]` : `.${key}`) + path;
       holder = parent.holder;
       key = parent.key;
     }
-    throw new EncodeError("json", `$${path}: unsupported byte storage or view; use Uint8Array`);
+    const message = cause !== undefined ? "detached or out-of-bounds Uint8Array"
+      : proxied ? "proxied byte storage or view; pass the Uint8Array itself"
+      : "unsupported byte storage or view; use Uint8Array";
+    throw new EncodeError("json", `$${path}: ${message}`, { cause });
   }
   return function (this: object, key: string, value: unknown): unknown {
     // toJSON runs first, so inspect the original as well to recognize Buffer and byte subclasses.
     const original: unknown = Reflect.get(this, key);
     if (typeof original === "object" && original !== null && original !== value) {
       if (ArrayBuffer.isView(original)) {
-        if (isUint8Array(original)) return base64(original);
+        if (isUint8Array(original)) {
+          try { return base64(original); } catch (cause) { unsupported(this, key, false, cause); }
+        }
         unsupported(this, key);
       }
-      if (isRawArrayBuffer(original)) unsupported(this, key);
+      const prototype: object | null = Object.getPrototypeOf(original);
+      if (isRawArrayBuffer(original, prototype)) unsupported(this, key);
+      if (isProxiedByteStorage(original, prototype)) unsupported(this, key, true);
     }
     if (typeof value === "object" && value !== null) {
       if (ArrayBuffer.isView(value)) {
-        if (isUint8Array(value)) return base64(value);
+        if (isUint8Array(value)) {
+          try { return base64(value); } catch (cause) { unsupported(this, key, false, cause); }
+        }
         unsupported(this, key);
       }
-      if (isRawArrayBuffer(value)) unsupported(this, key);
+      const prototype: object | null = Object.getPrototypeOf(value);
+      if (isRawArrayBuffer(value, prototype)) unsupported(this, key);
+      if (isProxiedByteStorage(value, prototype)) unsupported(this, key, true);
       parents.set(value, { holder: this, key });
     }
     return value;
@@ -416,9 +563,11 @@ function parseJson<T>(text: string, registry: CodecRegistry<T>): T {
 function jsonBody(value: unknown): string {
   let body: string | undefined;
   try {
-    const needsReplacer = typeof value === "object" && value !== null
-      ? mayContainBytes(value) : typeof value === "function" || typeof value === "bigint";
-    body = needsReplacer ? JSON.stringify(value, jsonReplacer()) : JSON.stringify(value);
+    const state = { proxy: false };
+    const needsConversion = typeof value === "object" && value !== null
+      ? mayContainBytes(value, state) : typeof value === "function" || typeof value === "bigint";
+    body = state.proxy ? stringifyWithBytes(value)
+      : needsConversion ? JSON.stringify(value, jsonReplacer()) : JSON.stringify(value);
   } catch (cause) {
     if (isInstance(cause, EncodeError) && cause.code === "json") throw cause;
     throw new EncodeError("json", `$: ${messageOf(cause, "value could not be encoded as JSON")}`, { cause });
@@ -427,7 +576,11 @@ function jsonBody(value: unknown): string {
   return body;
 }
 
-/** Encode one value according to a negotiation decision; JSON bytes are schema-independent. */
+/**
+ * Encode one value according to a negotiation decision; JSON bytes are schema-independent.
+ * On the JSON fallback path an accessor property may be read twice; a getter that
+ * returns a different value per read serializes the later one.
+ */
 export function encodeFor<T>(decision: Negotiation<T>, value: NoInfer<T>, options: EncodeOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
     try {
@@ -735,6 +888,8 @@ export interface RespondOptions extends NegotiateOptions, EncodeOptions {
  * Answer one request with `value`, in binary when the client can read it. Fetch-API
  * glue: one function covers Hono, Cloudflare Workers, Bun.serve, Deno and Next route
  * handlers, because they all speak Request and Response.
+ * On the JSON fallback path an accessor property may be read twice; a getter that
+ * returns a different value per read serializes the later one.
  */
 export function respond<T>(
   request: Request,
