@@ -4,7 +4,7 @@ import { DecodeError, EncodeError } from "./errors.js";
 import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
-import { isUint8Array } from "./typed-array.js";
+import { byteLengthOf, copyBytes, isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -783,6 +783,7 @@ function encodeStringColumn(
   }
 
   let packed: Uint8Array | null = null;
+  let packedLength = 0;
   let packedCost = Infinity;
   const totalBytes = bytes.reduce((n, value) => n + value.length, 0);
   // §3: the deflate mode's total length obeys the byte limits, so a
@@ -792,7 +793,7 @@ function encodeStringColumn(
     const concat = new Uint8Array(total);
     let offset = 0;
     for (const value of bytes) {
-      concat.set(value, offset);
+      copyBytes(concat, value, offset);
       offset += value.length;
     }
     try {
@@ -803,10 +804,11 @@ function encodeStringColumn(
     if (!isUint8Array(packed)) {
       throw new EncodeError("packed", `${path}: deflate hook must return a Uint8Array`);
     }
+    packedLength = byteLengthOf(packed);
     packedCost =
       bytes.reduce((n, value) => n + ulebLen(BigInt(value.length)), 0) +
-      ulebLen(BigInt(packed.length)) +
-      packed.length;
+      ulebLen(BigInt(packedLength)) +
+      packedLength;
   }
 
   const grammar = ctx.profile.grammarOf(ordinal);
@@ -867,8 +869,8 @@ function encodeStringColumn(
   }
   if (mode === 0x02) {
     for (const value of bytes) writeUleb(w, BigInt(value.length));
-    writeUleb(w, BigInt(packed!.length));
-    w.bytes(packed!);
+    writeUleb(w, BigInt(packedLength));
+    w.bytes(packed!, packedLength);
     return;
   }
   if (mode === 0x03) {

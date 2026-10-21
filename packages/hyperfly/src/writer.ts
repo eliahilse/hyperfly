@@ -1,3 +1,5 @@
+import { byteLengthOf, copyBytes } from "./typed-array.js";
+
 export class Writer {
   private buf: Uint8Array;
   private len = 0;
@@ -17,7 +19,7 @@ export class Writer {
     let next = this.buf.length * 2;
     while (next < this.len + extra) next *= 2;
     const grown = new Uint8Array(next);
-    grown.set(this.buf.subarray(0, this.len));
+    copyBytes(grown, this.buf.subarray(0, this.len), 0);
     this.buf = grown;
     this.view = new DataView(grown.buffer);
   }
@@ -27,10 +29,10 @@ export class Writer {
     this.buf[this.len++] = byte;
   }
 
-  bytes(data: Uint8Array): void {
-    this.ensure(data.length);
-    this.buf.set(data, this.len);
-    this.len += data.length;
+  bytes(data: Uint8Array, length = byteLengthOf(data)): void {
+    this.ensure(length);
+    copyBytes(this.buf, data, this.len);
+    this.len += length;
   }
 
   f64le(value: number): void {

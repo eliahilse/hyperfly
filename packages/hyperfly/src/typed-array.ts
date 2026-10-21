@@ -2,6 +2,7 @@
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const typedArrayTag = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
 const typedArrayByteLength = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
+const typedArraySet = Uint8Array.prototype.set;
 
 /** Whether `value` is a Uint8Array of any realm, subclasses included. */
 export function isUint8Array(value: unknown): value is Uint8Array {
@@ -11,4 +12,9 @@ export function isUint8Array(value: unknown): value is Uint8Array {
 /** The real byte length of a value `isUint8Array` accepted. */
 export function byteLengthOf(value: Uint8Array): number {
   return typedArrayByteLength.call(value) as number;
+}
+
+/** Copy internal bytes, ignoring subclass accessors, iterators and methods in either realm. */
+export function copyBytes(target: Uint8Array, source: Uint8Array, offset: number): void {
+  typedArraySet.call(target, source, offset);
 }

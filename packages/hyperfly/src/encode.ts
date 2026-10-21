@@ -2,7 +2,7 @@ import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
-import { isUint8Array } from "./typed-array.js";
+import { byteLengthOf, isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -15,7 +15,7 @@ function fail(code: ErrorCode, path: string, message: string): never {
 /** The byte length of a Uint8Array of any realm, or undefined for anything else, a Proxy included. */
 function bytesLength(value: unknown): number | undefined {
   try {
-    if (value instanceof Uint8Array || isUint8Array(value)) return value.length;
+    if (value instanceof Uint8Array || isUint8Array(value)) return byteLengthOf(value);
   } catch {
     // a proxy, or a value whose prototype cannot be read, is not bytes
   }
@@ -184,8 +184,10 @@ export function encodeNode(
       if (length === undefined) fail("type", path, "expected Uint8Array");
       if (length > ctx.maxByteLength) fail("limit", path, `bytes of ${length} exceeds the codec limit`);
       chargeBytes(length, ctx, path);
-      writeUleb(w, BigInt(length));
-      w.bytes(value as Uint8Array);
+      // Most bytes fields fit in one ULEB byte; avoid a BigInt conversion for that prefix.
+      if (length < 0x80) w.u8(length);
+      else writeUleb(w, BigInt(length));
+      w.bytes(value as Uint8Array, length);
       return;
     }
     case "literal": {

@@ -6,6 +6,8 @@ import { compileIR, FingerprintMismatchError, train, type IRNode } from "../src/
 import { toHex } from "../src/canonical.js";
 import { EncodeError, HyperflyError } from "../src/errors.js";
 import { compile } from "../src/zod.js";
+import { defaultPackHooks } from "../src/pack.js";
+import { bytesSubclasses } from "./bytes-subclasses.js";
 
 function fromHex(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
@@ -81,6 +83,19 @@ describe("packed string columns", () => {
   const prose = Array.from({ length: 40 }, (_, i) => ({
     body: `the quick brown fox jumps over the lazy dog and files report number ${i} about the same fox again`,
   }));
+
+  test.each(bytesSubclasses)("packed lengths and copies ignore overridden %s", (_, make) => {
+    const hooks = defaultPackHooks();
+    const normal = compileIR(IR, { plan: "columnar" });
+    const codec = compileIR(IR, {
+      plan: "columnar",
+      pack: { ...hooks, deflate: (bytes) => make(hooks.deflate!(bytes)) },
+    });
+    const encoded = codec.encodeBody(prose);
+    expect(encoded[1]).toBe(0x02);
+    expect(encoded).toEqual(normal.encodeBody(prose));
+    expect(codec.decodeBody(encoded)).toEqual(prose);
+  });
 
   test("prose columns pack, shrink, and round-trip", () => {
     const packedCodec = compileIR(IR, { plan: "columnar" });

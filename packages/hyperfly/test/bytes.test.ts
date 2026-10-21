@@ -4,6 +4,31 @@ import { compileIR, DEFAULT_LIMITS, type Limits, type IRNode, type Profile } fro
 import { toHex } from "../src/canonical.js";
 import { HyperflyError } from "../src/errors.js";
 import { fromHex, revive } from "./vector-values.js";
+import { bytesSubclasses } from "./bytes-subclasses.js";
+
+describe.each(["row", "columnar"] as const)("%s bytes subclasses", (plan) => {
+  test.each(bytesSubclasses)("ignores overridden %s", (_, make) => {
+    const plain = new Uint8Array([1, 2]);
+    const hostile = make(plain);
+    const shapes: [IRNode, (bytes: Uint8Array) => unknown][] = [
+      [{ kind: "bytes" }, (b) => b],
+      [{ kind: "array", element: { kind: "bytes" } }, (b) => [b, b]],
+      [{ kind: "array", element: { kind: "struct", fields: [{ name: "b", type: { kind: "bytes" } }] } }, (b) => [{ b }, { b }]],
+      [{ kind: "array", element: { kind: "struct", fields: [{ name: "b", type: { kind: "bytes" }, optional: true, nullable: true }] } }, (b) => [{}, { b: null }, { b }]],
+    ];
+    for (const [ir, value] of shapes) {
+      const codec = compileIR(ir, { plan });
+      expect(codec.encodeBody(value(hostile))).toEqual(codec.encodeBody(value(plain)));
+      expect(codec.decode(codec.encode(value(hostile)))).toEqual(value(plain));
+      for (const limits of [{ maxByteLength: 1 }, { maxTotalBytes: 1 }]) {
+        expect(() => compileIR(ir, { plan, limits }).encodeBody(value(hostile)))
+          .toThrow(expect.objectContaining({ code: "limit" }));
+      }
+    }
+    const codec = compileIR({ kind: "bytes" }, { plan });
+    expect(codec.encodeBody(make(new Uint8Array()))).toEqual(new Uint8Array([0]));
+  });
+});
 
 interface ByteVector {
   name: string;

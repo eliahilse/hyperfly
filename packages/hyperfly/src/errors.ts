@@ -45,6 +45,8 @@ export type ErrorCode =
   | "validation"
   | "options";
 
+const createdErrors = new WeakMap<HyperflyError, ErrorCode>();
+
 /** Base error carrying a stable failure code (wire-v0 §9). */
 export class HyperflyError extends Error {
   /** Machine-readable failure category; message text may vary (wire-v0 §9). */
@@ -55,12 +57,19 @@ export class HyperflyError extends Error {
     super(message, options);
     this.name = new.target.name;
     this.code = code;
+    createdErrors.set(this, code);
   }
 }
 
-/** `instanceof` for caught values: one whose prototype cannot be read, such as a revoked proxy, is not an instance. */
+/** Match a locally created error's original code without reading properties or invoking proxy traps. */
+export function hasErrorCode(value: unknown, code: ErrorCode): value is HyperflyError {
+  return createdErrors.get(value as HyperflyError) === code;
+}
+
+/** Only locally created Hyperfly errors may pass; uninspectable caught values are not instances. */
 export function isInstance<T>(value: unknown, type: abstract new (...args: never[]) => T): value is T {
   try {
+    if ((type.prototype === HyperflyError.prototype || type.prototype instanceof HyperflyError) && !createdErrors.has(value as HyperflyError)) return false;
     return value instanceof type;
   } catch {
     return false;
