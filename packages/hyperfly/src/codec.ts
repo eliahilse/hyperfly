@@ -3,7 +3,7 @@ import { defaultPackHooks } from "./pack.js";
 import { checkedProfile, indexProfile, type Profile } from "./profile.js";
 import { decodeNode } from "./decode.js";
 import { checkByteBudget, checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
-import { DecodeError, FingerprintMismatchError, HyperflyError, isInstance } from "./errors.js";
+import { DecodeError, FingerprintMismatchError, hasErrorCode, HyperflyError } from "./errors.js";
 import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type Limits } from "./reader.js";
 import { Writer } from "./writer.js";
@@ -153,7 +153,7 @@ export function checkedOptions(options: CompileOptions & { validate?: boolean })
     }
     return { limits: checkedLimits, plan: plan ?? "row", pack: checkedPack, profile, validate };
   } catch (cause) {
-    if (isInstance(cause, HyperflyError) && cause.code === "options") throw cause;
+    if (hasErrorCode(cause, "options")) throw cause;
     throw new HyperflyError("options", "options: could not read compile options", { cause });
   }
 }

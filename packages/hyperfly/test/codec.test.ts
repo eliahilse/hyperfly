@@ -751,12 +751,24 @@ describe("struct values", () => {
     expect(() => bytes.encode(make() as never)).toThrow(expect.objectContaining({ code: "type", message: "$: expected Uint8Array" }));
   });
 
-  test.todo("a bytes subclass with an overridden length is measured by its real length (deferred: PR #85 Deferred)", () => {
+  test("a bytes subclass with an overridden length is measured by its real length", () => {
     class Lying extends Uint8Array {
       override get length(): number { return 0; }
     }
     const bytes = compileIR({ kind: "bytes" });
     expect(bytes.decode(bytes.encode(new Lying([1, 2])))).toEqual(new Uint8Array([1, 2]));
+  });
+
+  test.each([
+    [127, [0x7f]], [128, [0x80, 0x01]], [16383, [0xff, 0x7f]], [16384, [0x80, 0x80, 0x01]],
+  ] as const)("bytes subclasses preserve ULEB length boundaries at %i", (length, prefix) => {
+    class Lying extends Uint8Array {
+      override get length(): number { return 0; }
+    }
+    const codec = compileIR({ kind: "bytes" });
+    const encoded = codec.encodeBody(new Lying(length).fill(7));
+    expect(encoded.subarray(0, prefix.length)).toEqual(new Uint8Array(prefix));
+    expect(codec.decodeBody(encoded)).toEqual(new Uint8Array(length).fill(7));
   });
 
   test("encodes a bytes value from another realm", () => {
