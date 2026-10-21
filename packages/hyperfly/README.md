@@ -108,6 +108,9 @@ was created, including `Buffer` and values from other realms. Raw `ArrayBuffer` 
 views (including `DataView`) raise code `json` with their path, like Python's unsupported `memoryview`;
 wrap the desired range in a `Uint8Array` to send it as bytes.
 
+On the JSON fallback path an accessor property may be read twice; a getter that returns a different value per read serializes the later one.
+Without runtime proxy detection, an empty-target Proxy that supplies `toJSON` through its `get` trap follows native `JSON.stringify` behavior.
+
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
 `respond` answers HEAD with the headers GET would get and no body, and status 204, 205 or 304 with the negotiated
