@@ -8,27 +8,44 @@ import { validateIR, withinStack, type IRNode } from "./ir.js";
 import { DEFAULT_LIMITS, Reader, type Limits } from "./reader.js";
 import { Writer } from "./writer.js";
 
+/** Envelope magic bytes `0x68 0x66` (wire-v0 §2). */
 export const MAGIC = new Uint8Array([0x68, 0x66]);
+/** Wire major stored in the envelope and canonical artifact: 1 (wire-v0 §2, wire-v0 §5). */
 export const WIRE_VERSION = 1;
+/** Envelope header length in bytes, including the 16-byte fingerprint (wire-v0 §2). */
 export const HEADER_SIZE = 19;
 
+/** Synchronous raw DEFLATE capabilities for packed string columns (plan-columnar-v5 §3). */
 export interface PackHooks {
+  /** Compresses one raw DEFLATE stream; omission disables packed-column encoding. */
   deflate?: (data: Uint8Array) => Uint8Array;
+  /** Inflates exactly one stream, rejecting trailing bytes and output above maxOutputLength; omission refuses packed columns. */
   inflate?: (data: Uint8Array, maxOutputLength: number) => Uint8Array;
 }
 
+/** Local codec policy and artifact layout selected at compile time. */
 export interface CompileOptions {
+  /** Resource caps; omitted entries use DEFAULT_LIMITS. Values must be non-negative safe integers (wire-v0 §6). */
   limits?: Partial<Limits>;
+  /** Body layout included in the fingerprint. Default: `row`. */
   plan?: PlanLayout;
+  /** Raw DEFLATE capabilities. Default: defaultPackHooks(); false disables both compression and inflation. */
   pack?: PackHooks | false;
+  /** Shared string-column model, valid only with the columnar plan. Default: none. */
   profile?: Profile;
 }
 
+/** Frozen codec whose schema, layout and shared profile determine its fingerprint (wire-v0 §5). */
 export interface Codec<T = unknown> {
+  /** Validated, cloned and deeply frozen schema. */
   readonly ir: IRNode;
+  /** Canonical artifact text identifying the wire major, plan, schema and shared profile (wire-v0 §5). */
   readonly artifact: string;
+  /** First 16 SHA-256 bytes of the artifact as 32 lowercase hex characters (wire-v0 §5). */
   readonly fingerprint: string;
+  /** Body layout fixed in the artifact. */
   readonly plan: PlanLayout;
+  /** Validated, cloned and deeply frozen training profile, when supplied. */
   readonly profile?: Profile;
   /**
    * Encode a value into an envelope. A struct value must be an object whose `Object.prototype.toString` tag is
@@ -36,8 +53,11 @@ export interface Codec<T = unknown> {
    * boxed primitives fail with `type`.
    */
   encode(value: T): Uint8Array;
+  /** Checks the envelope header and fingerprint, then decodes the complete body (wire-v0 §2). */
   decode(bytes: Uint8Array): T;
+  /** Encodes a body without the envelope header, enforcing the same value checks and limits. */
   encodeBody(value: T): Uint8Array;
+  /** Decodes a complete body without a header or fingerprint check; rejects trailing bytes. */
   decodeBody(bytes: Uint8Array): T;
 }
 
@@ -158,6 +178,10 @@ function compileArtifact(
   return { ir, profile: frozen, artifact: canonicalArtifact(ir, plan, frozen) };
 }
 
+/**
+ * Validates and snapshots an IR and optional profile into a frozen codec (wire-v0 §4, wire-v0 §5).
+ * Invalid options fail with `options`; invalid IR or profiles fail with `ir`.
+ */
 export function compileIR<T = unknown>(input: IRNode, options: CompileOptions = {}): Codec<T> {
   const { limits, plan, pack: packOptions, profile } = checkedOptions(options);
   const { ir, profile: frozenProfile, artifact } = withinStack(() => compileArtifact(input, plan, profile));

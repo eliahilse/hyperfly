@@ -16,14 +16,20 @@ interface ZodInternals {
   output?: unknown;
 }
 
+/** Structural Zod 4 schema contract accepted by the adapter. */
 export interface ZodSchemaLike {
+  /** Zod 4 schema definition, numeric metadata and inferred output marker. */
   _zod: ZodInternals;
+  /** Schema parser required by validate: true; its result is used for encoding. */
   parse?: (value: unknown) => unknown;
 }
 
+/** Inferred Zod output, or unknown when the schema has no output marker. */
 export type InferOutput<S> = S extends { _zod: { output: infer O } } ? O : unknown;
 
+/** Codec compilation options with optional Zod parsing on encode and decode. */
 export interface ZodCompileOptions extends CompileOptions {
+  /** Calls schema.parse before encoding and after decoding; decode retains the wire value. Default: false. */
   validate?: boolean;
 }
 
@@ -214,6 +220,7 @@ function nodeOf(z: ZodInternals, path: string, depth: number): IRNode {
   }
 }
 
+/** Converts supported Zod 4 constructs to portable IR; unsupported constructs fail with `unsupported` (wire-v0 §4). */
 export function toIR(schema: ZodSchemaLike): IRNode {
   const { inner, optional, nullable } = unwrap(internals(schema, "$"), "$");
   if (optional) unsupported("$", "top-level optional has no v0 encoding");
@@ -221,6 +228,10 @@ export function toIR(schema: ZodSchemaLike): IRNode {
   return nullable ? { kind: "nullable", inner: node } : node;
 }
 
+/**
+ * Compiles a supported Zod 4 schema using the compileIR defaults.
+ * With validate: true, parse failures carry code `validation` and preserve the cause.
+ */
 export function compile<S extends ZodSchemaLike>(
   schema: S,
   options: ZodCompileOptions = {},

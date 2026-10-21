@@ -45,6 +45,10 @@ function zlibInflate(zlib: ZlibLike, data: Uint8Array, maxOutputLength: number):
   return new Uint8Array(out.buffer, out.byteOffset, out.length);
 }
 
+/**
+ * Supplies raw DEFLATE hooks using node:zlib when available, with compression level 6.
+ * Otherwise supplies only the strict JavaScript inflater (plan-columnar-v5 §3).
+ */
 export function defaultPackHooks(): PackHooks {
   const zlib = builtinZlib();
   if (!zlib) return { inflate: inflateRaw };

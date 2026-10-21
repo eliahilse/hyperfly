@@ -59,6 +59,7 @@ export function serializeNode(node: IRNode): string {
   }
 }
 
+/** Artifact body layout: row v1 or columnar v5 (wire-v0 §5, plan-columnar-v5 §1). */
 export type PlanLayout = "row" | "columnar";
 
 const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 5 };
@@ -93,6 +94,7 @@ export function canonicalArtifact(
   return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
 }
 
+/** Validates and serializes canonical artifact text; layout defaults to `row`, with no profile (wire-v0 §5). */
 export function serializeArtifact(
   ir: IRNode,
   layout: PlanLayout = "row",

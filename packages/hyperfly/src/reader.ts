@@ -1,30 +1,31 @@
 import { DecodeError } from "./errors.js";
 
+/** Local encode and decode resource policy; each value must be a non-negative safe integer (wire-v0 §6). */
 export interface Limits {
+  /** Maximum enclosing struct, array and nullable nodes. Default: 64 (wire-v0 §6). */
   maxDepth: number;
+  /** Maximum elements in one fixed or variable array. Default: 2^24 (wire-v0 §6). */
   maxItems: number;
+  /** Maximum bytes per string/bytes value, packed blob or declared inflated total. Default: 2^28 (wire-v0 §6). */
   maxByteLength: number;
   /**
-   * Width-zero columns and arrays of literals legitimately encode any number of
-   * rows in a handful of bytes, so input length cannot bound such a count. This
-   * caps the work a byte of hostile input can demand instead: a count above
-   * maxAmplification * (remaining bytes + 1) is rejected, and the item budget
-   * of one body is capped at maxAmplification * (body length + 1). Local
-   * policy, like every other limit — raise it for routes that really ship
-   * millions of constant rows.
+   * Caps array counts at maxAmplification * (remaining bytes + 1) and the body item
+   * budget at maxAmplification * (body length + 1). Row arrays with nonzero-bit
+   * elements use the stricter remaining-bit bound for their counts. Default: 32 (wire-v0 §6).
    */
   maxAmplification: number;
-  /** Sum of every array count in one body, nested and sibling arrays alike (wire-v0 §6). */
+  /** Maximum sum of every array count in one body, nested and sibling arrays alike. Default: 2^24 (wire-v0 §6). */
   maxTotalItems: number;
   /**
-   * Sum of the decoded bytes of every string and bytes value in one body, including
-   * literals, enum members and profile reconstructions (wire-v0 §6).
+   * Maximum sum of decoded bytes of every string and bytes value in one body, including
+   * literals, enum members and profile reconstructions. Default: 2^26 (wire-v0 §6).
    */
   maxTotalBytes: number;
-  /** The byte budget of one body is capped at maxByteAmplification * (body length + 1). */
+  /** Caps one body's decoded bytes at maxByteAmplification * (body length + 1). Default: 64 (wire-v0 §6). */
   maxByteAmplification: number;
 }
 
+/** Frozen default resource policy for encoders and decoders (wire-v0 §6). */
 export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   maxDepth: 64,
   maxItems: 2 ** 24,
