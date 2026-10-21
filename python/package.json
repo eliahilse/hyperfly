@@ -1,6 +1,6 @@
 {
   "name": "@hyperfly/python",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0",
   "private": true,
   "description": "Release metadata for the hyperfly PyPI distribution. Changesets bumps this version and .github/scripts/sync-versions.ts writes it to pyproject.toml."
 }

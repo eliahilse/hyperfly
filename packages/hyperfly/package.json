@@ -1,6 +1,6 @@
 {
   "name": "hyperfly",
-  "version": "1.0.0-alpha.1",
+  "version": "1.0.0",
   "description": "Binary compression for typed APIs. Schema-compiled codecs with a fingerprinted wire format and transparent JSON fallback.",
   "type": "module",
   "sideEffects": false,
