@@ -77,9 +77,9 @@ describe("loadArtifact", () => {
     expect(loadArtifact(codec.artifact, codec.fingerprint.toUpperCase()).fingerprint).toBe(codec.fingerprint);
   });
 
-  test("rejects non-JSON with a json error", () => {
+  test("rejects non-JSON with an artifact error", () => {
     expect(() => loadArtifact("{", codec.fingerprint)).toThrow(HyperflyError);
-    expect(() => loadArtifact("{", codec.fingerprint)).toThrow(expect.objectContaining({ code: "json", message: expect.stringContaining("artifact is not JSON"), cause: expect.any(SyntaxError) }));
+    expect(() => loadArtifact("{", codec.fingerprint)).toThrow(expect.objectContaining({ code: "artifact", message: expect.stringContaining("artifact is not JSON"), cause: expect.any(SyntaxError) }));
   });
 
   test.each([
@@ -199,7 +199,7 @@ describe("fetchArtifact", () => {
 
   test.each([301, 403, 500])("rejects HTTP status %s", async (status) => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(null, { status })) }))
-      .rejects.toThrow(expect.objectContaining({ code: "fingerprint", message: `artifact fetch failed with status ${status}` }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact", message: `artifact fetch failed with status ${status}` }));
   });
 
   test.each(["../artifact", "g".repeat(32), `${codec.fingerprint}\n`])("rejects fingerprint %j before fetching", async (fingerprint) => {
@@ -226,7 +226,7 @@ describe("fetchArtifact", () => {
       cancel() { cancelled = true; return new Promise<void>(() => {}); },
     }, { highWaterMark: 0 });
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)), maxBytes }))
-      .rejects.toThrow(expect.objectContaining({ code: "limit" }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact" }));
     expect(cancelled).toBe(true);
     expect(pulls).toBe(maxBytes === 5 ? 2 : 1);
     expect(body.locked).toBe(false);
@@ -263,13 +263,13 @@ describe("fetchArtifact", () => {
 
   test("rejects invalid UTF-8", async () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(new Uint8Array([0xff]))) }))
-      .rejects.toThrow(expect.objectContaining({ code: "ir", message: expect.stringContaining("UTF-8") }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact", message: expect.stringContaining("UTF-8") }));
   });
 
   test("rejects stream read failures and releases the reader", async () => {
     const body = new ReadableStream<Uint8Array>({ pull() { throw new Error("aborted"); } }, { highWaterMark: 0 });
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)) }))
-      .rejects.toThrow(expect.objectContaining({ code: "ir" }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact" }));
     expect(body.locked).toBe(false);
   });
 
@@ -284,14 +284,14 @@ describe("fetchArtifact", () => {
       },
     });
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body)), maxBytes: 1 }))
-      .rejects.toThrow(expect.objectContaining({ code: "limit" }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact" }));
   });
 
   test("rejects a locked response body as unreadable", async () => {
     const response = new Response(codec.artifact);
     response.body!.getReader();
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(response) }))
-      .rejects.toThrow(expect.objectContaining({ code: "ir", message: "artifact body could not be read" }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact", message: "artifact body could not be read" }));
   });
 
   test("forwards request headers", async () => {
@@ -318,7 +318,27 @@ describe("fetchArtifact", () => {
 
   test("rejects an empty body", async () => {
     await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(null)) }))
-      .rejects.toThrow(expect.objectContaining({ code: "json", cause: expect.any(SyntaxError) }));
+      .rejects.toThrow(expect.objectContaining({ code: "artifact", cause: expect.any(SyntaxError) }));
+  });
+
+  test.each(["{", "not JSON", "\uFEFF{"])("rejects malformed fetched JSON %j as artifact", async (text) => {
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(text)) }))
+      .rejects.toThrow(expect.objectContaining({ code: "artifact", cause: expect.any(SyntaxError) }));
+  });
+
+  test.each([
+    { wire: 1, plan: { layout: "row", version: 1 }, ir: { kind: "unknown" } },
+    { wire: 1, plan: { layout: "row", version: 99 }, ir: ROWS },
+    { wire: 1, plan: { layout: "columnar", version: 1 }, ir: ROWS, profile: null },
+  ])("parsed invalid fetched content remains ir: %j", async (value) => {
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(JSON.stringify(value))) }))
+      .rejects.toThrow(expect.objectContaining({ code: "ir" }));
+  });
+
+  test("a non-byte stream chunk is an unreadable artifact", async () => {
+    const body = new ReadableStream({ start(controller) { controller.enqueue("not bytes"); controller.close(); } });
+    await expect(fetchArtifact(base, codec.fingerprint, { fetch: returning(new Response(body as never)) }))
+      .rejects.toThrow(expect.objectContaining({ code: "artifact" }));
   });
 
   test("verifies the fetched artifact and forwards codec options", async () => {

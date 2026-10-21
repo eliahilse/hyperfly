@@ -1,3 +1,4 @@
+/** Stable failure codes. `artifact` means an unreadable discovery response or artifact JSON text; invalid parsed content is `ir`. */
 export type ErrorCode =
   | "varint"
   | "range"
@@ -13,6 +14,7 @@ export type ErrorCode =
   | "limit"
   | "header"
   | "fingerprint"
+  | "artifact"
   | "ir"
   | "packed"
   | "unsupported"
