@@ -57,7 +57,7 @@ release. Loosening a default is allowed in a minor release.
 
 ## Runtimes and deprecations
 
-The supported minimums are Node.js 18, Python 3.10 and Rust 1.82 (the MSRV).
+The supported minimums are Node.js 22, Python 3.10 and Rust 1.82 (the MSRV).
 Raising a minimum is an exception to the breaking-change rule: it is not
 treated as breaking, happens only in a minor release and is called out in
 the changelog.
