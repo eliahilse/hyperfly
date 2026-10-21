@@ -1104,6 +1104,68 @@
         }
       ],
       "hex": "0c04fdffffffffffff1f02340008e4e464ffffffffffff0f"
+    },
+    {
+      "name": "col-empty-nested-struct-falls-back-to-row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "empty",
+              "type": {
+                "kind": "struct",
+                "fields": []
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "empty": {},
+          "b": true
+        },
+        {
+          "empty": {},
+          "b": false
+        }
+      ],
+      "hex": "020100"
+    },
+    {
+      "name": "col-row-array-of-empty-fixed-arrays",
+      "description": "The outer row count is 02; each eligible length-0 inner array carries its int column mode byte 00.",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "length": 0,
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "int"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "value": [
+        [],
+        []
+      ],
+      "hex": "020000"
     }
   ],
   "invalidDecode": [
@@ -1506,6 +1568,52 @@
       },
       "hex": "010400301b",
       "error": "marker"
+    },
+    {
+      "name": "col-row-array-of-empty-fixed-arrays-truncated",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "length": 0,
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "int"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "hex": "0200",
+      "error": "truncated"
+    },
+    {
+      "name": "col-row-array-of-empty-fixed-arrays-trailing",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "array",
+          "length": 0,
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "a",
+                "type": {
+                  "kind": "int"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "hex": "02000000",
+      "error": "trailing"
     }
   ],
   "invalidEncode": [
@@ -1576,6 +1684,153 @@
       "value": [
         {
           "k": "no"
+        }
+      ],
+      "error": "type"
+    },
+    {
+      "name": "encoder-col-later-row-not-object-beats-row0-range",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 1
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 2,
+          "b": true
+        },
+        false
+      ],
+      "error": "type"
+    },
+    {
+      "name": "encoder-col-later-required-beats-earlier-column-range",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 1
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "a": 2
+        }
+      ],
+      "error": "required"
+    },
+    {
+      "name": "encoder-col-earlier-required-beats-later-container-type",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 1
+              }
+            },
+            {
+              "name": "n",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "b",
+                    "type": {
+                      "kind": "bool"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "n": false
+        }
+      ],
+      "error": "required"
+    },
+    {
+      "name": "encoder-col-container-type-beats-same-leaf-required",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "n",
+              "type": {
+                "kind": "struct",
+                "fields": [
+                  {
+                    "name": "a",
+                    "type": {
+                      "kind": "int",
+                      "min": 0,
+                      "max": 1
+                    }
+                  },
+                  {
+                    "name": "b",
+                    "type": {
+                      "kind": "bool"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "value": [
+        {
+          "n": {
+            "b": true
+          }
+        },
+        {
+          "n": false
         }
       ],
       "error": "type"
@@ -3047,6 +3302,49 @@
           {
             "a": "zz",
             "b": "ybb"
+          }
+        ]
+      },
+      {
+        "name": "grammar-matching-value-escaped-decodes",
+        "description": "A grammar match may arrive escaped; canonical encoding chooses plain mode on the size tie with grammar mode.",
+        "ir": {
+          "kind": "array",
+          "element": {
+            "kind": "struct",
+            "fields": [
+              {
+                "name": "x",
+                "type": {
+                  "kind": "string"
+                }
+              }
+            ]
+          }
+        },
+        "profile": {
+          "version": 2,
+          "shared": {
+            "columns": [
+              {
+                "leaf": 0,
+                "grammar": [
+                  {
+                    "num": {
+                      "base": 10,
+                      "len": 2,
+                      "case": "lower"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "hex": "01030100023030",
+        "value": [
+          {
+            "x": "00"
           }
         ]
       }

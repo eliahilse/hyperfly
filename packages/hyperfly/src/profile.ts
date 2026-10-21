@@ -1,43 +1,63 @@
 import { columnarEligible, flattenLeaves } from "./columnar.js";
-import { HyperflyError } from "./errors.js";
+import { HyperflyError, isInstance } from "./errors.js";
 import { describeValue, hasLoneSurrogate, validateIR, withinStack } from "./ir.js";
 import type { IRNode } from "./ir.js";
-import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 
+/** Letter case of grammar digits; decimal tokens require `lower` (plan-columnar-v5 §6.3). */
 export type GrammarCase = "lower" | "upper";
+/** Radix of a fixed-width numeric grammar token (plan-columnar-v5 §6.3). */
 export type GrammarBase = 10 | 16 | 36;
 
+/** Fixed-width unsigned digit run in a string grammar (plan-columnar-v5 §6.3). */
 export interface GrammarNum {
+  /** Radix used to parse and reconstruct digits. */
   base: GrammarBase;
+  /** Digit count: 1–15 for base 10, 1–13 for base 16, or 1–10 for base 36. */
   len: number;
+  /** Case required for alphabetic digits; base 10 uses `lower`. */
   case: GrammarCase;
 }
 
+/** Non-empty literal text or a numeric run; adjacent literal tokens are invalid (plan-columnar-v5 §6.3). */
 export type GrammarToken = { lit: string } | { num: GrammarNum };
 
+/** String lookup driven by an earlier dictionary column in the same eligible array (plan-columnar-v5 §6.4). */
 export interface Derivation {
+  /** Global leaf ordinal of the earlier string column whose profile contains the source dictionary. */
   source: number;
+  /** Reconstructed target strings in source-dictionary order, one per entry. */
   values: readonly string[];
 }
 
+/** Shared models for one string leaf; version 2 requires at least one model (plan-columnar-v5 §6.2). */
 export interface ProfileColumn {
+  /** Global leaf ordinal across eligible arrays in schema traversal order (plan-columnar-v5 §6.1). */
   leaf: number;
+  /** Ordered, unique strings: 1–16383 entries, with one-based codes and zero reserved for escapes. */
   dict?: readonly string[];
+  /** One to eight tokens with at least one numeric run; requires profile version 2. */
   grammar?: readonly GrammarToken[];
+  /** Mapping from an earlier dictionary column; requires profile version 2. */
   derived?: Derivation;
 }
 
+/** Shared profile content embedded in the artifact and fingerprint (plan-columnar-v5 §6.5). */
 export interface SharedProfile {
+  /** Non-empty string-column models, sorted by ascending leaf ordinal with no duplicates. */
   columns: readonly ProfileColumn[];
 }
 
+/** Training document with fingerprinted shared models and optional advisory hints (plan-columnar-v5 §6.2). */
 export interface Profile {
+  /** Document shape: 1 requires dictionaries only; 2 also permits grammars and derivations. */
   version: 1 | 2;
+  /** Models needed to encode and decode shared column modes. */
   shared: SharedProfile;
   /** Advisory encoder guidance; never part of the artifact or the fingerprint. */
   hints?: Record<string, unknown>;
 }
 
+/** Maximum entries in one shared dictionary (plan-columnar-v5 §6.2). */
 export const MAX_DICT_ENTRIES = 16383;
 
 export interface ColumnRef {
@@ -118,14 +138,18 @@ function own(value: Record<string, unknown>, key: string): boolean {
 
 function snapshotProfile(profile: Profile): Profile {
   const active = new WeakSet<object>();
-  const visit = (value: unknown, depth: number): unknown => {
+  const stack: {
+    source: Record<string, unknown> | unknown[];
+    copy: object;
+    keys: string[] | undefined;
+    length: number;
+    next: number;
+  }[] = [];
+  const visit = (value: unknown): unknown => {
     if (value === null || typeof value === "string" || typeof value === "boolean") return value;
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value !== "object" || value === null) {
       throw new HyperflyError("ir", "profile: must contain only JSON data");
-    }
-    if (depth > MAX_ARTIFACT_NESTING) {
-      throw new HyperflyError("ir", `profile: nests deeper than ${MAX_ARTIFACT_NESTING}`);
     }
     if (active.has(value)) throw new HyperflyError("ir", "profile: must not contain cycles");
     const array = Array.isArray(value);
@@ -133,52 +157,55 @@ function snapshotProfile(profile: Profile): Profile {
     if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
       throw new HyperflyError("ir", "profile: must contain only plain objects and arrays");
     }
-    active.add(value);
-    let copy: unknown;
-    if (array) {
-      const length = value.length;
-      for (const key of Reflect.ownKeys(value)) {
-        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
-        if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= length) {
+    const keys: string[] = [];
+    for (const key of Reflect.ownKeys(value)) {
+      if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+      if (array) {
+        if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length) {
           throw new HyperflyError("ir", "profile: arrays must contain only indexed JSON data");
         }
-      }
-      copy = Array.from({ length }, (_, i) => visit(value[i], depth + 1));
-    } else {
-      const record: Record<string, unknown> = {};
-      for (const key of Reflect.ownKeys(value)) {
-        if (!Object.prototype.propertyIsEnumerable.call(value, key)) continue;
+      } else {
         if (typeof key !== "string") throw new HyperflyError("ir", "profile: JSON keys must be strings");
-        Object.defineProperty(record, key, {
-          value: visit((value as Record<string, unknown>)[key], depth + 1),
-          enumerable: true,
-          writable: true,
-          configurable: true,
-        });
+        keys.push(key);
       }
-      copy = record;
     }
-    active.delete(value);
+    const copy = array ? new Array<unknown>(value.length) : {};
+    active.add(value);
+    stack.push({ source: value as Record<string, unknown> | unknown[], copy, keys: array ? undefined : keys, length: array ? value.length : keys.length, next: 0 });
     return copy;
   };
   try {
-    return visit(profile, 1) as Profile;
+    const result = visit(profile) as Profile;
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1]!;
+      if (frame.next === frame.length) {
+        active.delete(frame.source);
+        stack.pop();
+        continue;
+      }
+      const key = frame.keys ? frame.keys[frame.next++]! : String(frame.next++);
+      const value = visit((frame.source as Record<string, unknown>)[key]);
+      Object.defineProperty(frame.copy, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    return result;
   } catch (cause) {
-    if (cause instanceof HyperflyError && cause.code === "ir") throw cause;
+    if (isInstance(cause, HyperflyError) && cause.code === "ir") throw cause;
     throw new HyperflyError("ir", "profile: could not read JSON data", { cause });
   }
 }
 
+/** Validates IR and profile structure, ordinals and model constraints; throws code `ir` (wire-v0 §9, plan-columnar-v5 §6). */
 export function validateProfile(ir: IRNode, profile: Profile): void {
   checkedProfile(ir, profile);
 }
 
 export function checkedProfile(ir: IRNode, profile: Profile): Profile {
+  // Canonical shared profiles have depth at most 7; advisory hints are excluded.
+  validateIR(ir);
   return withinStack(() => checkProfile(ir, snapshotProfile(profile)));
 }
 
 function checkProfile(ir: IRNode, profile: Profile): Profile {
-  validateIR(ir);
   const fail = (message: string): never => {
     throw new HyperflyError("ir", `profile: ${message}`);
   };

@@ -39,8 +39,8 @@ const profile = train(toIR(EventResponse), Array.from({ length: 20 }, (_, i) => 
 // the profiled codec first: negotiation offers it, so the client's bootstrap
 // walks the full path — fetch a v2 profiled artifact, re-derive its fingerprint
 const registry = new CodecRegistry([
-  compile(EventResponse, { plan: "columnar", profile }) as never,
-  compile(EventResponse, { plan: "columnar" }) as never,
+  compile(EventResponse, { plan: "columnar", profile }),
+  compile(EventResponse, { plan: "columnar" }),
 ]);
 
 const port = Number(process.env.PORT ?? 8787);

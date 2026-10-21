@@ -16,7 +16,7 @@ const cases: { name: string; ir: IRNode; samples: unknown[]; options: TrainOptio
   { name: "candles", ir: toIR(CandleResponse), samples: candlesCorpus(60, 42), options: {} },
   { name: "feed", ir: toIR(FeedResponse), samples: feedCorpus(60, 42), options: {} },
   { name: "hex-grammar", ir: toIR(rows), samples: samples([["id_00af", "id_beef"], ["id_cafe", "id_12ff"]]), options: {} },
-  { name: "decimal-grammar", ir: toIR(rows), samples: samples([["v2-0001-x", "v2-0002-x"], ["v2-0003-x", "v2-0004-x"]]), options: { minOccurrences: 1.9, maxEntries: 0 } },
+  { name: "decimal-grammar", ir: toIR(rows), samples: samples([["v2-0001-x", "v2-0002-x"], ["v2-0003-x", "v2-0004-x"]]), options: { minOccurrences: 1, maxEntries: 0 } },
   { name: "derivation", ir: toIR(pair), samples: [
     [{ a: "u1", b: "kim@x.io" }, { a: "u2", b: "lee@x.io" }],
     [{ a: "u1", b: "kim@x.io" }, { a: "u2", b: "lee@x.io" }],

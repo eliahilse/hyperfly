@@ -3824,6 +3824,103 @@
       },
       "hex": "0561",
       "error": "limit"
+    },
+    {
+      "name": "col-presence-padding-before-struct-depth",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "0102",
+      "error": "bitmap"
+    },
+    {
+      "name": "col-orphan-null-before-struct-depth",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true,
+              "nullable": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "010001",
+      "error": "bitmap"
+    },
+    {
+      "name": "col-struct-depth-before-column-payload",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "0101",
+      "error": "depth"
+    },
+    {
+      "name": "col-struct-depth-with-no-participating-row",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "x",
+              "type": {
+                "kind": "bool"
+              },
+              "optional": true
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "hex": "0100",
+      "error": "depth"
     }
   ],
   "invalidEncode": [
@@ -7323,6 +7420,371 @@
           "$bytes": "00010203040506070809"
         }
       },
+      "error": "limit"
+    },
+    {
+      "name": "encode-col-first-string-limit-before-later-type",
+      "description": "The first participating string exceeds maxByteLength before the second row has the wrong type.",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxByteLength": 5
+      },
+      "value": [
+        {
+          "s": "abcdefgh"
+        },
+        {
+          "s": 1
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encode-row-first-string-limit-before-later-type",
+      "description": "Field a exceeds maxByteLength before field b has the wrong type.",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "string"
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxByteLength": 5
+      },
+      "value": {
+        "a": "abcdefgh",
+        "b": 1
+      },
+      "error": "limit"
+    },
+    {
+      "name": "encoder-max-total-items-entry-beats-element-type",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        }
+      },
+      "limits": {
+        "maxTotalItems": 0
+      },
+      "value": [
+        "bad"
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encoder-max-items-beats-element-type",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "bool"
+        }
+      },
+      "limits": {
+        "maxItems": 0
+      },
+      "value": [
+        "bad"
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encoder-node-depth-beats-struct-required",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "n",
+            "type": {
+              "kind": "struct",
+              "fields": [
+                {
+                  "name": "a",
+                  "type": {
+                    "kind": "int",
+                    "min": 0,
+                    "max": 1
+                  }
+                },
+                {
+                  "name": "b",
+                  "type": {
+                    "kind": "bool"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "value": {
+        "n": {}
+      },
+      "error": "depth"
+    },
+    {
+      "name": "encoder-col-required-beats-leaf-depth",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "int",
+                "min": 0,
+                "max": 1
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "bool"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxDepth": 0
+      },
+      "value": [
+        {
+          "a": 0
+        }
+      ],
+      "error": "required"
+    },
+    {
+      "name": "encoder-amplification-after-elements",
+      "plan": "row",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "literal",
+          "value": "x"
+        }
+      },
+      "limits": {
+        "maxAmplification": 1
+      },
+      "value": [
+        "x",
+        "bad"
+      ],
+      "error": "type"
+    },
+    {
+      "name": "encoder-final-byte-budget-after-body",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "array",
+              "element": {
+                "kind": "literal",
+                "value": "long"
+              }
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxByteAmplification": 1
+      },
+      "value": {
+        "a": [
+          "long",
+          "long"
+        ],
+        "b": "bad"
+      },
+      "error": "type"
+    },
+    {
+      "name": "encoder-final-item-budget-after-body",
+      "plan": "row",
+      "ir": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "a",
+            "type": {
+              "kind": "array",
+              "element": {
+                "kind": "array",
+                "element": {
+                  "kind": "array",
+                  "element": {
+                    "kind": "literal",
+                    "value": null
+                  },
+                  "length": 1
+                },
+                "length": 1
+              },
+              "length": 1
+            }
+          },
+          {
+            "name": "b",
+            "type": {
+              "kind": "bool"
+            }
+          }
+        ]
+      },
+      "limits": {
+        "maxAmplification": 1
+      },
+      "value": {
+        "a": [
+          [
+            [
+              null
+            ]
+          ]
+        ],
+        "b": "bad"
+      },
+      "error": "type"
+    },
+    {
+      "name": "encoder-col-earlier-type-beats-later-column-length",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "a",
+              "type": {
+                "kind": "bool"
+              }
+            },
+            {
+              "name": "b",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxByteLength": 1
+      },
+      "value": [
+        {
+          "a": "bad",
+          "b": "long"
+        }
+      ],
+      "error": "type"
+    },
+    {
+      "name": "encoder-col-string-length-beats-later-type",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxByteLength": 1
+      },
+      "value": [
+        {
+          "s": "long"
+        },
+        {
+          "s": false
+        }
+      ],
+      "error": "limit"
+    },
+    {
+      "name": "encoder-col-string-byte-charge-beats-later-type",
+      "plan": "columnar",
+      "ir": {
+        "kind": "array",
+        "element": {
+          "kind": "struct",
+          "fields": [
+            {
+              "name": "s",
+              "type": {
+                "kind": "string"
+              }
+            }
+          ]
+        }
+      },
+      "limits": {
+        "maxTotalBytes": 1
+      },
+      "value": [
+        {
+          "s": "long"
+        },
+        {
+          "s": false
+        }
+      ],
       "error": "limit"
     }
   ],

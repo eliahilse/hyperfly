@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
 from typing import Any
 
 from ._codec import (
@@ -15,7 +14,7 @@ from ._codec import (
     _packed_bytes,
 )
 from ._ir import MAX_DICT_ENTRIES, _enumerate_column_refs, _has_lone_surrogate, column_count, validate_ir
-from ._wire import uleb_len
+from ._wire import HyperflyError, uleb_len
 
 
 def _leaf_value(row: Any, segs: tuple[str, ...]) -> Any:
@@ -35,40 +34,43 @@ def _collect(
     batches: dict[int, list[list[str]]],
     arrays: list[tuple[int, dict[int, list[str | None]]]],
 ) -> None:
-    if value is None:
-        return
-    kind = node["kind"]
-    if kind == "array":
-        if not isinstance(value, list):
-            return
-        if _columnar_eligible(node):
-            leaves = _flatten_leaves(node["element"])
-            if leaves is None:
-                return
-            columns: dict[int, list[str | None]] = {}
-            for i, (segs, field) in enumerate(leaves):
-                if field["type"]["kind"] != "string":
+    stack = [(node, value, base)]
+    while stack:
+        node, value, base = stack.pop()
+        if value is None:
+            continue
+        kind = node["kind"]
+        if kind == "array":
+            if not isinstance(value, list):
+                continue
+            if _columnar_eligible(node):
+                leaves = _flatten_leaves(node["element"])
+                if leaves is None:
                     continue
-                aligned = []
-                for row in value:
-                    candidate = _leaf_value(row, segs)
-                    aligned.append(
-                        candidate if isinstance(candidate, str) and not _has_lone_surrogate(candidate) else None
-                    )
-                columns[base + i] = aligned
-                batches.setdefault(base + i, []).append([entry for entry in aligned if entry is not None])
-            arrays.append((refs[base][1] if base < len(refs) else -1, columns))
-            return
-        for item in value:
-            _collect(node["element"], item, base, refs, batches, arrays)
-    elif kind == "nullable":
-        _collect(node["inner"], value, base, refs, batches, arrays)
-    elif kind == "struct" and isinstance(value, dict):
-        field_column = base
-        for field in node["fields"]:
-            field_base = field_column
-            field_column += column_count(field["type"])
-            _collect(field["type"], value.get(field["name"]), field_base, refs, batches, arrays)
+                columns: dict[int, list[str | None]] = {}
+                for i, (segs, field) in enumerate(leaves):
+                    if field["type"]["kind"] != "string":
+                        continue
+                    aligned = []
+                    for row in value:
+                        candidate = _leaf_value(row, segs)
+                        aligned.append(
+                            candidate if isinstance(candidate, str) and not _has_lone_surrogate(candidate) else None
+                        )
+                    columns[base + i] = aligned
+                    batches.setdefault(base + i, []).append([entry for entry in aligned if entry is not None])
+                arrays.append((refs[base][1] if base < len(refs) else -1, columns))
+                continue
+            stack.extend((node["element"], item, base) for item in reversed(value))
+        elif kind == "nullable":
+            stack.append((node["inner"], value, base))
+        elif kind == "struct" and isinstance(value, dict):
+            pending = []
+            field_column = base
+            for field in node["fields"]:
+                pending.append((field["type"], value.get(field["name"]), field_column))
+                field_column += column_count(field["type"])
+            stack.extend(reversed(pending))
 
 
 def _string_wire_length(value: str) -> int:
@@ -237,7 +239,7 @@ def _detect_derivation(
 
 def train(
     ir: dict[str, Any],
-    samples: Sequence[Any],
+    samples: list[Any] | tuple[Any, ...],
     *,
     min_occurrences: int | float = 2,
     max_entries: int | float = MAX_DICT_ENTRIES,
@@ -246,19 +248,32 @@ def train(
 
     Values must recur at least ``min_occurrences`` times to enter a dictionary,
     which holds at most ``max_entries`` entries. Return None when no profile helps.
+    Both thresholds must be non-negative integers or finite integral floats.
+    Treat ``min_occurrences=0`` as 1 and cap ``max_entries`` at 16383.
+    Raise code ``options`` for invalid sample containers or thresholds before
+    code ``ir`` for an invalid schema.
     """
+    if not isinstance(samples, (list, tuple)):
+        raise HyperflyError("options", "samples: must be a list or tuple")
+    for name, number in (("min_occurrences", min_occurrences), ("max_entries", max_entries)):
+        if (
+            isinstance(number, bool) or not isinstance(number, (int, float)) or number < 0
+            or (isinstance(number, float) and not number.is_integer())
+        ):
+            raise HyperflyError("options", f"{name}: must be a non-negative integer")
+    try:
+        return _train(ir, samples, max(1, min_occurrences), int(min(max_entries, MAX_DICT_ENTRIES)))
+    except RecursionError:
+        raise HyperflyError("ir", "$: IR nesting exceeds Python's recursion limit") from None
+
+
+def _train(
+    ir: dict[str, Any], samples: list[Any] | tuple[Any, ...], min_occurrences: int | float, entry_limit: int,
+) -> dict[str, Any] | None:
     validate_ir(ir)
-    if math.isfinite(min_occurrences):
-        min_occurrences = max(1, math.floor(min_occurrences))
-    elif min_occurrences == -math.inf:
-        min_occurrences = 1
-    if math.isnan(max_entries):
-        entry_limit = 0
-    else:
-        entry_limit = math.floor(max(0, min(max_entries, MAX_DICT_ENTRIES)))
-    refs = _enumerate_column_refs(ir)
     batches: dict[int, list[list[str]]] = {}
     arrays: list[tuple[int, dict[int, list[str | None]]]] = []
+    refs = _enumerate_column_refs(ir)
     for sample in samples:
         _collect(ir, sample, 0, refs, batches, arrays)
 

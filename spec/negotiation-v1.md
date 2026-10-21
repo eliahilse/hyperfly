@@ -1,8 +1,10 @@
 # Hyperfly negotiation — v1
 
-Status: draft. Defines how a client and server agree to exchange hyperfly bytes
-instead of JSON over HTTP, and how a client obtains an artifact it does not yet
-hold. The wire format (`spec/wire-v0.md`) is unchanged by this document.
+Status: stable. The contract is frozen for hyperfly 1.x; see
+[Stability](wire-v0.md#stability). Defines how a client and server agree to
+exchange hyperfly bytes instead of JSON over HTTP, and how a client obtains an
+artifact it does not yet hold. The wire format (`spec/wire-v0.md`) is
+unchanged by this document.
 
 The governing rule is inherited from the format: a peer decodes only an
 artifact it holds, identified by fingerprint. Negotiation exists so that fact
@@ -82,6 +84,50 @@ An encoder refusal MUST be answered in JSON like any other fallback, never
 with an error status. The server SHOULD record it: it marks a route whose
 limits need raising on both peers.
 
+In a JSON fallback response, a `bytes` value MUST be a standard padded
+base64 string (RFC 4648 §4), using the alphabet `A-Z`, `a-z`, `0-9`, `+`,
+`/` and `=` padding, with no line breaks or whitespace. A peer decoding
+JSON under a codec it holds MUST turn each string at a `bytes` position
+back into bytes, rejecting noncanonical base64, including nonzero unused
+pad bits.
+
+A peer decoding a JSON body under a codec MUST use the route's value model,
+which the application identifies. A peer holding more than one codec for a
+route MUST identify the one it uses out of band; `Hyperfly-Codec` is ignored
+on JSON bodies (§4 rule 4).
+
+Other nodes retain their codec value model in JSON: `bool` is a boolean;
+`int` and `float64` are numbers; `string` and `enum` are strings; `literal`
+is its declared value; a null value is `null`; arrays are JSON arrays and
+structs are JSON objects. Absent optional fields are omitted. Keys that name
+no field of a struct MUST be ignored.
+
+Any failure to convert a parsed JSON value under the codec MUST be reported
+as a JSON-decoding failure (`json` for a response, `400` for a request body).
+This includes a wrong JSON type; a fractional, non-finite or out-of-domain
+number for `int`; a declared-bound violation; an unknown enum member; a
+literal mismatch; a non-string or noncanonical base64 value at a `bytes`
+position; a missing required field; or `null` at a non-nullable position.
+The wire-v0 §4 integer rule applies to numbers decoded from JSON: an
+integral number in the wire-v0 §3.3 domain is that integer for an `int` node
+or integer `literal`, whatever its token spelling (`3`, `3.0`, `3e0`) or host
+floating-point representation.
+
+The JSON spelling is not part of the contract: whitespace, key order and
+number spelling may differ between writers. Values compared under a codec
+are compared as parsed values, with numbers as binary64. For this
+comparison, `-0` and `0` are equal; a `float64` negative
+zero is canonicalized to positive zero on encode anyway (wire-v0 §4.5).
+
+A client decoding a JSON response MUST decode the body as strict UTF-8
+JSON. Invalid UTF-8 or malformed JSON MUST fail with `json`; invalid UTF-8
+MUST NOT be repaired with replacement characters.
+
+In a JSON body decoded without a codec, integer-valued numbers outside
+`[-(2^53 - 1), 2^53 - 1]` are outside the interoperable range of RFC 8259 §6;
+hyperfly does not define their value. Values of `int` nodes and integer
+`literal` nodes are always within that range (wire-v0 §3.3).
+
 `Hyperfly-Offer` is optional and advisory: it names an artifact the server
 would have used, so a client can fetch it (§3) and upgrade itself. A client
 MUST NOT treat its presence as a requirement, and a server MUST behave
@@ -100,19 +146,28 @@ A server that offers binary responses SHOULD expose its artifacts:
 GET /.well-known/hyperfly/a65108e20d19c19ff525ddf4789d5ba1
 ```
 
+A pathname that does not begin with the exact, case-sensitive prefix
+`/.well-known/hyperfly/` is not a discovery path. When it does, the
+remainder MUST be exactly 32 ASCII hex characters, in either case, and is
+matched against the lowercase fingerprint. Any other remainder, including
+surrounding whitespace, a trailing slash, percent-encoded bytes, or a `?`
+and query text supplied as part of the pathname, MUST yield `404`; the
+lookup performs no trimming and no percent-decoding. A query string the
+HTTP layer separates before lookup is not part of the pathname.
+
 ```
 200 OK
 Content-Type: application/json
 Cache-Control: public, max-age=31536000, immutable
 ```
 
-The body is the canonical artifact text (wire-v0 §5, plan §6.3). Artifacts are
+The body is the canonical artifact text (wire-v0 §5, plan §6.5). Artifacts are
 content-addressed, so the response is immutable and indefinitely cacheable: a
 different artifact is a different URL by construction.
 
 A client MUST verify that the fingerprint of the text it received equals the
 one it asked for, and MUST reject a mismatch. It MUST derive the artifact from
-the parsed content rather than trusting the received text (wire-v0 §7), so a
+the parsed content rather than trusting the received text (plan §6.5), so a
 server cannot induce a client to hash bytes it has not understood.
 
 Unknown fingerprint: `404`. That is not an error condition for the protocol —
@@ -143,7 +198,14 @@ that applies wins:
 2. The body exceeds the server's request-body bound: `413 Content Too Large`.
    The bound is server configuration (implementations SHOULD default to
    1 MiB), enforced by counting bytes as they arrive; `Content-Length` serves
-   only to reject early.
+   only to reject early. If, after trimming leading and trailing SP and
+   HTAB, the value is a non-empty run of ASCII digits and its value exceeds
+   the bound, the server MUST reject with `413` before reading the body.
+   Otherwise the header MUST be ignored for this purpose: it neither
+   rejects nor exempts, and the bound is enforced on bytes received. The
+   digit run's decimal value is compared with the bound without overflow:
+   leading zeros do not change it, and a value too large for the host
+   integer type exceeds the bound.
 3. A hyperfly body is shorter than the envelope header, or its magic or major
    is wrong (wire-v0 §2): `400 Bad Request`.
 4. A hyperfly body arrives with a `Hyperfly-Codec` header whose value, with
@@ -153,11 +215,23 @@ that applies wins:
    `Hyperfly-Offer`, as above.
 6. The hyperfly body fails to decode under the held codec, for any wire-v0
    error (limits included): `400`.
-7. A JSON body is not well-formed UTF-8 JSON: `400`.
+7. A JSON body is not well-formed UTF-8 JSON, or conversion under its codec
+   fails (§2): `400`.
+
+JSON request bodies use the same value representation as JSON fallback
+responses (§2), including canonical padded base64 for `bytes`. A peer
+encoding a value as JSON (a server in a response, a client in a request body)
+MUST write `bytes` values as canonical padded base64. A peer decoding a JSON
+request body under a codec it holds MUST convert strings at `bytes`
+positions back into bytes and reject conversion failures with `400`.
+
+`spec/vectors/http.json` pins the JSON representation, response decoding
+and request-body bounds in §§2 and 4; every implementation that provides
+HTTP negotiation runs it.
 
 ## 5. Rotation
 
-Retraining a profile produces a new fingerprint (plan §6.4). A deployment
+Retraining a profile produces a new fingerprint (plan §6.6). A deployment
 rotates without a cliff by holding both:
 
 1. The server registers the new codec alongside the old one. Both fingerprints
@@ -180,10 +254,18 @@ what makes the fallback a transition rather than an outage.
   that is not exactly 32 lowercase hex characters after trimming is
   malformed, not normalized. Duplicates are compared after trimming and only
   the first is kept. `spec/vectors/accept.json` pins this behaviour; every
-  implementation runs it.
+  implementation that provides HTTP negotiation runs it.
 - A fingerprint is not a secret, but it does identify a schema and a trained
   dictionary. A server MUST NOT serve an artifact belonging to one tenant to
   another, and `.well-known` discovery MUST apply the same authorization as
   the routes the artifact describes.
 - Whether a value is dictionary-coded is observable in response length (plan
-  §6.6). Negotiation does not change that; it only makes it opt-in per client.
+  §6.8). Negotiation does not change that; it only makes it opt-in per client.
+
+## 7. Stability
+
+This document is frozen for hyperfly 1.x as wire-v0
+[Stability](wire-v0.md#stability) describes. Its Additions and A future wire
+version subsections allow optional headers peers ignore, new artifacts
+selected by fingerprint with JSON fallback, and negotiation changes a 1.x
+peer could misread only under new header names or a new media type.

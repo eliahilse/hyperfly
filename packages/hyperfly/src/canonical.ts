@@ -1,5 +1,6 @@
-import type { IRField, IRNode, LiteralValue } from "./ir.js";
-import type { Derivation, GrammarToken, SharedProfile } from "./profile.js";
+import { HyperflyError } from "./errors.js";
+import { validateIR, type IRField, type IRNode, type LiteralValue } from "./ir.js";
+import { checkedProfile, type Derivation, type GrammarToken, type Profile, type SharedProfile } from "./profile.js";
 import { sha256 } from "./sha256.js";
 
 /** Spec §5: not generic JSON canonicalization — key order and escaping are fixed here. */
@@ -58,6 +59,7 @@ export function serializeNode(node: IRNode): string {
   }
 }
 
+/** Artifact body layout: row v1 or columnar v5 (wire-v0 §5, plan-columnar-v5 §1). */
 export type PlanLayout = "row" | "columnar";
 
 const PLAN_VERSION: Record<PlanLayout, number> = { row: 1, columnar: 5 };
@@ -82,13 +84,33 @@ export function serializeShared(shared: SharedProfile): string {
   return `{"columns":[${columns.join(",")}]}`;
 }
 
+/** The canonical artifact text of an IR and profile that compileIR has already checked. */
+export function canonicalArtifact(
+  ir: IRNode,
+  layout: PlanLayout,
+  profile?: { shared: SharedProfile },
+): string {
+  const head = `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}`;
+  return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
+}
+
+/** Validates and serializes canonical artifact text; layout defaults to `row`, with no profile (wire-v0 §5). */
 export function serializeArtifact(
   ir: IRNode,
   layout: PlanLayout = "row",
   profile?: { shared: SharedProfile },
 ): string {
-  const head = `{"wire":1,"plan":{"layout":"${layout}","version":${PLAN_VERSION[layout]}},"ir":${serializeNode(ir)}`;
-  return profile ? `${head},"profile":${serializeShared(profile.shared)}}` : `${head}}`;
+  if (layout !== "row" && layout !== "columnar") throw new HyperflyError("options", "plan: must be row or columnar");
+  validateIR(ir);
+  if (profile === undefined || profile === null) return canonicalArtifact(ir, layout);
+  if (layout !== "columnar") throw new HyperflyError("ir", "profiles apply to the columnar plan only");
+  let document: Profile;
+  try {
+    document = { version: 2, ...profile } as Profile;
+  } catch (cause) {
+    throw new HyperflyError("ir", "profile: could not read JSON data", { cause });
+  }
+  return canonicalArtifact(ir, layout, checkedProfile(ir, document));
 }
 
 export function fingerprintOf(artifact: string): Uint8Array {

@@ -97,6 +97,40 @@ jobs:
 
       - run: pytest python/tests -q
 
+  # the Python suite on pydantic 2.5 (the declared floor, on the oldest Python), 2.8, 2.10 and the latest release
+  python-floor:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "python-floor", python: "3.10", pydantic: "2.5" }
+          - { name: "pydantic (2.8)", python: "3.12", pydantic: "2.8" }
+          - { name: "pydantic (2.10)", python: "3.12", pydantic: "2.10" }
+          - { name: "pydantic (latest)", python: "3.12", pydantic: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - if: matrix.pydantic != ''
+        run: pip install "./python[test]" "pydantic==${{ matrix.pydantic }}.*"
+
+      - if: matrix.pydantic == ''
+        run: pip install "./python[test]"
+
+      - if: matrix.pydantic != ''
+        run: python -c "import pydantic; assert pydantic.VERSION.startswith('${{ matrix.pydantic }}.'), pydantic.VERSION"
+
+      - if: matrix.pydantic == ''
+        run: python -c "import pydantic; print(pydantic.VERSION)"
+
+      - run: pytest python/tests -q
+
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -152,3 +186,67 @@ jobs:
             sleep 1
           done
           python apps/interop/client.py
+
+  # a dispatched run's checks never show on a pull request, so the release PR gets them as commit statuses
+  dispatch-pending:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$REPO/statuses/$SHA" --silent \
+            -f state=pending -f context=ci -f description=Running -f target_url="$RUN_URL"
+
+  dispatch-report:
+    needs: [dispatch-pending, check, pack, release-checks, python, python-floor, rust, rust-msrv, interop]
+    if: always() && github.event_name == 'workflow_dispatch'
+    permissions:
+      actions: read
+      statuses: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CI_SUCCESS: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+        run: |
+          set -euo pipefail
+          jobs="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
+            --jq '.jobs[] | select(.name != "dispatch-report" and .name != "dispatch-pending") | @json')"
+          while IFS= read -r job; do
+            [ -n "$job" ] || continue
+            name="$(jq -r '.name' <<< "$job")"
+            conclusion="$(jq -r '.conclusion' <<< "$job")"
+            url="$(jq -r '.html_url' <<< "$job")"
+            case "$conclusion" in
+              success) state=success; description=Passed ;;
+              skipped) state=success; description=Skipped ;;
+              cancelled) state=error; description=Cancelled ;;
+              *) state=failure; description=Failed ;;
+            esac
+            gh api --method POST "repos/$REPO/statuses/$SHA" --silent \
+              -f state="$state" -f context="$name" -f description="$description" -f target_url="$url" \
+              || echo "::warning::could not post the status for $name"
+          done <<< "$jobs"
+          if [ "$CI_SUCCESS" = true ]; then
+            state=success
+            description=Passed
+          else
+            state=failure
+            description=Failed
+          fi
+          gh api --method POST "repos/$REPO/statuses/$SHA" --silent \
+            -f state="$state" -f context=ci -f description="$description" -f target_url="$RUN_URL"

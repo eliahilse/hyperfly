@@ -1,9 +1,10 @@
 import { decodeNode, enterArray, type Inflate } from "./decode.js";
-import { chargeBytes, checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
+import { chargeBytes, checkAmplification, chargeItems, encodeNode, isStructValue, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
 import { DecodeError, EncodeError } from "./errors.js";
 import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
+import { isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -16,6 +17,48 @@ const COLUMN_KINDS = new Set(["bool", "int", "float64", "string", "bytes", "enum
 export interface Leaf {
   segs: readonly string[];
   field: IRField;
+}
+
+interface SharedContainers {
+  /** Per leaf, the cache slot of each enclosing container, or -1 for one no other leaf shares. */
+  chains: (readonly number[])[];
+  slots: number;
+}
+
+interface ContainerPrefix {
+  leaves: number;
+  slot: number;
+  next: Map<string, ContainerPrefix>;
+}
+
+const sharedContainers = new WeakMap<StructNode, SharedContainers | null>();
+
+/** Which nested containers two or more leaves share, per element node; null when none is shared. */
+function sharedContainersOf(element: StructNode, leaves: readonly Leaf[]): SharedContainers | null {
+  let shared = sharedContainers.get(element);
+  if (shared !== undefined) return shared;
+  const root = new Map<string, ContainerPrefix>();
+  const walk = (segs: readonly string[], visit: (prefix: ContainerPrefix) => void): void => {
+    let level = root;
+    for (let d = 0; d < segs.length - 1; d++) {
+      let prefix = level.get(segs[d]!);
+      if (!prefix) level.set(segs[d]!, (prefix = { leaves: 0, slot: -1, next: new Map() }));
+      visit(prefix);
+      level = prefix.next;
+    }
+  };
+  let slots = 0;
+  for (const leaf of leaves) walk(leaf.segs, (prefix) => { if (++prefix.leaves === 2) prefix.slot = slots++; });
+  shared = slots === 0 ? null : {
+    chains: leaves.map((leaf) => {
+      const chain: number[] = [];
+      walk(leaf.segs, (prefix) => chain.push(prefix.slot));
+      return chain;
+    }),
+    slots,
+  };
+  sharedContainers.set(element, shared);
+  return shared;
 }
 
 /**
@@ -742,7 +785,7 @@ function encodeStringColumn(
   let packed: Uint8Array | null = null;
   let packedCost = Infinity;
   const totalBytes = bytes.reduce((n, value) => n + value.length, 0);
-  // §3: the deflate mode's total length obeys the decoder byte limits, so a
+  // §3: the deflate mode's total length obeys the byte limits, so a
   // column beyond them is not a candidate — the decoder would refuse the stream
   if (ctx.deflate && ctx.canInflate && totalBytes <= ctx.maxByteLength) {
     const total = totalBytes;
@@ -752,7 +795,14 @@ function encodeStringColumn(
       concat.set(value, offset);
       offset += value.length;
     }
-    packed = ctx.deflate(concat);
+    try {
+      packed = ctx.deflate(concat);
+    } catch (err) {
+      throw new EncodeError("packed", `${path}: string column failed to deflate`, { cause: err });
+    }
+    if (!isUint8Array(packed)) {
+      throw new EncodeError("packed", `${path}: deflate hook must return a Uint8Array`);
+    }
     packedCost =
       bytes.reduce((n, value) => n + ulebLen(BigInt(value.length)), 0) +
       ulebLen(BigInt(packed.length)) +
@@ -1188,36 +1238,52 @@ export function encodeColumnarArray(
   const payloadStart = w.size;
 
   const rows = value.map((row, i) => {
-    if (typeof row !== "object" || row === null || Array.isArray(row)) {
-      throw new EncodeError("type", `${path}[${i}]: expected object`);
-    }
-    return row as Record<string, unknown>;
+    if (!isStructValue(row)) throw new EncodeError("type", `${path}[${i}]: expected object`);
+    return row;
   });
 
   const leaves = flattenLeaves(element)!;
 
-  const containerOf = (row: Record<string, unknown>, segs: readonly string[], i: number): Record<string, unknown> => {
-    let obj: Record<string, unknown> = row;
+  // a container shared by several leaves is read and checked once per row, when the first leaf
+  // under it reaches that row, so the first reported failure is the same as checking it per leaf
+  const shared = sharedContainersOf(element, leaves);
+  const containers = shared && Array.from({ length: shared.slots }, (): Record<string, unknown>[] => []);
+  const containerOf = (
+    row: Record<string, unknown>,
+    segs: readonly string[],
+    chain: readonly number[] | undefined,
+    i: number,
+  ): Record<string, unknown> => {
+    let obj = row;
     for (let d = 0; d < segs.length - 1; d++) {
+      const id = chain ? chain[d]! : -1;
+      const resolved = id === -1 ? undefined : containers![id]!;
+      const cached = resolved?.[i];
+      if (cached !== undefined) {
+        obj = cached;
+        continue;
+      }
       const key = segs[d]!;
       const v = Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
-      if (typeof v !== "object" || v === null || Array.isArray(v)) {
+      if (!isStructValue(v)) {
         throw new EncodeError(
           v === undefined ? "required" : "type",
           `${path}[${i}].${segs.slice(0, d + 1).join(".")}: expected object`,
         );
       }
-      obj = v as Record<string, unknown>;
+      if (resolved) resolved[i] = v;
+      obj = v;
     }
     return obj;
   };
 
-  const inputs: ColumnInput[] = leaves.map((leaf) => {
+  const inputs: ColumnInput[] = leaves.map((leaf, leafIndex) => {
+    const chain = shared?.chains[leafIndex];
     const field = leaf.field;
     const leafName = leaf.segs[leaf.segs.length - 1]!;
     const dotted = leaf.segs.join(".");
     const values: unknown[] = rows.map((row, i) => {
-      const holder = containerOf(row, leaf.segs, i);
+      const holder = containerOf(row, leaf.segs, chain, i);
       return Object.prototype.hasOwnProperty.call(holder, leafName) ? holder[leafName] : undefined;
     });
     const states: RowState[] = values.map((v, i) => {

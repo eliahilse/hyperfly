@@ -1,6 +1,7 @@
 use hyperfly_core::{
-    fingerprint_of, serialize_artifact, Codec, Derivation, ErrorCode, Field, GrammarCase,
-    GrammarNum, GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn, Value,
+    fingerprint_of, serialize_artifact, Codec, CompileOptions, Derivation, ErrorCode, Field,
+    GrammarCase, GrammarNum, GrammarToken, Limits, Literal, Node, Plan, Profile, ProfileColumn,
+    Value,
 };
 use serde_json::Value as Json;
 
@@ -173,27 +174,47 @@ fn to_hex(bytes: &[u8]) -> String {
 
 fn load(name: &str) -> Json {
     let path = format!("{}/../spec/vectors/{name}", env!("CARGO_MANIFEST_DIR"));
-    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut de = serde_json::Deserializer::from_str(&text);
+    de.disable_recursion_limit();
+    let json = serde::Deserialize::deserialize(serde_stacker::Deserializer::new(&mut de)).unwrap();
+    de.end().unwrap();
+    json
 }
 
 fn compile(ir: &Json, plan: Plan) -> Codec {
-    Codec::compile(node_of(ir).unwrap(), plan, Limits::default(), true).unwrap()
+    Codec::compile(node_of(ir).unwrap(), CompileOptions::new().with_plan(plan)).unwrap()
+}
+
+fn with_optional_profile(options: CompileOptions, profile: Option<Profile>) -> CompileOptions {
+    match profile {
+        Some(profile) => options.with_profile(profile),
+        None => options,
+    }
 }
 
 /// Loader failures are invalid IR; anything the loader accepts must also pass the crate.
 fn compile_ir_vector(v: &Json) -> Result<Codec, ErrorCode> {
     let node = node_of(&v["ir"]).map_err(|_| ErrorCode::Ir)?;
     let compiled = match v.get("profile") {
-        None => Codec::compile(node, Plan::Row, Limits::default(), false),
+        None => Codec::compile(node, CompileOptions::new().with_pack(false)),
         Some(profile) => {
             let profile = match profile {
                 Json::Null => None,
                 profile => Some(profile_of(profile).map_err(|_| ErrorCode::Ir)?),
             };
-            Codec::compile_with_profile(node, Plan::Columnar, Limits::default(), false, profile)
+            Codec::compile(
+                node,
+                with_optional_profile(
+                    CompileOptions::new()
+                        .with_plan(Plan::Columnar)
+                        .with_pack(false),
+                    profile,
+                ),
+            )
         }
     };
-    compiled.map_err(|error| error.code)
+    compiled.map_err(|error| error.code())
 }
 
 #[test]
@@ -240,7 +261,7 @@ fn run_invalid_decode(file: &Json, plan: Plan) {
         let errcode = codec
             .decode_body(&from_hex(v["hex"].as_str().unwrap()))
             .expect_err(&format!("{name}: expected decode failure"))
-            .code
+            .code()
             .as_str()
             .to_owned();
         assert_eq!(errcode, v["error"].as_str().unwrap(), "{name}");
@@ -257,7 +278,7 @@ fn run_invalid_encode(file: &Json, plan: Plan) {
         let errcode = codec
             .encode_body(&value_of(&v["value"]))
             .expect_err(&format!("{name}: expected encode failure"))
-            .code
+            .code()
             .as_str()
             .to_owned();
         assert_eq!(errcode, v["error"].as_str().unwrap(), "{name}");
@@ -313,12 +334,15 @@ fn limits_codec(vector: &Json) -> Codec {
     let inflate = vector
         .get("inflate")
         .is_none_or(|value| value.as_bool().unwrap());
-    Codec::compile_with_profile(
+    Codec::compile(
         node_of(&vector["ir"]).unwrap(),
-        plan,
-        limits,
-        inflate,
-        profile,
+        with_optional_profile(
+            CompileOptions::new()
+                .with_plan(plan)
+                .with_limits(limits)
+                .with_pack(inflate),
+            profile,
+        ),
     )
     .unwrap()
 }
@@ -368,7 +392,7 @@ fn run_limit_vectors(file: &Json) {
                         .decode_body(&from_hex(vector["hex"].as_str().unwrap()))
                         .expect_err(name);
                     assert_eq!(
-                        error.code.as_str(),
+                        error.code().as_str(),
                         vector["error"].as_str().unwrap(),
                         "{name}"
                     );
@@ -377,12 +401,12 @@ fn run_limit_vectors(file: &Json) {
                     let value = value_of(&vector["value"]);
                     let expected = vector["error"].as_str().unwrap();
                     assert_eq!(
-                        codec.encode_body(&value).expect_err(name).code.as_str(),
+                        codec.encode_body(&value).expect_err(name).code().as_str(),
                         expected,
                         "{name}"
                     );
                     assert_eq!(
-                        codec.encode(&value).expect_err(name).code.as_str(),
+                        codec.encode(&value).expect_err(name).code().as_str(),
                         expected,
                         "{name}"
                     );
@@ -395,7 +419,7 @@ fn run_limit_vectors(file: &Json) {
                     assert!(deep_eq(&decoded, &value), "{name}: decode mismatch");
                     if section == "decodeOnly" {
                         assert_eq!(
-                            codec.encode_body(&value).expect_err(name).code.as_str(),
+                            codec.encode_body(&value).expect_err(name).code().as_str(),
                             "limit",
                             "{name}"
                         );
@@ -426,7 +450,13 @@ fn columnar_hostile_count_fails_before_decoding_columns() {
         )),
         length: None,
     };
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_pack(false),
+    )
+    .unwrap();
     let rem = 2042 - 4;
     let count = 4096 * (rem + 1);
     let mut body = Vec::new();
@@ -439,7 +469,10 @@ fn columnar_hostile_count_fails_before_decoding_columns() {
     assert_eq!(body.len(), 4);
     body.extend_from_slice(&[0x02, 0x00, 0x00, 0xff]);
     body.resize(2042, 0);
-    assert_eq!(codec.decode_body(&body).unwrap_err().code.as_str(), "limit");
+    assert_eq!(
+        codec.decode_body(&body).unwrap_err().code().as_str(),
+        "limit"
+    );
 }
 
 #[test]
@@ -448,15 +481,15 @@ fn packed_without_inflate_fails_closed() {
     let v = &file["packedDecode"][0];
     let codec = Codec::compile(
         node_of(&v["ir"]).unwrap(),
-        Plan::Columnar,
-        Limits::default(),
-        false,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_pack(false),
     )
     .unwrap();
     let e = codec
         .decode_body(&from_hex(v["hex"].as_str().unwrap()))
         .unwrap_err();
-    assert_eq!(e.code.as_str(), "unsupported");
+    assert_eq!(e.code().as_str(), "unsupported");
 }
 
 #[test]
@@ -479,7 +512,7 @@ fn packed_string_column_before_truncated_int_column() {
         optional: false,
         nullable: false,
     });
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), true).unwrap();
+    let codec = Codec::compile(ir, CompileOptions::new().with_plan(Plan::Columnar)).unwrap();
     let mut body = from_hex(vector["hex"].as_str().unwrap());
     assert_eq!(body[1], 0x02);
     body.extend_from_slice(&[0x00, 0x02, 0x04]);
@@ -487,7 +520,7 @@ fn packed_string_column_before_truncated_int_column() {
     assert!(deep_eq(&codec.decode_body(&body).unwrap(), &value));
     *body.last_mut().unwrap() = 0x80;
     assert_eq!(
-        codec.decode_body(&body).unwrap_err().code.as_str(),
+        codec.decode_body(&body).unwrap_err().code().as_str(),
         "truncated"
     );
 }
@@ -501,8 +534,8 @@ fn packed_string_column_validates_each_utf8_slice() {
     assert!(deep_eq(&codec.decode_body(&valid).unwrap(), &value));
     let invalid = from_hex("0202010107010200fdffc3a9");
     let error = codec.decode_body(&invalid).unwrap_err();
-    assert_eq!(error.code.as_str(), "utf8");
-    assert_eq!(error.message, "$[].s[0]: invalid UTF-8");
+    assert_eq!(error.code().as_str(), "utf8");
+    assert_eq!(error.message(), "$[].s[0]: invalid UTF-8");
 }
 
 #[test]
@@ -516,7 +549,13 @@ fn columnar_enum_optional_nullable_round_trip() {
         }])),
         length: None,
     };
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_pack(false),
+    )
+    .unwrap();
     for rows in [
         serde_json::json!([{}, {"e": null}, {"e": "雪"}, {"e": "x"}, {"e": "y"}, {"e": "雪"}]),
         serde_json::json!([{}, {"e": null}]),
@@ -542,18 +581,24 @@ fn row_array_of_columnar_arrays_enforces_one_bit_floor() {
         }),
         length: None,
     };
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_pack(false),
+    )
+    .unwrap();
     let value = value_of(&serde_json::json!([
         [{"e": "x"}, {"e": "x"}],
         [{"e": "x"}, {"e": "x"}],
         [{"e": "x"}, {"e": "x"}],
     ]));
     assert_eq!(
-        codec.encode_body(&value).unwrap_err().code.as_str(),
+        codec.encode_body(&value).unwrap_err().code().as_str(),
         "limit"
     );
     assert_eq!(
-        codec.decode_body(&[0x03]).unwrap_err().code.as_str(),
+        codec.decode_body(&[0x03]).unwrap_err().code().as_str(),
         "limit"
     );
     let empty = Value::Array(Vec::new());
@@ -589,12 +634,12 @@ fn fingerprints() {
             "{}",
             case["name"]
         );
-        let codec = Codec::compile_with_profile(
+        let codec = Codec::compile(
             node_of(&case["ir"]).unwrap(),
-            plan,
-            Limits::default(),
-            false,
-            profile,
+            with_optional_profile(
+                CompileOptions::new().with_plan(plan).with_pack(false),
+                profile,
+            ),
         )
         .unwrap();
         assert_eq!(codec.artifact(), canonical, "{}", case["name"]);
@@ -621,7 +666,7 @@ fn envelope_roundtrip() {
     assert!(deep_eq(&codec.decode(&wire).unwrap(), &value));
     let other = compile(&file["valid"][3]["ir"], Plan::Row);
     assert_eq!(
-        other.decode(&wire).unwrap_err().code.as_str(),
+        other.decode(&wire).unwrap_err().code().as_str(),
         "fingerprint"
     );
 }
@@ -791,14 +836,13 @@ fn profile_of(json: &Json) -> Result<Profile, String> {
                 Some(Derivation { source, values })
             }
         };
-        columns.push(ProfileColumn {
-            leaf,
-            dict,
-            grammar,
-            derived,
-        });
+        let mut column = ProfileColumn::new(leaf);
+        column.dict = dict;
+        column.grammar = grammar;
+        column.derived = derived;
+        columns.push(column);
     }
-    Ok(Profile { version, columns })
+    Ok(Profile::new(version, columns))
 }
 
 fn profiled_codec(v: &Json, with_profile: bool) -> Codec {
@@ -807,12 +851,14 @@ fn profiled_codec(v: &Json, with_profile: bool) -> Codec {
     } else {
         None
     };
-    Codec::compile_with_profile(
+    Codec::compile(
         node_of(&v["ir"]).unwrap(),
-        Plan::Columnar,
-        Limits::default(),
-        false,
-        profile,
+        with_optional_profile(
+            CompileOptions::new()
+                .with_plan(Plan::Columnar)
+                .with_pack(false),
+            profile,
+        ),
     )
     .unwrap()
 }
@@ -860,7 +906,7 @@ fn profiled_vectors() {
         let e = codec
             .decode_body(&from_hex(v["hex"].as_str().unwrap()))
             .expect_err(name);
-        assert_eq!(e.code.as_str(), v["error"].as_str().unwrap(), "{name}");
+        assert_eq!(e.code().as_str(), v["error"].as_str().unwrap(), "{name}");
     }
 
     for v in profiled["requiresProfile"].as_array().unwrap() {
@@ -869,22 +915,22 @@ fn profiled_vectors() {
         let e = codec
             .decode_body(&from_hex(v["hex"].as_str().unwrap()))
             .expect_err(name);
-        assert_eq!(e.code.as_str(), v["error"].as_str().unwrap(), "{name}");
+        assert_eq!(e.code().as_str(), v["error"].as_str().unwrap(), "{name}");
     }
 
     for v in profiled["invalidProfile"].as_array().unwrap() {
         let name = v["name"].as_str().unwrap();
         let code = match profile_of(&v["profile"]) {
             Err(_) => "ir",
-            Ok(profile) => match Codec::compile_with_profile(
+            Ok(profile) => match Codec::compile(
                 node_of(&v["ir"]).unwrap(),
-                Plan::Columnar,
-                Limits::default(),
-                false,
-                Some(profile),
+                CompileOptions::new()
+                    .with_plan(Plan::Columnar)
+                    .with_pack(false)
+                    .with_profile(profile),
             ) {
                 Ok(_) => panic!("{name}: expected profile compilation failure"),
-                Err(error) => error.code.as_str(),
+                Err(error) => error.code().as_str(),
             },
         };
         assert_eq!(code, v["error"].as_str().unwrap(), "{name}");
@@ -913,16 +959,15 @@ fn profiled_values_obey_total_byte_budget() {
         }
         let body = from_hex(vector["hex"].as_str().unwrap());
         for cap in [total, total - 1] {
-            let limits = Limits {
-                max_total_bytes: cap,
-                ..Limits::default()
-            };
-            let codec = Codec::compile_with_profile(
+            let mut limits = Limits::default();
+            limits.max_total_bytes = cap;
+            let codec = Codec::compile(
                 node_of(&vector["ir"]).unwrap(),
-                Plan::Columnar,
-                limits,
-                false,
-                Some(profile_of(&vector["profile"]).unwrap()),
+                CompileOptions::new()
+                    .with_plan(Plan::Columnar)
+                    .with_limits(limits)
+                    .with_pack(false)
+                    .with_profile(profile_of(&vector["profile"]).unwrap()),
             )
             .unwrap();
             if cap == total {
@@ -933,17 +978,17 @@ fn profiled_values_obey_total_byte_budget() {
                 );
             } else {
                 assert_eq!(
-                    codec.encode_body(&value).expect_err(name).code,
+                    codec.encode_body(&value).expect_err(name).code(),
                     ErrorCode::Limit,
                     "{name}"
                 );
                 assert_eq!(
-                    codec.encode(&value).expect_err(name).code,
+                    codec.encode(&value).expect_err(name).code(),
                     ErrorCode::Limit,
                     "{name}"
                 );
                 assert_eq!(
-                    codec.decode_body(&body).expect_err(name).code,
+                    codec.decode_body(&body).expect_err(name).code(),
                     ErrorCode::Limit,
                     "{name}"
                 );
@@ -956,9 +1001,7 @@ fn profiled_values_obey_total_byte_budget() {
 fn zero_sign() {
     let zero = Codec::compile(
         Node::Literal(Literal::Int(0)),
-        Plan::Row,
-        Limits::default(),
-        false,
+        CompileOptions::new().with_pack(false),
     )
     .unwrap();
     for value in [Value::Int(0), Value::Float(0.0), Value::Float(-0.0)] {
@@ -967,14 +1010,14 @@ fn zero_sign() {
     assert_eq!(
         zero.encode_body(&Value::Float(1.0))
             .unwrap_err()
-            .code
+            .code()
             .as_str(),
         "type"
     );
     let negative = node_of(&serde_json::json!({"kind": "literal", "value": -0.0})).unwrap();
     assert_eq!(negative, Node::Literal(Literal::Int(0)));
 
-    let float = Codec::compile(Node::Float64, Plan::Row, Limits::default(), false).unwrap();
+    let float = Codec::compile(Node::Float64, CompileOptions::new().with_pack(false)).unwrap();
     let body = float.encode_body(&Value::Float(-0.0)).unwrap();
     assert_eq!(body, vec![0; 8]);
     let Value::Float(decoded) = float.decode_body(&body).unwrap() else {
@@ -1006,7 +1049,13 @@ fn columnar_bytes_and_literal_leaves_round_trip() {
         ])),
         length: None,
     };
-    let codec = Codec::compile(ir, Plan::Columnar, Limits::default(), false).unwrap();
+    let codec = Codec::compile(
+        ir,
+        CompileOptions::new()
+            .with_plan(Plan::Columnar)
+            .with_pack(false),
+    )
+    .unwrap();
     let rows: Vec<Value> = (0..5)
         .map(|i| {
             let mut row = vec![("l".to_owned(), Value::Str("x".into()))];
@@ -1021,5 +1070,5 @@ fn columnar_bytes_and_literal_leaves_round_trip() {
     let body = codec.encode_body(&value).unwrap();
     assert!(deep_eq(&codec.decode_body(&body).unwrap(), &value));
     let truncated = codec.decode_body(&body[..body.len() - 1]).unwrap_err();
-    assert_eq!(truncated.code.as_str(), "truncated");
+    assert_eq!(truncated.code().as_str(), "truncated");
 }

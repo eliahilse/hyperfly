@@ -1,19 +1,24 @@
 import type { Codec } from "./codec.js";
 
 /**
- * Codecs keyed by fingerprint. Rotation is why this exists: retraining a profile
+ * Versions of one payload type, keyed by fingerprint. JSON bodies use the first
+ * registered codec as their value model; an empty registry leaves JSON unchanged.
+ * Rotation is why this exists: retraining a profile
  * produces a new fingerprint, so a deployment that holds only one codec per route
  * turns every rollout into a cutover in which in-flight clients fall back to JSON.
  * Holding the outgoing codec alongside the incoming one makes that a transition.
  */
-export class CodecRegistry {
-  private readonly byFingerprint = new Map<string, Codec<unknown>>();
+export class CodecRegistry<T = unknown> {
+  private readonly byFingerprint = new Map<string, Codec<T>>();
 
-  constructor(codecs: readonly Codec<unknown>[] = []) {
+  /** Codecs of one payload type infer it; codecs of different types make a registry of `unknown`. */
+  constructor(codecs?: readonly Codec<T>[]);
+  constructor(codecs?: readonly Codec<NoInfer<T>>[]);
+  constructor(codecs: readonly Codec<T>[] = []) {
     for (const codec of codecs) this.add(codec);
   }
 
-  add(codec: Codec<unknown>): this {
+  add(codec: Codec<T>): this {
     this.byFingerprint.set(codec.fingerprint, codec);
     return this;
   }
@@ -22,7 +27,7 @@ export class CodecRegistry {
     return this.byFingerprint.delete(fingerprint);
   }
 
-  get(fingerprint: string): Codec<unknown> | undefined {
+  get(fingerprint: string): Codec<T> | undefined {
     return this.byFingerprint.get(fingerprint);
   }
 
@@ -48,7 +53,7 @@ export class CodecRegistry {
    * That is what lets a client migrate itself during a rotation without the server
    * tracking who holds what.
    */
-  select(accepted: readonly string[]): Codec<unknown> | undefined {
+  select(accepted: readonly string[]): Codec<T> | undefined {
     for (const fingerprint of accepted) {
       const codec = this.byFingerprint.get(fingerprint);
       if (codec) return codec;

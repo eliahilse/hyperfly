@@ -19,6 +19,8 @@ The benchmarks below are reproducible.
 Zod and Pydantic are needed only for the schema adapters; the codec and HTTP layers
 run without them.
 
+The npm package requires Node.js 22 or later and is ESM only.
+
 ## What it costs on the wire
 
 Bytes per message, averaged over 500-message corpora (`bun run build --filter=hyperfly`, then
@@ -57,7 +59,7 @@ implementation ports against [the golden vectors](spec/vectors), not against thi
 code.
 
 - [wire v0](spec/wire-v0.md) — envelope, varints, bitmaps, node encodings, canonical
-  artifacts, decoder limits
+  artifacts, limits
 - [plan columnar v5](spec/plan-columnar-v5.md) — column layout, frame-of-reference
   bit packing, scaled-decimal and XOR numerics, packed text, trained dictionaries,
   grammar lanes, derived columns
@@ -88,6 +90,8 @@ CI runs all three suites with lint, type and clippy checks, a Python version
 matrix, the Rust MSRV, package checks on the npm tarball, and the cross-language
 interop exchange on every pull request and every push to `main`. [CONTRIBUTING.md](CONTRIBUTING.md) covers
 changesets and how releases are published.
+
+[Stability and versioning](STABILITY.md) covers compatibility; [the security policy](SECURITY.md) covers vulnerability reporting.
 
 ## License
 

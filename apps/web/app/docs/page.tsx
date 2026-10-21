@@ -90,6 +90,9 @@ export default function DocsPage() {
               core package has no Pydantic dependency; use the extra for the Pydantic example below.
             </p>
           </div>
+          <p className="docs-prose">
+            The npm package requires Node.js 22 or later and is ESM only.
+          </p>
           <CodeBlock label="terminal">{`npm install hyperfly zod
 pip install hyperfly
 # With the Pydantic adapter (Pydantic >= 2.5):
@@ -184,7 +187,7 @@ export default {
             registering that artifact, it advertises the fingerprint and can receive binary on
             the next request. Responses carry <code>Vary: Hyperfly-Accept, Accept</code>. If the
             encoder refuses a value under its limits (code <code>limit</code> or <code>depth</code>),
-            {" "}<code>respond</code> sends it as JSON instead and calls <code>onFallback(error)</code>;
+            {" "}<code>respond</code> sends it as JSON instead and calls <code>{`onFallback(error, "encoder-limit")`}</code>;
             any other encode error is thrown. See the <a href={`${README}#json-fallback`}>JSON
             fallback</a> and, for Node and Express servers, the{" "}
             <a href={`${README}#node-and-express`}>Express example</a>.
@@ -202,7 +205,7 @@ export default {
             <h2 className="section-title" id="request-bodies-title">Read request bodies</h2>
             <p className="section-lead">
               Bound incoming JSON and binary bytes with <code>maxBytes</code>, then forward the
-              returned error response when <code>ok</code> is false.
+              returned error response when <code>ok</code> is false; <code>reason</code> says why.
             </p>
           </div>
           <CodeBlock label="TypeScript · request body">{`import { readBody, respond } from "hyperfly/http";
@@ -214,11 +217,14 @@ async function receive(request: Request) {
 }`}</CodeBlock>
           <p className="docs-prose">The first applicable rule wins:</p>
           <ol className="docs-list">
-            <li><code>415</code>: unsupported media type; absent Content-Type means JSON and <code>+json</code> is accepted.</li>
-            <li><code>413</code>: body exceeds <code>maxBytes</code>, counted as bytes arrive; Content-Length can reject early.</li>
-            <li><code>400</code>: invalid binary envelope or <code>Hyperfly-Codec</code> disagrees with its fingerprint.</li>
-            <li><code>415 + Hyperfly-Offer</code>: unknown fingerprint; the offer is included when a codec is registered.</li>
-            <li><code>400</code>: binary decode fails, including limits; malformed UTF-8/JSON or a failed stream.</li>
+            <li><code>415</code> <code>unsupported-media-type</code>: absent Content-Type means JSON and <code>+json</code> is accepted.</li>
+            <li><code>413</code> <code>too-large</code>: body exceeds <code>maxBytes</code>, counted as bytes arrive; Content-Length can reject early.</li>
+            <li><code>400</code> <code>unreadable</code>: the body stream cannot be read.</li>
+            <li><code>400</code> <code>malformed-json</code>: a JSON body is malformed UTF-8 or JSON.</li>
+            <li><code>400</code> <code>malformed-envelope</code>: invalid binary envelope header.</li>
+            <li><code>400</code> <code>codec-mismatch</code>: <code>Hyperfly-Codec</code> disagrees with the envelope fingerprint.</li>
+            <li><code>415 + Hyperfly-Offer</code> <code>unknown-codec</code>: the offer is included when a codec is registered.</li>
+            <li><code>400</code> <code>undecodable</code>: binary decode fails, including limits.</li>
           </ol>
         </section>
 
@@ -267,9 +273,9 @@ async function getEvents(url: string) {
             <h2 className="section-title" id="limits-title">Limits</h2>
           </div>
           <p className="docs-prose">
-            A decoder bounds nesting, array counts, value lengths, and two per-body budgets: the
+            Codecs bound nesting, array counts, value lengths, and two per-body budgets: the
             sum of all array counts and the sum of all decoded string and bytes lengths, each
-            scaled to the body&apos;s length. Encoders apply the same limits; over HTTP, a value past them
+            scaled to the body&apos;s length. Over HTTP, a value past these limits
             falls back to JSON. Limits are local to each peer, are not negotiated, and are not
             part of the fingerprint.
           </p>
@@ -291,13 +297,15 @@ async function getEvents(url: string) {
           <ul className="docs-list">
             <li><a href={`${README}#readme`}>Package README</a>: API, limits, errors, and runtime support.</li>
             <li><a href={`${README}#errors`}>Error codes</a>: every <code>HyperflyError</code> code and its <code>cause</code>.</li>
-            <li><a href={`${README}#runtime-support`}>Runtime support</a>: Node, Bun, Deno, Workers, and browsers.</li>
+            <li><a href={`${README}#runtime-support`}>Runtime support</a>: Node.js 22 or later, Bun, Deno, Workers, and browsers.</li>
             <li><a href={`${GITHUB}/blob/main/python/README.md`}>Python README</a>: Pydantic and Python HTTP helpers.</li>
             <li><a href={`${GITHUB}/blob/main/rust/README.md`}>Rust crate README</a>: the Rust codec.</li>
             <li><a href={`${GITHUB}/blob/main/spec/wire-v0.md`}>wire-v0</a>: envelope, primitives, and limits.</li>
             <li><a href={`${GITHUB}/blob/main/spec/plan-columnar-v5.md`}>plan-columnar-v5</a>: column layouts and profiles.</li>
             <li><a href={`${GITHUB}/blob/main/spec/negotiation-v1.md`}>negotiation-v1</a>: HTTP headers, discovery, and rotation.</li>
             <li><a href={`${GITHUB}/tree/main/spec/vectors`}>Golden vectors</a>: shared conformance fixtures.</li>
+            <li><a href={`${GITHUB}/blob/main/STABILITY.md`}>Stability and versioning</a>: what 1.x keeps stable, and the <a href={`${GITHUB}/blob/main/spec/wire-v0.md#stability`}>spec&apos;s stability contract</a>.</li>
+            <li><a href={`${GITHUB}/blob/main/SECURITY.md`}>Security policy</a>: how to report a vulnerability.</li>
           </ul>
         </section>
       </main>

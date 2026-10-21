@@ -15,10 +15,60 @@ import {
   type ProfileColumn,
 } from "./profile.js";
 
+/**
+ * Dictionary training thresholds; both default when omitted or undefined.
+ * Options must be a plain or null-prototype object with only these keys; invalid or unreadable options fail with `options`.
+ */
 export interface TrainOptions {
-  /** A value must appear at least this often across the samples to be considered. */
+  /** Minimum occurrences across samples; a non-negative integer, with 0 clamped to 1. Defaults to 2. */
   minOccurrences?: number;
+  /** Maximum dictionary entries; a non-negative integer, with values above 16383 clamped to 16383. Zero disables dictionaries. Default: 16383. */
   maxEntries?: number;
+}
+
+function checkedTrainOptions(options: TrainOptions): Required<TrainOptions> {
+  try {
+    if (typeof options !== "object" || options === null || Array.isArray(options)) {
+      throw new HyperflyError("options", "options: must be an object");
+    }
+    const prototype = Object.getPrototypeOf(options);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new HyperflyError("options", "options: must be an object");
+    }
+    for (const key of Reflect.ownKeys(options)) {
+      if (key !== "minOccurrences" && key !== "maxEntries") {
+        throw new HyperflyError("options", `options.${String(key)}: unknown option`);
+      }
+    }
+    const readOption = (key: keyof TrainOptions): number | undefined => {
+      try {
+        return options[key];
+      } catch (cause) {
+        throw new HyperflyError("options", `options.${key}: could not read train option`, { cause });
+      }
+    };
+    const minOccurrences = readOption("minOccurrences");
+    const maxEntries = readOption("maxEntries");
+    if (minOccurrences !== undefined && (!Number.isInteger(minOccurrences) || minOccurrences < 0)) {
+      throw new HyperflyError("options", "minOccurrences: must be a non-negative integer");
+    }
+    if (maxEntries !== undefined && (!Number.isInteger(maxEntries) || maxEntries < 0)) {
+      throw new HyperflyError("options", "maxEntries: must be a non-negative integer");
+    }
+    return {
+      minOccurrences: Math.max(1, minOccurrences ?? 2),
+      maxEntries: Math.min(MAX_DICT_ENTRIES, maxEntries ?? MAX_DICT_ENTRIES),
+    };
+  } catch (cause) {
+    let isOurs = false;
+    try {
+      isOurs = cause instanceof HyperflyError && cause.code === "options";
+    } catch {
+      isOurs = false;
+    }
+    if (isOurs) throw cause;
+    throw new HyperflyError("options", "options: could not read train options", { cause });
+  }
 }
 
 const encoder = new TextEncoder();
@@ -442,21 +492,20 @@ function detectDerivation(
 }
 
 /**
- * Deterministic reference trainer. Explicitly non-normative (spec §6.7): the
- * artifact pins its output, but other trainers may make different valid choices.
- *
- * Dictionary prefix costing, grammar induction, and functional-dependency
- * detection are intentionally separated here so none is mistaken for wire logic.
+ * Deterministically trains string dictionaries, grammars and derivations for eligible arrays (plan-columnar-v5 §6.7).
+ * Returns undefined when no model is selected; dictionaries alone use profile version 1, other models use version 2.
+ * Requires a samples array and valid IR. Samples contribute usable string leaves without full schema validation.
+ * Training is non-normative; the artifact fixes the selected models, and other trainers may choose differently.
  */
 export function train(ir: IRNode, samples: readonly unknown[], options: TrainOptions = {}): Profile | undefined {
   if (!Array.isArray(samples)) throw new HyperflyError("options", "samples: must be an array");
-  return withinStack(() => trainProfile(ir, samples, options));
+  const checked = checkedTrainOptions(options);
+  return withinStack(() => trainProfile(ir, samples, checked));
 }
 
-function trainProfile(ir: IRNode, samples: readonly unknown[], options: TrainOptions): Profile | undefined {
+function trainProfile(ir: IRNode, samples: readonly unknown[], options: Required<TrainOptions>): Profile | undefined {
   validateIR(ir);
-  const minOccurrences = Math.max(1, Math.floor(options.minOccurrences ?? 2));
-  const maxEntries = Math.max(0, Math.min(Math.floor(options.maxEntries ?? MAX_DICT_ENTRIES), MAX_DICT_ENTRIES));
+  const { minOccurrences, maxEntries } = options;
   const refs = enumerateColumns(ir);
   const data: TrainingData = { batches: new Map(), arrays: [] };
   for (const sample of samples) collect(ir, sample, 0, refs, data);

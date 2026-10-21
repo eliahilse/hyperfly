@@ -13,10 +13,15 @@ keywords = ["serialization", "binary", "codec", "columnar", "compression"]
 categories = ["encoding", "compression"]
 include = ["src/**/*.rs", "Cargo.toml", "README.md", "LICENSE", "NOTICE"]
 
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
 [dependencies]
 sha2 = "0.10"
 miniz_oxide = "0.8"
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
-serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip", "unbounded_depth"] }
+serde_stacker = "0.1"

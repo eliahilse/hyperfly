@@ -1,6 +1,7 @@
 import { checkedOptions, compileIR, type Codec, type CompileOptions } from "./codec.js";
-import { DecodeError, EncodeError, UnsupportedSchemaError } from "./errors.js";
+import { DecodeError, EncodeError, messageOf, UnsupportedSchemaError } from "./errors.js";
 import type { IRField, IRNode, LiteralValue } from "./ir.js";
+import { checkArtifactDepth } from "./nesting.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
 interface ZodDef {
@@ -15,14 +16,20 @@ interface ZodInternals {
   output?: unknown;
 }
 
+/** Structural Zod 4 schema contract accepted by the adapter. */
 export interface ZodSchemaLike {
+  /** Zod 4 schema definition, numeric metadata and inferred output marker. */
   _zod: ZodInternals;
+  /** Schema parser required by validate: true; its result is used for encoding. */
   parse?: (value: unknown) => unknown;
 }
 
+/** Inferred Zod output, or unknown when the schema has no output marker. */
 export type InferOutput<S> = S extends { _zod: { output: infer O } } ? O : unknown;
 
+/** Codec compilation options with optional Zod parsing on encode and decode. */
 export interface ZodCompileOptions extends CompileOptions {
+  /** Calls schema.parse before encoding and after decoding; decode retains the wire value. Default: false. */
   validate?: boolean;
 }
 
@@ -124,7 +131,8 @@ function unwrap(z: ZodInternals, path: string): Unwrapped {
   }
 }
 
-function nodeOf(z: ZodInternals, path: string): IRNode {
+function nodeOf(z: ZodInternals, path: string, depth: number): IRNode {
+  checkArtifactDepth(depth);
   const def = z.def as DefRecord;
   const bag = z.bag ?? {};
 
@@ -150,6 +158,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
       return { kind: "float64" };
     }
     case "enum": {
+      checkArtifactDepth(depth + 1);
       const entries = def.entries as Record<string, unknown> | undefined;
       if (!entries) unsupported(path, "enum without entries");
       const members = Object.values(entries);
@@ -183,11 +192,12 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
     case "array": {
       const { inner, optional, nullable } = unwrap(internals(def.element, `${path}[]`), `${path}[]`);
       if (optional) unsupported(`${path}[]`, "optional array elements have no v0 encoding");
-      let element = nodeOf(inner, `${path}[]`);
+      let element = nodeOf(inner, `${path}[]`, depth + 1 + Number(nullable));
       if (nullable) element = { kind: "nullable", inner: element };
       return { kind: "array", element };
     }
     case "object": {
+      checkArtifactDepth(depth + 1);
       if (def.catchall !== undefined) {
         unsupported(path, "catchall/loose objects have no v0 encoding");
       }
@@ -198,7 +208,7 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
         const fieldPath = `${path}.${name}`;
         checkFieldName(name, fieldPath);
         const { inner, optional, nullable } = unwrap(internals(fieldSchema, fieldPath), fieldPath);
-        const field: IRField = { name, type: nodeOf(inner, fieldPath) };
+        const field: IRField = { name, type: nodeOf(inner, fieldPath, depth + 3) };
         if (optional) field.optional = true;
         if (nullable) field.nullable = true;
         fields.push(field);
@@ -210,13 +220,18 @@ function nodeOf(z: ZodInternals, path: string): IRNode {
   }
 }
 
+/** Converts supported Zod 4 constructs to portable IR; unsupported constructs fail with `unsupported` (wire-v0 §4). */
 export function toIR(schema: ZodSchemaLike): IRNode {
   const { inner, optional, nullable } = unwrap(internals(schema, "$"), "$");
   if (optional) unsupported("$", "top-level optional has no v0 encoding");
-  const node = nodeOf(inner, "$");
+  const node = nodeOf(inner, "$", 2 + Number(nullable));
   return nullable ? { kind: "nullable", inner: node } : node;
 }
 
+/**
+ * Compiles a supported Zod 4 schema using the compileIR defaults.
+ * With validate: true, parse failures carry code `validation` and preserve the cause.
+ */
 export function compile<S extends ZodSchemaLike>(
   schema: S,
   options: ZodCompileOptions = {},
@@ -232,15 +247,19 @@ export function compile<S extends ZodSchemaLike>(
     try {
       return schema.parse!(value) as InferOutput<S>;
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "schema parse failed";
+      const message = messageOf(cause, "schema parse failed");
       throw new ErrorClass("validation", `$: ${message}`, { cause });
     }
   };
-  return {
-    ...codec,
-    encode: (value) => codec.encode(parse(value, EncodeError)),
-    decode: (bytes) => parse(codec.decode(bytes), DecodeError),
-    encodeBody: (value) => codec.encodeBody(parse(value, EncodeError)),
-    decodeBody: (bytes) => parse(codec.decodeBody(bytes), DecodeError),
+  const validated = (value: InferOutput<S>): InferOutput<S> => {
+    parse(value, DecodeError);
+    return value;
   };
+  return Object.freeze({
+    ...codec,
+    encode: (value: InferOutput<S>) => codec.encode(parse(value, EncodeError)),
+    decode: (bytes: Uint8Array) => validated(codec.decode(bytes)),
+    encodeBody: (value: InferOutput<S>) => codec.encodeBody(parse(value, EncodeError)),
+    decodeBody: (bytes: Uint8Array) => validated(codec.decodeBody(bytes)),
+  });
 }

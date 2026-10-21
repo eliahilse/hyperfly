@@ -43,7 +43,9 @@ compile(z.object({ meta: z.record(z.string(), z.unknown()) }));
 ```
 
 Zod refinements and string/array length constraints are checked only with
-`compile(EventResponse, { validate: true })`, on encode and decode. Validation is off by default.
+`compile(EventResponse, { validate: true })`, on encode and decode. Validation is off by default. Encode sends the
+parsed value; decode checks the decoded value and returns it as decoded, so a value-changing check such as `overwrite`
+applies once per round trip.
 
 ## Columns and profiles
 
@@ -69,6 +71,10 @@ const profile = train(toIR(EventResponse), [response]); // Supply representative
 const profiled = compile(EventResponse, { plan: "columnar", profile });
 ```
 
+`train` accepts an optional plain options object with non-negative integer `minOccurrences` (default 2, with 0
+clamped to 1) and `maxEntries` (default 16383, with any integer above 16383 clamped to 16383, including values
+beyond the safe integer range), and rejects invalid options with a `HyperflyError` of code `options`.
+
 The dictionary is part of the out-of-band artifact: it ships once, not per request. On an audit-log route in the
 repo's benchmark the dictionary is estimated at 17 KB and pays for itself after about twelve requests; the estimate
 excludes the rest of the artifact.
@@ -91,22 +97,37 @@ export default {
 };
 ```
 
+A `CodecRegistry` holds versions of one payload type. JSON decoding uses its first registered codec;
+an empty registry leaves parsed JSON unchanged. JSON uses canonical padded standard base64 for `bytes`
+at any depth. Decoding converts base64 back to `Uint8Array`, checks the codec value model, accepts integral
+JSON numbers for integers, and drops unknown struct keys. Conversion failures are code `json` for responses
+and `400` with reason `malformed-json` for requests.
+
+JSON encoding converts every `Uint8Array` to base64 regardless of the schema or how the JSON decision
+was created, including `Buffer` and values from other realms. Raw `ArrayBuffer` and non-`Uint8Array`
+views (including `DataView`) raise code `json` with their path, like Python's unsupported `memoryview`;
+wrap the desired range in a `Uint8Array` to send it as bytes.
+
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
+`respond` answers HEAD with the headers GET would get and no body, and status 204, 205 or 304 with the negotiated
+headers, no body and without encoding the value; `discovery` answers GET and HEAD and returns `undefined` otherwise.
 A client opts out with `Accept: application/vnd.hyperfly;q=0`, even when it advertises a matching fingerprint.
 
 ### JSON fallback
 
 When the encoder refuses a value under its [limits](#limits) (an `EncodeError` with code `limit` or `depth`),
 `respond` and `encodeFor` send the same value as JSON with `Hyperfly-Offer` naming the codec, and call
-`onFallback(error)`. The client reads it like any other JSON response. Any other `EncodeError` (`type`, `required`,
+`onFallback(error, "encoder-limit")`. The client reads it like any other JSON response. Any other `EncodeError` (`type`, `required`,
 `range`, `validation`, ...) means the value does not match the schema; it is thrown, not answered as JSON. Pass
 `enabled: false` to `respond` or `negotiate` to answer JSON without consulting the registry, as an operator switch
-or to shed load.
+or to shed load. A JSON decision from `negotiate` carries a `reason` (`FallbackReason`): `disabled`, `accept-refused`
+(Accept opted out), `no-hyperfly-accept` (no Hyperfly-Accept header) or `no-match` (no fingerprint it lists is
+registered).
 
 ### Request bodies
 
-`readBody` returns `{ ok: true, value }` or `{ ok: false, response }`; forward the latter:
+`readBody` returns `{ ok: true, value }` or `{ ok: false, response, reason }`; forward the response:
 
 ```ts
 import { readBody, respond } from "hyperfly/http";
@@ -120,17 +141,23 @@ async function receive(request: Request) {
 
 The first applicable rule in negotiation v1 §4 wins:
 
-| Status | Request-body condition |
-|---|---|
-| 415 | Unsupported media type; absent Content-Type means JSON, and `+json` is accepted. |
-| 413 | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
-| 400 | Invalid binary envelope or `Hyperfly-Codec` disagrees with its fingerprint. |
-| 415 + Hyperfly-Offer | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
-| 400 | Binary decode fails (including limits), JSON is malformed UTF-8/JSON, or the stream fails. |
+| Status | `reason` | Request-body condition |
+|---|---|---|
+| 415 | `unsupported-media-type` | Unsupported media type; absent Content-Type means JSON, and `+json` is accepted. |
+| 413 | `too-large` | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
+| 400 | `unreadable` | The body stream cannot be read. |
+| 400 | `malformed-json` | Malformed UTF-8/JSON or conversion under the first codec fails. |
+| 400 | `malformed-envelope` | Invalid binary envelope header. |
+| 400 | `codec-mismatch` | `Hyperfly-Codec` disagrees with the envelope fingerprint. |
+| 415 + Hyperfly-Offer | `unknown-codec` | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
+| 400 | `undecodable` | Binary decode fails, including limits. |
+
+The reasons (`RequestRefusal`) match the Python package's `RequestError.reason`.
 
 ## Node and Express
 
-`negotiate` takes Hyperfly-Accept and a registry, with Accept in its options; `encodeFor` returns body and headers:
+`negotiate` takes Hyperfly-Accept and a registry, with Accept as its `httpAccept` option; `encodeFor` returns body and
+headers:
 
 ```ts
 import { createServer } from "node:http";
@@ -148,7 +175,7 @@ createServer((req, res) => {
     return;
   }
   const decision = negotiate(header(req.headers["hyperfly-accept"]), registry, {
-    accept: header(req.headers.accept),
+    httpAccept: header(req.headers.accept),
   });
   const { body, headers } = encodeFor(decision, response, { onFallback: console.warn });
   res.writeHead(200, headers);
@@ -194,7 +221,7 @@ app.use((req, res, next) => {
 app.get("/events", (req, res) => send(res, respond(toFetchRequest(req), response, registry)));
 app.post("/events", async (req, res) => {
   const request = toFetchRequest(req);
-  const result = await readBody<typeof response>(request, registry);
+  const result = await readBody(request, registry);
   await send(res, result.ok ? respond(request, result.value, registry) : result.response);
 });
 app.listen(3000);
@@ -280,9 +307,9 @@ then the old codec can be removed once its traffic reaches zero. A new profile i
 
 ## Limits
 
-A few bytes of columnar or profiled body can describe millions of rows or megabytes of text, so a decoder bounds the
-work any input can demand. `DecodeLimits` follow [wire v0 §6](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md)
-and apply to encoding as well (`DEFAULT_LIMITS` holds the defaults):
+A few bytes of columnar or profiled body can describe millions of rows or megabytes of text, so codecs bound the
+work any input can demand. `Limits` follow [wire v0 §6](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md)
+and apply to encoding and decoding (`DEFAULT_LIMITS` holds the defaults):
 
 | Limit | Default | Bounds |
 |---|---|---|
@@ -320,17 +347,17 @@ through the [JSON fallback](#json-fallback).
 
 Separately, `readBody`'s `maxBytes` bounds incoming request bytes, JSON included, and answers 413 past it; it
 defaults to `DEFAULT_MAX_BODY_BYTES` from `hyperfly/http`, 1 MiB (1,048,576 bytes). `fetchArtifact` applies the same
-default to artifact downloads and throws code `limit` past it.
+default to artifact downloads and throws code `artifact` past it.
 
 ## Errors
 
 Compiling, encoding, decoding and loading artifacts throw `HyperflyError` with a `code`; match on `code`, not on the
 message. `EncodeError` and `DecodeError` say which direction failed, `FingerprintMismatchError` is a `DecodeError`
 with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `path`. When an underlying error caused
-it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate hook, that error is the standard
+it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate or deflate hook, that error is the standard
 `cause`; an error that describes the input itself has none. A `maxBytes` that is not a non-negative safe integer is
 code `options`. In `fetchArtifact`, a rejected `fetch` and an abort propagate unchanged; a failure while reading the
-artifact body is code `ir`.
+artifact body is code `artifact`.
 
 ```ts
 import { HyperflyError } from "hyperfly";
@@ -339,7 +366,7 @@ try {
   codec.decode(bytes);
 } catch (error) {
   if (!(error instanceof HyperflyError)) throw error;
-  if (error.code === "limit" || error.code === "depth") console.warn("over the decode limits", error.message);
+  if (error.code === "limit" || error.code === "depth") console.warn("over the limits", error.message);
   else console.warn(`malformed body (${error.code})`, error.cause ?? error.message);
 }
 ```
@@ -357,13 +384,14 @@ try {
 | `trailing` | Bytes remain after a complete body. |
 | `truncated` | Input ends before a required byte or value. |
 | `depth` | Nesting exceeds `maxDepth`. |
-| `limit` | `maxItems`, `maxByteLength`, an amplification bound, the item or byte budget, or a `maxBytes` download bound. |
+| `limit` | `maxItems`, `maxByteLength`, an amplification bound, the item or byte budget. |
 | `header` | Envelope is too short, has bad magic or an unsupported wire major. |
-| `fingerprint` | Fingerprint mismatch, invalid artifact fingerprint or failed artifact HTTP status other than 404. |
-| `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
-| `packed` | Invalid compressed stream or decompressed length mismatch. |
+| `fingerprint` | Fingerprint mismatch or invalid artifact fingerprint. |
+| `ir` | Invalid IR, profile or parsed artifact structure/plan. |
+| `packed` | Invalid compressed stream, decompressed length mismatch, or a failing or invalid deflate hook. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
-| `json` | Malformed JSON in `decodeResponse` or in artifact text; the `SyntaxError` is `cause`. |
+| `artifact` | Non-2xx discovery status other than 404, unreadable/oversized/non-UTF-8 body, or malformed artifact JSON. |
+| `json` | Malformed JSON/UTF-8 or codec conversion in `decodeResponse`, or a value the JSON fallback cannot encode; the underlying error, when there is one, is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
 | `options` | Invalid compile, artifact, `train` or HTTP options, such as an unknown limit or an invalid `maxBytes`. |
 
@@ -373,19 +401,21 @@ ESM only, three entry points:
 
 - `hyperfly`: the codec. `compileIR`, `CodecRegistry`, `train`, `defaultPackHooks`, `serializeArtifact`,
   `validateIR`, `validateProfile`, `DEFAULT_LIMITS`, the error classes, and the `Codec`, `CompileOptions`,
-  `DecodeLimits`, `PackHooks`, `Profile`, `IRNode` and related types.
+  `Limits`, `PackHooks`, `Profile`, `IRNode` and related types.
 - `hyperfly/zod`: `compile` and `toIR` for Zod 4 schemas, with `InferOutput` and `ZodCompileOptions`. The only entry
   point that needs `zod`.
 - `hyperfly/http`: negotiation (`negotiate`, `encodeFor`, `respond`, `parseAccept`, `acceptHeader`), bodies
-  (`readBody`, `decodeResponse`), artifacts (`discovery`, `serveArtifact`, `fetchArtifact`, `loadArtifact`) and the
-  header, media-type and `DEFAULT_MAX_BODY_BYTES` constants.
+  (`readBody`, `decodeResponse`), artifacts (`discovery`, `serveArtifact`, `fetchArtifact`, `loadArtifact`), the
+  header, media-type and `DEFAULT_MAX_BODY_BYTES` constants, and the `NegotiateOptions`, `EncodeOptions`,
+  `RespondOptions`, `Negotiation`, `FallbackReason`, `ReadBodyResult`, `RequestRefusal`, `DecodedResponse` and
+  `ArtifactResponse` types.
 
 ## Runtime support
 
+Requires Node.js 22 or later; ESM only.
+
 | Runtime | Codec and `hyperfly/http` | Decodes packed string columns | Packs string columns on encode | Verified |
 |---|---|---|---|---|
-| Node 18 | Yes | Yes | No | Supported |
-| Node 20 | Yes | Yes | From 20.16 | Supported |
 | Node 22 | Yes | Yes | From 22.3 | Supported |
 | Node 24 | Yes | Yes | Yes | Supported |
 | Bun | Yes | Yes | Yes | Tested in CI |
@@ -408,7 +438,7 @@ const packed = compile(EventResponse, { plan: "columnar", pack });
 
 `pack` replaces the default hooks as a whole, so a hook set without `inflate` cannot decode packed columns, and
 `pack: false` disables both. HTTP helpers use the `fetch`, `Request`, `Response`, `Headers` and `ReadableStream`
-globals, which Node 18 and later provide. CI runs the TypeScript tests and the TypeScript/Python HTTP interop on Bun;
+globals, which Node.js 22 and later provide. CI runs the TypeScript tests and the TypeScript/Python HTTP interop on Bun;
 it does not run a Node, Deno or browser matrix.
 
 ## What it costs on the wire
@@ -437,7 +467,7 @@ production traffic has been measured yet.
   is parsed; it never misreads.
 - **Canonical output.** Encoding is canonical for a given implementation, version and set of pack hooks;
   decoding what it emitted and encoding the result again reproduces the same bytes.
-- **Bounded decoding.** Nesting, item counts and byte lengths are limited. Per-body
+- **Bounded encoding and decoding.** Nesting, item counts and byte lengths are limited. Per-body
   item and byte budgets bound the sum of all array counts and of all decoded string
   and bytes lengths, and amplification bounds cap how many rows or bytes a hostile
   byte can demand, even when a constant column packs to zero bits.
@@ -455,10 +485,10 @@ production traffic has been measured yet.
 | `compileIR(ir, options?)` | `hyperfly`: canonical IR → codec; same options except `validate`. |
 | `train(ir, samples, options?)` | `hyperfly`: sampled responses → profile. Non-normative. |
 | `DEFAULT_LIMITS` · `defaultPackHooks()` | `hyperfly`: the default [limits](#limits) and deflate/inflate hooks. |
-| `CodecRegistry` | `hyperfly`: codecs by fingerprint; `add`, `get`, `remove`, `fingerprints`. |
-| `negotiate` · `encodeFor` · `respond` | `hyperfly/http`: select a representation, encode it, or answer a fetch request. |
-| `discovery` · `serveArtifact` | `hyperfly/http`: serve artifacts from a Request or pathname. |
-| `readBody(request, registry, options?)` | `hyperfly/http`: bounded JSON/binary request decoding. |
+| `CodecRegistry<T>` | `hyperfly`: codecs by fingerprint, typed by payload; `add`, `get`, `remove`, `fingerprints`. |
+| `negotiate` · `encodeFor` · `respond` | `hyperfly/http`: select a representation, encode it, or answer a fetch request; options `NegotiateOptions`, `EncodeOptions`, `RespondOptions`. |
+| `discovery` · `serveArtifact` | `hyperfly/http`: serve artifacts from a Request, or as an `ArtifactResponse` from a pathname. |
+| `readBody(request, registry, options?)` | `hyperfly/http`: bounded JSON/binary request decoding; a refusal names its `reason`. |
 | `acceptHeader(fingerprints)` | `hyperfly/http`: build Hyperfly-Accept in preference order. |
 | `decodeResponse(contentType, bytes, registry)` | `hyperfly/http`: JSON/binary value or `unknown-codec`. |
 | `fetchArtifact(base, fingerprint, options?)` | `hyperfly/http`: fetch, compile and verify an artifact; 404 → `undefined`. |
@@ -473,6 +503,16 @@ The authorities are the specifications, not this implementation:
 A future implementation ports against the
 [golden vectors](https://github.com/eliahilse/hyperfly/tree/main/spec/vectors), not
 against this code.
+
+## Stability
+
+From 1.0.0 this package follows semver. The wire format, IR, fingerprints, error
+codes, limits and negotiation are frozen for 1.x
+([wire v0, Stability](https://github.com/eliahilse/hyperfly/blob/main/spec/wire-v0.md#stability)).
+[STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md) covers
+what counts as breaking, and
+[SECURITY.md](https://github.com/eliahilse/hyperfly/blob/main/SECURITY.md) covers
+vulnerability reporting.
 
 ## License
 
