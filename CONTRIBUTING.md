@@ -27,9 +27,8 @@ the PyPI and crates.io versions for Changesets. `bun run version-packages`
 writes them into `pyproject.toml` (as PEP 440, `1.0.0-alpha.1` becomes
 `1.0.0a1`), `Cargo.toml` and `Cargo.lock`.
 
-The repository is in prerelease mode (`.changeset/pre.json`, tag `alpha`), so
-every bump produces an `-alpha.N` version. `bun changeset pre exit` leaves it
-before the first stable release.
+A future prerelease line starts with `bun changeset pre enter <tag>` and ends with
+`bun changeset pre exit`.
 
 ## Releasing
 

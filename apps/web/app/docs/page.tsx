@@ -4,6 +4,7 @@ import { Mark } from "../mark";
 
 const GITHUB = "https://github.com/eliahilse/hyperfly";
 const README = `${GITHUB}/tree/main/packages/hyperfly`;
+const STABILITY = `${GITHUB}/blob/main/STABILITY.md`;
 const SECTIONS = [
   ["install", "Install"],
   ["compile", "Compile a codec"],
@@ -66,8 +67,9 @@ export default function DocsPage() {
             </p>
           </div>
           <p className="docs-prose">
-            Hyperfly is a pre-release; expect breaking changes before 1.0. This guide covers the
-            first request. The <a href={`${README}#reference`}>package README</a> has the API and
+            Hyperfly 1.x keeps the public API and wire format compatible per the{" "}
+            <a href={STABILITY}>stability policy</a>. This guide covers the first request.
+            The <a href={`${README}#reference`}>package README</a> has the API and
             runtime reference tables.
           </p>
           <nav className="docs-toc" aria-label="On this page">
@@ -84,18 +86,17 @@ export default function DocsPage() {
             <span className="section-index">01</span>
             <h2 className="section-title" id="install-title">Install</h2>
             <p className="section-lead">
-              Pre-releases are published under npm&apos;s <code>next</code> tag and need
-              {" "}<code>--pre</code> with pip. Zod 4 is needed only for the Zod adapter. Python&apos;s
+              Zod 4 is needed only for the Zod adapter. Python&apos;s
               core package has no Pydantic dependency; use the extra for the Pydantic example below.
             </p>
           </div>
           <p className="docs-prose">
             The npm package requires Node.js 22 or later and is ESM only.
           </p>
-          <CodeBlock label="terminal">{`npm install hyperfly@next zod
-pip install --pre hyperfly
+          <CodeBlock label="terminal">{`npm install hyperfly zod
+pip install hyperfly
 # With the Pydantic adapter (Pydantic >= 2.5):
-pip install --pre "hyperfly[pydantic]"`}</CodeBlock>
+pip install "hyperfly[pydantic]"`}</CodeBlock>
         </section>
 
         <section className="section" id="compile" aria-labelledby="compile-title">

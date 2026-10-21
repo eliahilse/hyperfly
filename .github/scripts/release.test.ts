@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { changelogSection, distTag, needsRelease, publishedCommit, pythonDists, repositoryMatches, vcsInfoCommit, withGitHead } from "./release"
+import { changelogSection, distTag, needsRelease, publishedCommit, pythonDists, releaseFlags, repositoryMatches, vcsInfoCommit, withGitHead } from "./release"
 
 const sha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -14,6 +14,11 @@ test("prereleases publish under next, never latest", () => {
   expect(distTag("1.0.0-alpha.0")).toBe("next")
   expect(distTag("1.0.0-rc.2")).toBe("next")
   expect(distTag("1.0.0")).toBe("latest")
+})
+
+test("only prereleases get prerelease GitHub release flags", () => {
+  expect(releaseFlags("1.0.0")).toEqual([])
+  expect(releaseFlags("1.0.0-alpha.1")).toEqual(["--prerelease", "--latest=false"])
 })
 
 test("the packed manifest records the commit as gitHead and keeps every other field", () => {

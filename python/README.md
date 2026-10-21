@@ -7,11 +7,10 @@ already reveals what the values usually look like. Hyperfly compiles both into a
 binary protocol for one exact route — and speaks JSON to anything that hasn't been
 told.
 
-> **Pre-release.** The wire format is specified and three implementations agree on
-> it byte-for-byte, but nothing is stable yet.
+The public API and wire format are stable for 1.x per [STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md).
 
 ```bash
-pip install hyperfly[pydantic]
+pip install "hyperfly[pydantic]"
 ```
 
 ## Two lines at the boundary
