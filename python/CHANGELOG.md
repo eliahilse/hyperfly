@@ -1,5 +1,21 @@
 # @hyperfly/python
 
+## 1.0.0
+
+### Major Changes
+
+- 6880138: First stable release of the Python codec, Pydantic adapter and HTTP helpers. The public API and wire format stay compatible throughout 1.x per [STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md).
+
+### Patch Changes
+
+- fd2998a: `Codec` is generic, `hyperfly.pydantic.compile` returns a `ModelCodec` that works anywhere a `Codec` does, and `PackHooks` and `validate_profile` are exported. `Codec(...)` now takes keyword arguments checked like `compile_ir`, and `train` raises `options` for invalid samples or thresholds.
+- 99535ed: Nested integer bounds follow field validation, so values changed by field validators encode safely; affected fingerprints change. Unvalidated defaults keep declared bounds and can raise `range`; unsupported schemas, recursive models and wire field names raise `UnsupportedSchemaError`.
+- 54eaaf4: JSON bodies decoded under a codec are converted and checked against its schema. JSON fallback writes bytes at declared bytes positions and in plain containers as standard padded base64; `offer=""` suppresses the offer.
+- eb7c7f8: Integral floats such as `1.0` now encode in int fields and int literals as they do in TypeScript. Schemas nested up to the 512-level artifact limit compile, deeper ones raise code `ir` instead of hitting Python's recursion limit, and a profile must be JSON data.
+- 13d0583: HTTP JSON fallback now encodes declared bytes beneath field validators as standard padded base64, so binary payloads round trip reliably, including non-UTF-8 data. Custom serializers keep their existing output.
+- f41b658: The README documents the pydantic type mapping and int bound rules, a raw IR example, the client helpers, JSON conversion under a codec and the public API.
+- 76d97f7: Columnar bodies with arrays of empty fixed-length arrays now decode the same as in the TypeScript and Rust implementations. Python now accepts the bodies its own encoder writes and rejects truncated ones with `truncated`.
+
 ## 1.0.0-alpha.1
 
 ### Patch Changes

@@ -1,5 +1,28 @@
 # hyperfly
 
+## 1.0.0
+
+### Major Changes
+
+- 6880138: First stable release of the TypeScript codec, Zod adapter (`hyperfly/zod`) and HTTP helpers (`hyperfly/http`). The public API and wire format stay compatible throughout 1.x per [STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md).
+
+### Minor Changes
+
+- 57ef0a3: `NegotiateOptions.accept` is now `httpAccept`, `WellKnownResponse` is now `ArtifactResponse`, `FetchHandlerOptions` is now `RespondOptions`, and `onFallback` moves to `EncodeOptions` with `(error, "encoder-limit")`. JSON negotiations and `readBody` refusals carry a `reason` (`FallbackReason`, `RequestRefusal`), and `CodecRegistry<T>` types its codecs.
+- 1508d69: JSON fallback preserves bytes as canonical padded base64 and decodes values using the first registered codec, with consistent request and response failures. Artifact loading reports unreadable responses and malformed JSON with the `artifact` error code.
+- c9565d7: `DecodeLimits` is renamed to `Limits`, since the same bounds apply to encoding and decoding.
+- f9863e0: Requires Node.js 22 or later. The `hyperfly`, `hyperfly/zod` and `hyperfly/http` entry points no longer support Node.js 18 or 20.
+- fc9d2ca: `train` now rejects invalid `minOccurrences`, `maxEntries` and options values with a `HyperflyError` of code `options`, and clamps `minOccurrences` 0 to 1 and `maxEntries` above 16383 to 16383.
+
+### Patch Changes
+
+- 9a33ecb: A struct value must be an object tagged "[object Object]", class instances included, so a typed array, `Map`, `Set`, `Date` or boxed primitive fails with `type` as in Python and Rust. A `bytes` value may come from another realm.
+- de7f289: `respond` and `discovery` answer HEAD, 204, 205 and 304 without a body; HTTP helpers, deflate hooks and `serializeArtifact` throw coded `HyperflyError`s. `readBody` answers bad bodies with 400, 413 or 415 and rejects only invalid options, `validate: true` checks apply once, and `hyperfly/package.json` is exported.
+- ef98f2a: Packed string columns of any size now decode in browsers and edge runtimes without node:zlib, matching node:zlib when `maxByteLength` is raised past 512 MiB.
+- fa55ea3: Schemas nested up to the 512-level artifact limit now compile on every entry point, and deeper schemas are rejected with code `ir` instead of exhausting the stack.
+- ba9d30f: Every public export now has JSDoc, including defaults, error codes and spec references. The README links the stability and security policies.
+- a11cc63: `readBody` and `fetchArtifact` now read bodies correctly from streams that reuse one buffer across chunks.
+
 ## 1.0.0-alpha.1
 
 ### Minor Changes

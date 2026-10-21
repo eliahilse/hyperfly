@@ -70,7 +70,7 @@
     },
     "packages/hyperfly": {
       "name": "hyperfly",
-      "version": "1.0.0-alpha.1",
+      "version": "1.0.0",
       "devDependencies": {
         "@repo/eslint-config": "*",
         "@repo/typescript-config": "*",
@@ -116,11 +116,11 @@
     },
     "python": {
       "name": "@hyperfly/python",
-      "version": "1.0.0-alpha.1",
+      "version": "1.0.0",
     },
     "rust": {
       "name": "@hyperfly/rust",
-      "version": "0.1.1-alpha.0",
+      "version": "1.0.0",
     },
   },
   "packages": {

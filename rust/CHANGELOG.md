@@ -1,5 +1,22 @@
 # @hyperfly/rust
 
+## 1.0.0
+
+### Major Changes
+
+- f2e9f68: `Codec::compile` takes a `CompileOptions` value, errors are read through `Error::code()` and `Error::message()`, and option structs and enums are `#[non_exhaustive]` so 1.x can extend them without breaking callers.
+- 6880138: First stable release of `hyperfly-core`, the Rust codec for row and columnar encoding with optional trained profiles. The public API and wire format stay compatible throughout 1.x per [STABILITY.md](https://github.com/eliahilse/hyperfly/blob/main/STABILITY.md).
+
+### Minor Changes
+
+- e4c7200: Integer fields and integer literals accept an integral `Value::Float` such as `1.0`, matching the TypeScript package.
+
+### Patch Changes
+
+- e2d0e87: When a columnar array has several invalid values, encoding now reports the first one in value order, matching the TypeScript and Python packages.
+- 609a58a: Decoding grammar-coded string columns allocates less per value and runs faster.
+- 9737c8f: Compiling an IR whose artifact nests deeper than 512 levels fails with `ir` instead of risking a stack overflow, as the wire format requires.
+
 ## 0.1.1-alpha.0
 
 ### Patch Changes
