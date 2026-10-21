@@ -2,6 +2,7 @@ import { columnarEligible, encodeColumnarArray } from "./columnar.js";
 import { columnCount, type ProfileIndex } from "./profile.js";
 import { EncodeError, type ErrorCode } from "./errors.js";
 import { hasPayload, literalBytes, utf8Lengths, type IRNode } from "./ir.js";
+import { isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -9,6 +10,28 @@ const encoder = new TextEncoder();
 
 function fail(code: ErrorCode, path: string, message: string): never {
   throw new EncodeError(code, `${path}: ${message}`);
+}
+
+/** The byte length of a Uint8Array of any realm, or undefined for anything else, a Proxy included. */
+function bytesLength(value: unknown): number | undefined {
+  try {
+    if (value instanceof Uint8Array || isUint8Array(value)) return value.length;
+  } catch {
+    // a proxy, or a value whose prototype cannot be read, is not bytes
+  }
+  return undefined;
+}
+
+const objectToString = Object.prototype.toString;
+
+/** A struct value is an object tagged "[object Object]": typed arrays, Map, Set, Date and boxed primitives are not. */
+export function isStructValue(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  try {
+    return objectToString.call(value) === "[object Object]";
+  } catch {
+    return false;
+  }
 }
 
 function checkSurrogates(s: string, path: string): void {
@@ -157,11 +180,12 @@ export function encodeNode(
       return;
     }
     case "bytes": {
-      if (!(value instanceof Uint8Array)) fail("type", path, "expected Uint8Array");
-      if (value.length > ctx.maxByteLength) fail("limit", path, `bytes of ${value.length} exceeds the codec limit`);
-      chargeBytes(value.length, ctx, path);
-      writeUleb(w, BigInt(value.length));
-      w.bytes(value);
+      const length = bytesLength(value);
+      if (length === undefined) fail("type", path, "expected Uint8Array");
+      if (length > ctx.maxByteLength) fail("limit", path, `bytes of ${length} exceeds the codec limit`);
+      chargeBytes(length, ctx, path);
+      writeUleb(w, BigInt(length));
+      w.bytes(value as Uint8Array);
       return;
     }
     case "literal": {
@@ -208,10 +232,8 @@ export function encodeNode(
       return;
     }
     case "struct": {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        fail("type", path, "expected object");
-      }
-      const record = value as Record<string, unknown>;
+      if (!isStructValue(value)) fail("type", path, "expected object");
+      const record = value;
       // own properties only, snapshotted once: inherited Object.prototype members are not data,
       // and accessor properties must not desync the bitmap from the payload
       const snapshot = node.fields.map((field) =>

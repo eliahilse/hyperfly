@@ -871,6 +871,7 @@ impl Codec {
                         format!("{path}: array payload size underflow"),
                     )
                 })?;
+                self.check_amplification(items.len(), payload_bytes, path)?;
                 if has_payload(element) {
                     let affordable = u128::try_from(payload_bytes)
                         .ok()
@@ -888,7 +889,7 @@ impl Codec {
                         );
                     }
                 }
-                self.check_amplification(items.len(), payload_bytes, path)
+                Ok(())
             }
             Node::Struct(fields) => {
                 let Value::Object(_) = value else {
@@ -1136,21 +1137,9 @@ impl Codec {
                     write_bitmap(out, &bits);
                 }
                 Node::Str => {
-                    let mut strings = Vec::with_capacity(input.participating.len());
-                    for (i, v) in input.participating.iter().enumerate() {
-                        match v {
-                            Value::Str(s) => strings.push(s.as_str()),
-                            _ => {
-                                return err(
-                                    ErrorCode::Type,
-                                    format!("{field_path}[{i}]: expected string"),
-                                )
-                            }
-                        }
-                    }
                     enc_string_column(
                         out,
-                        &strings,
+                        &input.participating,
                         &input.slots,
                         &inputs,
                         ordinal_base,
@@ -2642,7 +2631,7 @@ fn write_escape_header(payload: &mut Vec<u8>, escaped: &[bool]) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn enc_string_column(
     out: &mut Vec<u8>,
-    values: &[&str],
+    participating: &[&Value],
     slots: &[usize],
     inputs: &[ColumnInput<'_>],
     ordinal_base: usize,
@@ -2655,11 +2644,15 @@ fn enc_string_column(
     derivation: Option<&Derivation>,
     all_codes: &HashMap<usize, HashMap<String, u64>>,
 ) -> Result<()> {
-    if values.is_empty() {
+    if participating.is_empty() {
         out.push(0);
         return Ok(());
     }
-    for (i, value) in values.iter().enumerate() {
+    let mut strings = Vec::with_capacity(participating.len());
+    for (i, value) in participating.iter().enumerate() {
+        let Value::Str(value) = value else {
+            return err(ErrorCode::Type, format!("{path}[{i}]: expected string"));
+        };
         let len = u64::try_from(value.len()).map_err(|_| {
             Error::new(
                 ErrorCode::Limit,
@@ -2673,7 +2666,9 @@ fn enc_string_column(
             );
         }
         budget.charge_bytes(len, &format!("{path}[{i}]"))?;
+        strings.push(value.as_str());
     }
+    let values = strings.as_slice();
 
     let mut candidates: Vec<(u8, Vec<u8>)> = Vec::new();
     candidates.push((0x00, escaped_payload(values, &vec![true; values.len()])?));

@@ -43,3 +43,6 @@ exclude = ["tests", "package.json"]
 [tool.mypy]
 strict = true
 files = ["src/hyperfly"]
+
+[tool.pytest.ini_options]
+filterwarnings = ["error"]

@@ -30,6 +30,11 @@ export interface Codec<T = unknown> {
   readonly fingerprint: string;
   readonly plan: PlanLayout;
   readonly profile?: Profile;
+  /**
+   * Encode a value into an envelope. A struct value must be an object whose `Object.prototype.toString` tag is
+   * `"[object Object]"` (plain objects, null-prototype objects and class instances); typed arrays, Map, Set, Date and
+   * boxed primitives fail with `type`.
+   */
   encode(value: T): Uint8Array;
   decode(bytes: Uint8Array): T;
   encodeBody(value: T): Uint8Array;

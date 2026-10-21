@@ -97,6 +97,40 @@ jobs:
 
       - run: pytest python/tests -q
 
+  # the Python suite on pydantic 2.5 (the declared floor, on the oldest Python), 2.8, 2.10 and the latest release
+  python-floor:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "python-floor", python: "3.10", pydantic: "2.5" }
+          - { name: "pydantic (2.8)", python: "3.12", pydantic: "2.8" }
+          - { name: "pydantic (2.10)", python: "3.12", pydantic: "2.10" }
+          - { name: "pydantic (latest)", python: "3.12", pydantic: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - if: matrix.pydantic != ''
+        run: pip install "./python[test]" "pydantic==${{ matrix.pydantic }}.*"
+
+      - if: matrix.pydantic == ''
+        run: pip install "./python[test]"
+
+      - if: matrix.pydantic != ''
+        run: python -c "import pydantic; assert pydantic.VERSION.startswith('${{ matrix.pydantic }}.'), pydantic.VERSION"
+
+      - if: matrix.pydantic == ''
+        run: python -c "import pydantic; print(pydantic.VERSION)"
+
+      - run: pytest python/tests -q
+
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -172,7 +206,7 @@ jobs:
             -f state=pending -f context=ci -f description=Running -f target_url="$RUN_URL"
 
   dispatch-report:
-    needs: [dispatch-pending, check, pack, release-checks, python, rust, rust-msrv, interop]
+    needs: [dispatch-pending, check, pack, release-checks, python, python-floor, rust, rust-msrv, interop]
     if: always() && github.event_name == 'workflow_dispatch'
     permissions:
       actions: read

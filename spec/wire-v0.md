@@ -76,9 +76,15 @@ All fixed-width values are **little-endian**. `float64` is IEEE 754 binary64.
 
 ## 4. Node encodings (plan `row` v1)
 
-An integer-valued field accepts any JSON number whose value is an integer in
-`[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its sign;
-fractional values and values beyond that range are invalid IR.
+An integer-valued IR field accepts any JSON number whose value is an integer
+in `[-(2^53 - 1), 2^53 - 1]` (§3.3), and zero is the integer 0 whatever its
+sign; fractional values and values beyond that range are invalid IR.
+
+For an `int` node or an integer `literal`, a value MUST be accepted as an
+integer regardless of its host representation when it is a number whose
+value is an integer in that domain: `1.0` is 1 and `-0.0` is 0. Booleans are
+not numbers. Fractional, non-finite and out-of-domain values MUST be rejected
+on encode with `type`; declared bounds are checked as in §4.4.
 
 IR nodes MUST be objects whose `kind` names one of the kinds below, with all
 required members shown below; fields MUST be objects with `name` and `type`.
@@ -96,6 +102,10 @@ Zero bytes. The value is part of the artifact. v0 literal values are strings,
 booleans, `null`, or JSON-safe integers (non-integer numeric literals are not
 representable in v0).
 
+An integer literal matches any numeric value equal to that integer under the
+§4 rule, including an integral floating-point value. A mismatch MUST be
+rejected on encode with `type`.
+
 ### 4.3 `enum { members }`
 
 ULEB128 index into `members`, in declared order. Index MUST be
@@ -108,7 +118,9 @@ reordering members is a new artifact.
 - If `min` is declared: `uvarint(value - min)` using exact integer arithmetic.
 - Otherwise: `svarint(value)`.
 - Declared bounds are validated on encode AND decode; out-of-bounds MUST be
-  rejected on both sides.
+  rejected on both sides with `range`. On encode, the §4 integer-domain
+  check precedes the bound checks, including for integral floating-point
+  values.
 - If both bounds are declared, `min` MUST NOT exceed `max`.
 
 ### 4.5 `float64`
@@ -143,6 +155,10 @@ field flag (§4.10), which uses the bitmap instead.
 
 Field order is declared order and is canonical.
 Field names MUST be non-empty strings and MUST be unique within a struct.
+An encoder MUST reject with `type` a struct value that is null, an array, a
+bytes value, or a host collection type whose entries are not named fields
+(such as a JavaScript `Map` or `Set`, or a typed array). Which host record
+types carry named fields is the implementation's value model.
 
 **Portable field names.** A field name MUST NOT be `__proto__`, and MUST NOT be
 a decimal array index (`0`, or a digit string with no leading zero whose value
@@ -158,6 +174,17 @@ subject to the other constraints on that string.
 specification does not define for their kind, and profile objects MUST NOT
 carry keys the columnar plan's profile document (plan-columnar-v5 §6.2) does
 not define; such IR or profile is invalid.
+
+**Artifact nesting.** The canonical artifact text (§5, plan-columnar-v5
+§6.5) MUST NOT nest JSON containers deeper than 512. The artifact object is
+depth 1; every object or array value is one deeper than its container.
+This depth is a function of the IR and profile alone, independent of their
+input spelling. An IR or profile whose artifact would exceed this bound is
+invalid IR and MUST be rejected with `ir`. Acceptance within the bound
+MUST NOT depend on a host-language recursion limit, and an implementation
+MUST reject IR or a profile past the bound without unbounded recursion.
+Implementations MUST document any host stack sizing they require. This bound
+is independent of `maxDepth` (§6).
 
 **Unambiguous null.** `nullable(literal null)`, and a field carrying the
 `nullable` flag over a `literal null` type, are both invalid: they give one
@@ -305,16 +332,60 @@ completing each value's checks and charge before examining the next, so the
 first failing value determines the error.
 
 An encoder applies `maxDepth`, `maxItems` and `maxByteLength` as a decoder
-does. It applies the amplification bound to every array with, in place of
-remaining bytes, the number of bytes the array's own encoding occupies after
-its count (for a fixed-length array, all of its bytes), and the item and byte
-budgets with the final body length, counting values exactly as a decoder
-charges them. It applies the same one-bit floor as a decoder, to the same
-arrays, measured by those same bytes. An encoder that would violate any of
-these MUST refuse the value, with `depth` for `maxDepth` and `limit`
-otherwise. An encoder may therefore refuse a value whose body a decoder
-would accept (the decoder's remaining bytes include later siblings), never
-the reverse.
+does. It MUST report the first failure in the traversal below. Entry checks
+precede structural preflight, which precedes value checks; completion checks
+come last. The one exception is the columnar per-column depth checks listed
+under entry checks: they run after the whole array's structural preflight
+and before that column's value checks. These stages are local to the node being visited, not separate
+passes over the whole body.
+
+1. **Entry checks.** A node's `depth` check comes first. A struct's host
+   type check precedes its field preflight. For an array, its host type,
+   `maxItems`, fixed-length agreement and `maxTotalItems` charge are checked
+   in that order, before its preflight, elements or columns. Columnar
+   enclosing-struct and leaf depth checks occur per column, after the whole
+   array's preflight and before that column's values, with the participation
+   conditions in plan-columnar-v5 §2.
+2. **Structural preflight.** After a row-encoded struct's entry checks (1),
+   its fields' presence and nullability are checked in declared order,
+   before any field value is visited. A missing required field is
+   `required`; a null not admitted by the field's nullable flag or its type
+   is `type`. After an eligible columnar array's entry checks (1), all
+   top-level rows are checked to be struct values, in row order, before
+   examining any fields. Then, for each leaf in declared leaf order, the
+   nested-struct containers on its path are checked in row order, outermost
+   first within each row; a missing container is `required`, and a present
+   non-struct container is `type`. For that leaf, all these container checks
+   precede its presence and nullability checks, which follow row order and
+   use the same rules as row fields. Every leaf's preflight completes
+   before any column's depth or value checks. A later leaf's container
+   checks do not precede an earlier leaf's presence or nullability checks.
+3. **Value checks.** Values are visited depth-first in declared order for
+   row encoding; for eligible columnar arrays, column by column in declared
+   leaf order, participating rows in row order within each column. Each
+   value's checks and `maxTotalBytes` charge complete before the next value
+   is examined. `maxByteLength` applies to each string or bytes value after
+   its type and, for strings, Unicode checks, before its byte charge.
+   Literals and enum members are charged after their value checks;
+   `maxByteLength` does not apply to these schema constants.
+4. **Completion checks.** An array's amplification bound and one-bit floor
+   are applied after all of its elements or columns, before visiting a
+   later sibling. The item budget and then the byte budget against the
+   final body length are applied after the whole body. Thus any failure
+   encountered while visiting the array or body precedes its respective
+   completion checks. The `maxTotalItems` and `maxTotalBytes` charges above
+   can fail before the body is complete.
+
+The encoder applies the amplification bound to every array with, in place
+of remaining bytes, the number of bytes the array's own encoding occupies
+after its count (for a fixed-length array, all of its bytes). It applies
+the same one-bit floor as a decoder, to the same arrays, measured by those
+same bytes. The item and byte budgets use the final body length, counting
+values exactly as a decoder charges them. An encoder that would violate any
+of these limits MUST refuse the value, with `depth` for `maxDepth` and
+`limit` otherwise. An encoder may therefore refuse a value whose body a
+decoder would accept (the decoder's remaining bytes include later
+siblings), never the reverse.
 
 Limits are local to each peer and are not negotiated. A peer holding lower
 limits rejects a body its sender accepted; over HTTP, an encoder's refusal
@@ -330,8 +401,9 @@ partial values.
 
 - Little-endian everywhere; no big-endian variant will exist.
 - The IR exclusions in §4.10 (portable field names, well-formed Unicode,
-  closed objects, unambiguous null) are permanent: they exist so that every
-  implementation accepts exactly the same set of artifacts.
+  closed objects, artifact nesting, unambiguous null) are permanent: they
+  exist so that every implementation accepts exactly the same set of
+  artifacts.
 - The fingerprint identifies the full codec artifact. Future columnar, delta,
   dictionary, or profiled layouts are new `plan` values under the same
   serialization scheme; v0 reserves no in-band escape values for them.
@@ -485,16 +557,18 @@ The JSON files under `spec/vectors/` are the 1.x compatibility suite:
 - `columnar.json` — payloads, profiles and artifacts (plan-columnar-v5).
 - `fingerprints.json` — IR → canonical text → fingerprint (§5,
   plan-columnar-v5 §6.5).
+- `http.json` — JSON body representation, response decoding and request bounds
+  (negotiation-v1 §§2, 4).
 - `ir.json` — invalid IR and valid near misses (§4, plan-columnar-v5 §6.2).
 - `limits.json` — limits at and past their bounds, encode and decode (§6).
 - `vectors.json` — row encode/decode pairs and invalid inputs (§3–§4).
 
 Every 1.x implementation MUST pass every applicable row: each row that pins
 Frozen behaviour, and each row for an Addition the implementation
-implements. `accept.json` binds only implementations that provide HTTP
-negotiation. A row whose input the implementation's value model cannot
-represent (a lone surrogate in a language whose strings are Unicode scalar
-values) does not apply to it. A row that decodes a deflate-packed column
-needs the inflate capability; an implementation without it reports
+implements. `accept.json` and `http.json` bind only implementations that
+provide HTTP negotiation. A row whose input the implementation's value model
+cannot represent (a lone surrogate in a language whose strings are Unicode
+scalar values) does not apply to it. A row that decodes a deflate-packed
+column needs the inflate capability; an implementation without it reports
 `unsupported` for that row after the §6 checks that precede it. Within 1.x,
 rows may be added, never changed or removed.
