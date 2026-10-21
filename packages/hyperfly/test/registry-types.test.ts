@@ -88,7 +88,12 @@ test("registry payload types are inferred and flow through the HTTP helpers", as
   assertType<Equal<JsonNegotiation["reason"], Exclude<FallbackReason, "encoder-limit">>>();
   // @ts-expect-error a value the registry's codecs cannot encode
   const mismatched = () => respond(new Request("https://example.test/"), { id: 1 }, registry);
-  expect([typeof misfit, typeof mismatched]).toEqual(["function", "function"]);
+  const literal = new CodecRegistry<"allowed">();
+  // @ts-expect-error the value must not widen the registry's payload type
+  const widened = () => respond(new Request("https://example.test/"), "wrong", literal);
+  // @ts-expect-error the value must not widen the decision's payload type
+  const widenedEncode = () => encodeFor(negotiate(null, literal), "wrong");
+  expect([typeof misfit, typeof mismatched, typeof widened, typeof widenedEncode]).toEqual(["function", "function", "function", "function"]);
 
   const { body, headers } = encodeFor(decision, payload);
   const decoded = decodeResponse(headers["Content-Type"], body, registry);

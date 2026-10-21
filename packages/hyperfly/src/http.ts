@@ -311,7 +311,7 @@ function jsonBody(value: unknown, codec?: Codec): string {
  * Encode one value according to a negotiation decision. JSON decisions returned
  * by `negotiate` retain the first registered codec for bytes representation.
  */
-export function encodeFor<T>(decision: Negotiation<T>, value: T, options: EncodeOptions = {}): Encoded {
+export function encodeFor<T>(decision: Negotiation<T>, value: NoInfer<T>, options: EncodeOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
@@ -613,7 +613,7 @@ export interface RespondOptions extends NegotiateOptions, EncodeOptions {
  */
 export function respond<T>(
   request: Request,
-  value: T,
+  value: NoInfer<T>,
   registry: CodecRegistry<T>,
   options: RespondOptions = {},
 ): Response {
