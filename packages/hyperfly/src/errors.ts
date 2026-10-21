@@ -15,10 +15,10 @@
  * `header`: an envelope is short or has invalid magic or wire major.
  * `fingerprint`: an envelope or artifact fingerprint mismatches, or an artifact fingerprint is malformed.
  * `ir`: IR or a profile is invalid, or an artifact names an unimplemented wire, layout or plan version.
- * `packed`: DEFLATE is invalid, has trailing bytes or produces the wrong inflated length.
+ * `packed`: DEFLATE is invalid, has trailing bytes or produces the wrong inflated length, or a deflate hook fails or returns a non-Uint8Array.
  * `unsupported`: inflate capability, a required profile entry or a schema construct is unsupported.
  * `artifact`: a discovery response or artifact text cannot be read: a non-2xx status other than a 404 miss, or a body that is unreadable, oversized, non-UTF-8 or not well-formed JSON; parsed content that is not a valid artifact is `ir`.
- * `json`: JSON parsing or JSON-body UTF-8 decoding fails in an adapter.
+ * `json`: in an adapter, JSON parsing or UTF-8 decoding fails, or a JSON value does not convert under the codec (for example invalid base64 at a bytes position).
  * `validation`: schema parsing fails when Zod validation is enabled.
  * `options`: compile, training or adapter options are invalid or cannot be read.
  */

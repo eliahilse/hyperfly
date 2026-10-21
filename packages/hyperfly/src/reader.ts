@@ -6,7 +6,7 @@ export interface Limits {
   maxDepth: number;
   /** Maximum elements in one fixed or variable array. Default: 2^24 (wire-v0 §6). */
   maxItems: number;
-  /** Maximum bytes per string/bytes value, packed blob or declared inflated total. Default: 2^28 (wire-v0 §6). */
+  /** Maximum bytes per string/bytes value, packed blob or declared inflated total; schema literals and enum members are not capped. Default: 2^28 (wire-v0 §6). */
   maxByteLength: number;
   /**
    * Caps array counts at maxAmplification * (remaining bytes + 1) and the body item
