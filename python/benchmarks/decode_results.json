@@ -1,0 +1,94 @@
+{
+  "python": "3.13.7",
+  "rows": 10000,
+  "runs": 31,
+  "results": [
+    {
+      "case": "mixed/row",
+      "bytes": 1099296,
+      "decode_ms": 59.720375,
+      "encode_ms": 121.348417,
+      "decode_cpu_ms": 50.884,
+      "encode_cpu_ms": 85.939,
+      "baseline": {
+        "decode_ms": 151.716916,
+        "encode_ms": 142.100292,
+        "decode_cpu_ms": 109.58,
+        "encode_cpu_ms": 87.445
+      }
+    },
+    {
+      "case": "mixed/columnar",
+      "bytes": 986823,
+      "decode_ms": 18.898,
+      "encode_ms": 225.446917,
+      "decode_cpu_ms": 14.958,
+      "encode_cpu_ms": 125.357,
+      "baseline": {
+        "decode_ms": 21.975166,
+        "encode_ms": 227.465708,
+        "decode_cpu_ms": 16.55,
+        "encode_cpu_ms": 123.712
+      }
+    },
+    {
+      "case": "nested/row",
+      "bytes": 1152165,
+      "decode_ms": 158.648042,
+      "encode_ms": 223.054458,
+      "decode_cpu_ms": 62.143,
+      "encode_cpu_ms": 99.359,
+      "baseline": {
+        "decode_ms": 306.701458,
+        "encode_ms": 219.117416,
+        "decode_cpu_ms": 130.222,
+        "encode_cpu_ms": 98.883
+      }
+    },
+    {
+      "case": "nested/columnar",
+      "bytes": 1050769,
+      "decode_ms": 49.739958,
+      "encode_ms": 199.690666,
+      "decode_cpu_ms": 39.801,
+      "encode_cpu_ms": 151.581,
+      "baseline": {
+        "decode_ms": 62.025458,
+        "encode_ms": 220.375459,
+        "decode_cpu_ms": 47.383,
+        "encode_cpu_ms": 158.368
+      }
+    },
+    {
+      "case": "packed/columnar",
+      "bytes": 527230,
+      "decode_ms": 5.826917,
+      "encode_ms": 113.560209,
+      "decode_cpu_ms": 5.193,
+      "encode_cpu_ms": 90.51,
+      "baseline": {
+        "decode_ms": 8.742833,
+        "encode_ms": 113.112459,
+        "decode_cpu_ms": 7.716,
+        "encode_cpu_ms": 93.052
+      }
+    },
+    {
+      "case": "profile/columnar",
+      "bytes": 10012,
+      "decode_ms": 3.652,
+      "encode_ms": 144.684583,
+      "decode_cpu_ms": 3.162,
+      "encode_cpu_ms": 66.507,
+      "baseline": {
+        "decode_ms": 4.334792,
+        "encode_ms": 154.040208,
+        "decode_cpu_ms": 3.388,
+        "encode_cpu_ms": 65.347
+      }
+    }
+  ],
+  "baseline_commit": "22cf2a9d5b8890c70697cafbc743e141afe7d7c7",
+  "runtime_commit": "4efed610b94b7b7440c4474719a188922c2a130a",
+  "gc_enabled": true
+}

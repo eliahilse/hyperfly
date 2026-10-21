@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass
+import sys
 from typing import Any, Callable, Iterable
 
 INT_MIN = -(2**53 - 1)
 INT_MAX = 2**53 - 1
 _ULEB_DOMAIN_MAX = (1 << 56) - 1
 _MAX_ULEB_BYTES = 8
+_CONTINUED_BYTES = bytes(range(128, 256))
 
 
 class HyperflyError(Exception):
@@ -168,14 +170,26 @@ def write_uleb(out: bytearray, value: int) -> None:
 
 
 def read_uleb(r: Reader) -> int:
-    result = 0
-    shift = 0
-    for i in range(_MAX_ULEB_BYTES):
-        byte = r.u8()
-        group = byte & 0x7F
-        result |= group << shift
-        if not byte & 0x80:
-            if i > 0 and group == 0:
+    buf = r.buf
+    pos = r.pos
+    end = len(buf)
+    if pos >= end:
+        raise DecodeError("truncated", "unexpected end of input")
+    byte = buf[pos]
+    r.pos = pos + 1
+    if byte < 0x80:
+        return byte
+    result = byte & 0x7F
+    shift = 7
+    for _ in range(1, _MAX_ULEB_BYTES):
+        pos += 1
+        if pos >= end:
+            raise DecodeError("truncated", "unexpected end of input")
+        byte = buf[pos]
+        r.pos = pos + 1
+        result |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            if byte == 0:
                 raise DecodeError("varint", "overlong uvarint encoding")
             return result
         shift += 7
@@ -184,6 +198,8 @@ def read_uleb(r: Reader) -> int:
 
 def uleb_at(buf: bytes, pos: int) -> tuple[int, int]:
     """read_uleb over a buffer position: the value and the position after it."""
+    if pos < len(buf) and buf[pos] < 0x80:
+        return buf[pos], pos + 1
     result = 0
     shift = 0
     for i in range(_MAX_ULEB_BYTES):
@@ -209,6 +225,22 @@ def read_ulebs(r: Reader, count: int) -> tuple[array[int], DecodeError | None]:
     if len(window) == count and window.isascii():
         r.pos = pos + count
         return array("B", window), None
+    # Length columns commonly consist entirely of two-byte varints. Only take
+    # this path when every group is complete and minimal; otherwise the scalar
+    # reader retains the precise first malformed value for the caller to order.
+    if count >= 64 and pos + 2 * count <= len(buf) and buf[pos] >= 128 and 0 < buf[pos + 1] < 128:
+        pairs = buf[pos : pos + 2 * count]
+        high = pairs[1::2]
+        if high.isascii() and 0 not in high and not pairs[::2].translate(None, _CONTINUED_BYTES):
+            bits = int.from_bytes(pairs, "little")
+            low_mask = int.from_bytes(b"\x7f\x00" * count, "little")
+            decoded = (bits & low_mask) | ((bits >> 1) & (low_mask << 7))
+            values = array("H")
+            values.frombytes(decoded.to_bytes(2 * count, "little"))
+            if sys.byteorder == "big":
+                values.byteswap()
+            r.pos = pos + 2 * count
+            return values, None
     out = array("Q")
     append = out.append
     end = len(buf)
