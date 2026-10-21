@@ -1312,118 +1312,181 @@ def _encode_columnar(
     _check_amplification(len(rows), len(out) - payload_start, False, ctx, path)
 
 
-def _decode_node(r: Reader, node: dict[str, Any], path: str, depth: int, ctx: _Ctx, column: int = 0) -> Any:
-    if depth > ctx.max_depth:
-        _dfail("depth", path, f"nesting deeper than {ctx.max_depth}")
-    kind = node["kind"]
+_Decoder = Callable[[Reader, str], Any]
 
+
+def _compile_decoder(node: dict[str, Any], depth: int, ctx: _Ctx, column: int = 0) -> _Decoder:
+    """Compile bottom up without consuming the caller's stack on deep artifacts."""
+    pending = [(node, depth, column)]
+    order = []
+    while pending:
+        current, level, ordinal = pending.pop()
+        order.append((current, level, ordinal))
+        if level > ctx.max_depth:
+            continue
+        kind = current["kind"]
+        if kind == "nullable":
+            pending.append((current["inner"], level + 1, ordinal))
+        elif kind == "array" and ctx.arrays[id(current)][0] is None:
+            pending.append((current["element"], level + 1, ordinal))
+        elif kind == "struct":
+            for field in current["fields"]:
+                pending.append((field["type"], level + 1, ordinal))
+                ordinal += ctx.column_count(field["type"])
+    compiled: dict[tuple[int, int, int], _Decoder] = {}
+    for current, level, ordinal in reversed(order):
+        compiled[id(current), level, ordinal] = _compile_node_decoder(current, level, ctx, ordinal, compiled)
+    return compiled[id(node), depth, column]
+
+
+def _compile_node_decoder(
+    node: dict[str, Any], depth: int, ctx: _Ctx, column: int,
+    compiled: dict[tuple[int, int, int], _Decoder],
+) -> _Decoder:
+    """Bind schema metadata once; checks still execute at each value's wire position."""
+    if depth > ctx.max_depth:
+        def too_deep(r: Reader, path: str) -> NoReturn:
+            _dfail("depth", path, f"nesting deeper than {ctx.max_depth}")
+        return too_deep
+    kind = node["kind"]
     if kind == "bool":
-        b = r.u8()
-        if b > 1:
-            _dfail("marker", path, f"invalid bool byte 0x{b:x}")
-        return b == 1
+        def boolean(r: Reader, path: str) -> bool:
+            value = r.u8()
+            if value > 1:
+                _dfail("marker", path, f"invalid bool byte 0x{value:x}")
+            return value == 1
+        return boolean
     if kind == "int":
-        return _decode_int_value(node, read_uleb(r), path)
+        lo, hi = node.get("min"), node.get("max")
+        def integer(r: Reader, path: str) -> int:
+            raw = read_uleb(r)
+            value: int = raw + lo if lo is not None else -(raw >> 1) - 1 if raw & 1 else raw >> 1
+            if value < INT_MIN or value > INT_MAX:
+                _dfail("range", path, f"decoded integer {value} outside the v0 domain")
+            if lo is not None and value < lo:
+                _dfail("range", path, "below declared min")
+            if hi is not None and value > hi:
+                _dfail("range", path, "above declared max")
+            return value
+        return integer
     if kind == "float64":
-        raw = r.take(8)
-        bits = struct.unpack("<Q", raw)[0]
-        if bits == _NEG_ZERO_BITS:
-            _dfail("float", path, "negative-zero bit pattern")
-        value = _bits_float(bits)
-        if not math.isfinite(value):
-            _dfail("float", path, "non-finite float64")
-        return value
-    if kind == "string":
-        n = read_uleb(r)
-        if n > r.limits.max_byte_length:
-            _dfail("limit", path, "string length exceeds limit")
-        r.budget.charge_bytes(n, path, DecodeError)
-        data = r.take(n)
-        try:
-            return data.decode("utf-8")
-        except UnicodeDecodeError:
-            _dfail("utf8", path, "invalid UTF-8")
-    if kind == "bytes":
-        n = read_uleb(r)
-        if n > r.limits.max_byte_length:
-            _dfail("limit", path, "bytes length exceeds limit")
-        r.budget.charge_bytes(n, path, DecodeError)
-        return bytes(r.take(n))
+        def floating(r: Reader, path: str) -> float:
+            pos = r.pos
+            if pos + 8 > len(r.buf):
+                raise DecodeError("truncated", "unexpected end of input")
+            value: float = struct.unpack_from("<d", r.buf, pos)[0]
+            r.pos = pos + 8
+            if value == 0.0 and r.buf[pos + 7] == 0x80:
+                _dfail("float", path, "negative-zero bit pattern")
+            if not math.isfinite(value):
+                _dfail("float", path, "non-finite float64")
+            return value
+        return floating
+    if kind in ("string", "bytes"):
+        is_text = kind == "string"
+        limit = ctx.max_byte_length
+        def blob(r: Reader, path: str) -> str | bytes:
+            size = read_uleb(r)
+            if size > limit:
+                _dfail("limit", path, f"{kind} length exceeds limit")
+            r.budget.charge_bytes(size, path, DecodeError)
+            data = r.take(size)
+            if not is_text:
+                return data
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError:
+                _dfail("utf8", path, "invalid UTF-8")
+        return blob
     if kind == "literal":
         literal = node["value"]
-        if type(literal) is str:
-            r.budget.charge_bytes(_text_bytes(literal), path, DecodeError)
-        return literal
+        size = _text_bytes(literal) if type(literal) is str else 0
+        def constant(r: Reader, path: str) -> Any:
+            if size:
+                r.budget.charge_bytes(size, path, DecodeError)
+            return literal
+        return constant
     if kind == "enum":
-        index = read_uleb(r)
-        if index >= len(node["members"]):
-            _dfail("range", path, f"enum index {index} out of range")
-        member = node["members"][index]
-        r.budget.charge_bytes(_text_bytes(member), path, DecodeError)
-        return member
+        members = node["members"]
+        sizes = tuple(map(_text_bytes, members))
+        count = len(members)
+        def enum(r: Reader, path: str) -> str:
+            index = read_uleb(r)
+            if index >= count:
+                _dfail("range", path, f"enum index {index} out of range")
+            r.budget.charge_bytes(sizes[index], path, DecodeError)
+            member: str = members[index]
+            return member
+        return enum
     if kind == "nullable":
-        marker = r.u8()
-        if marker == 0:
-            return None
-        if marker != 1:
-            _dfail("marker", path, f"invalid nullable marker 0x{marker:x}")
-        return _decode_node(r, node["inner"], path, depth + 1, ctx, column)
+        inner = compiled[id(node["inner"]), depth + 1, column]
+        def nullable(r: Reader, path: str) -> Any:
+            marker = r.u8()
+            if marker == 0:
+                return None
+            if marker != 1:
+                _dfail("marker", path, f"invalid nullable marker 0x{marker:x}")
+            return inner(r, path)
+        return nullable
     if kind == "array":
         leaves, zero_bit, empty = ctx.arrays[id(node)]
         if leaves is not None:
-            return _decode_columnar(r, node, leaves, path, depth, ctx, column)
-        length = node.get("length")
-        if length is None:
-            length = read_uleb(r)
-        if length > r.limits.max_items:
-            _dfail("limit", path, f"array count {length} exceeds limit {r.limits.max_items}")
-        _bound_by_input(r, length, zero_bit, path)
-        budget = r.budget
-        budget.charge(length, path, DecodeError)
-        element = node["element"]
-        if empty:
-            if not length:
-                return []
-            # every element decodes from no bytes to an equal value, so one
-            # decode stands for all and charges the budgets for each
-            counted, decoded = budget.total, budget.bytes
-            first = _decode_node(r, element, f"{path}[0]", depth + 1, ctx, column)
-            budget.charge((length - 1) * (budget.total - counted), path, DecodeError)
-            budget.charge_bytes((length - 1) * (budget.bytes - decoded), path, DecodeError)
-            items: list[Any] = []
-            r.deferred.append((items, lambda: _copies(first, length)))
-            return items
-        return [_decode_node(r, element, f"{path}[{i}]", depth + 1, ctx, column) for i in range(length)]
-    if kind == "struct":
-        optional = [f for f in node["fields"] if f.get("optional")]
-        nullable = [f for f in node["fields"] if f.get("nullable")]
-        presence = read_bitmap(r, len(optional), path)
-        nulls = read_bitmap(r, len(nullable), path)
-        pi = ni = 0
+            return lambda r, path: _decode_columnar(r, node, leaves, path, depth, ctx, column)
+        element = compiled[id(node["element"]), depth + 1, column]
+        fixed = node.get("length")
+        limit = ctx.max_items
+        def array_values(r: Reader, path: str) -> list[Any]:
+            length = read_uleb(r) if fixed is None else fixed
+            if length > limit:
+                _dfail("limit", path, f"array count {length} exceeds limit {limit}")
+            _bound_by_input(r, length, zero_bit, path)
+            budget = r.budget
+            budget.charge(length, path, DecodeError)
+            if empty:
+                if not length:
+                    return []
+                # Decode one zero-byte element, multiply its budget charges, then
+                # clone containers only after every later value has been checked.
+                counted, decoded = budget.total, budget.bytes
+                first = element(r, f"{path}[0]")
+                budget.charge((length - 1) * (budget.total - counted), path, DecodeError)
+                budget.charge_bytes((length - 1) * (budget.bytes - decoded), path, DecodeError)
+                items: list[Any] = []
+                r.deferred.append((items, lambda: _copies(first, length)))
+                return items
+            return [element(r, f"{path}[{i}]") for i in range(length)]
+        return array_values
+    # A validated node's remaining kind is struct. Bitmap sizes and each field's
+    # column ordinal are schema constants, including columns of absent fields.
+    fields: list[tuple[str, str, int, int, _Decoder]] = []
+    pi = ni = 0
+    for field in node["fields"]:
+        present_bit = (1 << pi) if field.get("optional") else 0
+        null_bit = (1 << ni) if field.get("nullable") else 0
+        pi += bool(present_bit)
+        ni += bool(null_bit)
+        fields.append((field["name"], "." + field["name"], present_bit, null_bit,
+                       compiled[id(field["type"]), depth + 1, column]))
+        column += ctx.column_count(field["type"])
+    if not (pi or ni):
+        plain = [(name, suffix, decode) for name, suffix, _, _, decode in fields]
+        def required_struct(r: Reader, path: str) -> dict[str, Any]:
+            return {name: decode(r, path + suffix) for name, suffix, decode in plain}
+        return required_struct
+    def flagged_struct(r: Reader, path: str) -> dict[str, Any]:
+        presence = read_bits(r, pi, path) if pi else 0
+        nulls = read_bits(r, ni, path) if ni else 0
         out: dict[str, Any] = {}
-        field_column = column
-        for f in node["fields"]:
-            base = field_column
-            field_column += ctx.column_count(f["type"])
-            present = True
-            if f.get("optional"):
-                present = presence[pi]
-                pi += 1
-            is_null = False
-            if f.get("nullable"):
-                is_null = nulls[ni]
-                ni += 1
-            if not present:
-                if is_null:
-                    _dfail("bitmap", f"{path}.{f['name']}", "null bit set for absent field")
-                continue
-            if is_null:
-                out[f["name"]] = None
-                continue
-            out[f["name"]] = _decode_node(r, f["type"], f"{path}.{f['name']}", depth + 1, ctx, base)
+        for name, suffix, present_bit, null_bit, decode in fields:
+            if present_bit and not presence & present_bit:
+                if nulls & null_bit:
+                    _dfail("bitmap", path + suffix, "null bit set for absent field")
+            elif nulls & null_bit:
+                out[name] = None
+            else:
+                out[name] = decode(r, path + suffix)
         return out
-    _dfail("marker", path, f"unknown kind {kind}")
-
+    return flagged_struct
 
 def _decode_int_column(r: Reader, node: dict[str, Any], count: int, path: str, lane: bool = False) -> _Values:
     """A column's values, each checked against the node's bounds in row order with its
@@ -2948,6 +3011,7 @@ class Codec(Generic[T]):
         else:
             deflate, inflate = pack.get("deflate"), pack.get("inflate")
         self._ctx = _Ctx(ir, limits, plan == "columnar", deflate, inflate, self._profile)
+        self._decode = _compile_decoder(ir, 0, self._ctx)
 
     @property
     def fingerprint(self) -> str:
@@ -3004,7 +3068,7 @@ class Codec(Generic[T]):
         """
         r = Reader(bytes(data), self._limits)
         try:
-            value = _decode_node(r, self._ir, "$", 0, self._ctx)
+            value = self._decode(r, "$")
             r.expect_end()
             for items, build in r.deferred:
                 items.extend(build())

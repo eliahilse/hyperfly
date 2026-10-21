@@ -168,14 +168,26 @@ def write_uleb(out: bytearray, value: int) -> None:
 
 
 def read_uleb(r: Reader) -> int:
-    result = 0
-    shift = 0
-    for i in range(_MAX_ULEB_BYTES):
-        byte = r.u8()
-        group = byte & 0x7F
-        result |= group << shift
-        if not byte & 0x80:
-            if i > 0 and group == 0:
+    buf = r.buf
+    pos = r.pos
+    end = len(buf)
+    if pos >= end:
+        raise DecodeError("truncated", "unexpected end of input")
+    byte = buf[pos]
+    r.pos = pos + 1
+    if byte < 0x80:
+        return byte
+    result = byte & 0x7F
+    shift = 7
+    for _ in range(1, _MAX_ULEB_BYTES):
+        pos += 1
+        if pos >= end:
+            raise DecodeError("truncated", "unexpected end of input")
+        byte = buf[pos]
+        r.pos = pos + 1
+        result |= (byte & 0x7F) << shift
+        if byte < 0x80:
+            if byte == 0:
                 raise DecodeError("varint", "overlong uvarint encoding")
             return result
         shift += 7
@@ -184,6 +196,8 @@ def read_uleb(r: Reader) -> int:
 
 def uleb_at(buf: bytes, pos: int) -> tuple[int, int]:
     """read_uleb over a buffer position: the value and the position after it."""
+    if pos < len(buf) and buf[pos] < 0x80:
+        return buf[pos], pos + 1
     result = 0
     shift = 0
     for i in range(_MAX_ULEB_BYTES):
