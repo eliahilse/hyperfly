@@ -116,7 +116,7 @@
     },
     "python": {
       "name": "@hyperfly/python",
-      "version": "1.0.0",
+      "version": "1.0.1",
     },
     "rust": {
       "name": "@hyperfly/rust",
