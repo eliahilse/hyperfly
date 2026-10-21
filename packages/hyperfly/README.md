@@ -105,6 +105,11 @@ at any depth. Decoding converts base64 back to `Uint8Array`, checks the codec va
 JSON numbers for integers, and drops unknown struct keys. Conversion failures are code `json` for responses
 and `400` with reason `malformed-json` for requests.
 
+JSON encoding converts every `Uint8Array` to base64 regardless of the schema or how the JSON decision
+was created, including `Buffer` and values from other realms. Raw `ArrayBuffer` and non-`Uint8Array`
+views (including `DataView`) raise code `json` with their path, like Python's unsupported `memoryview`;
+wrap the desired range in a `Uint8Array` to send it as bytes.
+
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
 `respond` answers HEAD with the headers GET would get and no body, and status 204, 205 or 304 with the negotiated

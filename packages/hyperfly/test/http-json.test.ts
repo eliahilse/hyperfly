@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import { CodecRegistry, compileIR, type IRNode } from "../src/index.js";
 import { decodeResponse, encodeFor, negotiate, readBody, respond } from "../src/http.js";
 
@@ -55,7 +56,7 @@ test("bytes fallback preserves JSON.stringify behavior elsewhere, including toJS
   const registry = new CodecRegistry([compileIR(ir)]);
   const encoded = encodeFor(negotiate(null, registry), value);
   expect(JSON.parse(encoded.body as string)).toEqual({
-    child: { data: "AA==", extra: "kept" }, number: null, extra: { data: { 0: 0 }, extra: "kept" },
+    child: { data: "AA==", extra: "kept" }, number: null, extra: { data: "AA==", extra: "kept" },
   });
   expect(encodeFor(negotiate(null, new CodecRegistry([bytes])), Buffer.from([255])).body).toBe('"/w=="');
 });
@@ -110,4 +111,107 @@ test.each(["2", " \t2\t ", `${"0".repeat(5000)}2`, "9".repeat(5000)])("Content-L
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.response.status).toBe(413);
   expect(acquired).toBe(false);
+});
+
+test("JSON decisions encode bytes without a codec or decision identity at every position", () => {
+  const registry = new CodecRegistry([text]);
+  const decisions = [
+    { ...negotiate(null, registry) },
+    { kind: "json", headers: { "Content-Type": "application/json" }, reason: "disabled" } as const,
+    negotiate(null, new CodecRegistry()),
+  ];
+  const foreign = runInNewContext("new Uint8Array([255])") as Uint8Array;
+  const value = {
+    nested: [new Uint8Array([255]), { buffer: Buffer.from([255]), foreign }],
+    empty: new Uint8Array(),
+    subarray: new Uint8Array([0, 255, 0]).subarray(1, 2),
+  };
+  for (const decision of decisions) {
+    expect(JSON.parse(encodeFor(decision, value).body as string)).toEqual({
+      nested: ["/w==", { buffer: "/w==", foreign: "/w==" }], empty: "", subarray: "/w==",
+    });
+  }
+});
+
+test.each([{ kind: "int" }, { kind: "literal", value: 0 }] satisfies IRNode[])("JSON -0 normalizes to 0 under %j", async (ir) => {
+  await decodeBoth(ir, "-0", 0);
+  const decoded = decodeResponse("application/json", "-0", new CodecRegistry([compileIR(ir)]));
+  if (decoded.kind === "json") expect(Object.is(decoded.value, -0)).toBe(false);
+  await decodeBoth({ kind: "struct", fields: [{ name: "values", type: { kind: "array", element: ir } }] },
+    '{"values":[-0]}', { values: [0] });
+});
+
+test("JSON float64 keeps negative zero", async () => {
+  await decodeBoth({ kind: "float64" }, "-0", -0);
+});
+
+test("JSON validation preserves parsed identities and copies only changed paths", () => {
+  const ir: IRNode = { kind: "struct", fields: [
+    { name: "rows", type: { kind: "array", element: { kind: "struct", fields: [
+      { name: "id", type: { kind: "int" } },
+      { name: "data", type: { kind: "bytes" }, optional: true },
+    ] } } },
+    { name: "unchanged", type: { kind: "struct", fields: [{ name: "active", type: { kind: "bool" } }] } },
+  ] };
+  const registry = new CodecRegistry([compileIR(ir)]);
+  const parse = JSON.parse;
+  const parsed = { rows: [{ id: 1 }], unchanged: { active: true } };
+  const changed = { rows: [{ id: 1 }, { id: -0, data: "/w==", unknown: true }], unchanged: parsed.unchanged };
+  try {
+    JSON.parse = () => parsed;
+    const same = decodeResponse("application/json", "{}", registry);
+    expect(same.kind).toBe("json");
+    if (same.kind === "json") expect(same.value).toBe(parsed);
+    JSON.parse = () => changed;
+    const decoded = decodeResponse("application/json", "{}", registry);
+    expect(decoded.kind).toBe("json");
+    if (decoded.kind === "json") {
+      const result = decoded.value as { rows: { id: number; data?: unknown }[]; unchanged: { active: boolean } };
+      expect(result).not.toBe(changed);
+      expect(result.rows).not.toBe(changed.rows);
+      expect(result.rows[0]).toBe(changed.rows[0]);
+      expect(result.rows[1]).not.toBe(changed.rows[1]);
+      expect(result.unchanged).toBe(changed.unchanged);
+      expect(result.rows[1]).toEqual({ id: 0, data: new Uint8Array([255]) });
+    }
+    expect(changed.rows[1]).toEqual({ id: -0, data: "/w==", unknown: true });
+  } finally {
+    JSON.parse = parse;
+  }
+});
+
+test("JSON conversion failures retain nested paths", () => {
+  const registry = new CodecRegistry([compileIR({ kind: "struct", fields: [
+    { name: "rows", type: { kind: "array", element: { kind: "struct", fields: [{ name: "data", type: { kind: "bytes" } }] } } },
+  ] })]);
+  expect(() => decodeResponse("application/json", '{"rows":[{"data":"AB=="}]}', registry))
+    .toThrow(expect.objectContaining({ code: "json", message: "$.rows[0].data: expected canonical padded base64" }));
+});
+
+test.each([
+  new ArrayBuffer(1), new DataView(new ArrayBuffer(1)), new Int8Array([1]), new Uint8ClampedArray([1]),
+  runInNewContext("new ArrayBuffer(1)") as ArrayBuffer,
+  runInNewContext("new DataView(new ArrayBuffer(1))") as DataView,
+  runInNewContext("new Uint16Array([1])") as Uint16Array,
+])("JSON rejects unsupported byte storage and views with their path: %p", (value) => {
+  const decision = negotiate(null, new CodecRegistry());
+  expect(() => encodeFor(decision, { rows: [{ data: value }] }))
+    .toThrow(expect.objectContaining({ code: "json", message: "$.rows[0].data: unsupported byte storage or view; use Uint8Array" }));
+  expect(() => encodeFor(decision, value))
+    .toThrow(expect.objectContaining({ code: "json", message: "$: unsupported byte storage or view; use Uint8Array" }));
+});
+
+test("JSON preflight ignores inherited enumerable getters like JSON.stringify", () => {
+  const prototype = Object.defineProperty({}, "ignored", { enumerable: true, get() { throw new Error("must not read"); } });
+  const value: unknown = Object.assign(Object.create(prototype) as object, { id: 1 });
+  expect(encodeFor(negotiate(null, new CodecRegistry()), value).body).toBe('{"id":1}');
+});
+
+test("JSON bytes conversion handles toJSON on byte subclasses and on surrounding values", () => {
+  class Bytes extends Uint8Array {
+    toJSON() { return "custom"; }
+  }
+  const value = { bytes: new Bytes([255]), nested: { toJSON: () => ({ data: new Uint8Array([255]) }) }, numeric: { 0: 255 } };
+  expect(encodeFor(negotiate(null, new CodecRegistry()), value).body)
+    .toBe('{"bytes":"/w==","nested":{"data":"/w=="},"numeric":{"0":255}}');
 });
