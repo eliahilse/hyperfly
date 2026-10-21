@@ -145,7 +145,7 @@ function jsonBody(value: unknown): string {
 }
 
 /** Encode one value according to a negotiation decision. */
-export function encodeFor<T>(decision: Negotiation<T>, value: T, options: EncodeOptions = {}): Encoded {
+export function encodeFor<T>(decision: Negotiation<T>, value: NoInfer<T>, options: EncodeOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
     try {
       return { body: decision.codec.encode(value), headers: decision.headers };
@@ -436,7 +436,7 @@ export interface RespondOptions extends NegotiateOptions, EncodeOptions {
  */
 export function respond<T>(
   request: Request,
-  value: T,
+  value: NoInfer<T>,
   registry: CodecRegistry<T>,
   options: RespondOptions = {},
 ): Response {
