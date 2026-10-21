@@ -1826,6 +1826,16 @@ def _read_slices(
     end = len(buf)
     limit = r.limits.max_byte_length
     offset = _UINT[4] if end >> 32 == 0 else "Q"
+    # Fixed-size IDs and byte blobs need no per-value prefix walk. Validate all
+    # prefixes before constructing offsets, then use the usual UTF-8 and budget
+    # checks, including their first-failure ordering.
+    if count >= 16 and pos < end:
+        size = buf[pos]
+        stride = size + 1
+        stop = pos + count * stride
+        if size < 0x80 and size <= limit and stop <= end and buf[pos:stop:stride].count(size) == count:
+            r.pos = stop
+            return array(offset, range(pos + 1, stop, stride)), array(offset, range(pos + stride, stop + 1, stride)), None, 0
     starts = array(offset)
     ends = array(offset)
     for j in range(count):

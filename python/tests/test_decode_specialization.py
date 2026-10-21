@@ -53,3 +53,38 @@ def test_length_budget_precedes_bytes_and_utf8():
     codec = compile_ir({"kind": "array", "element": {"kind": "string"}},
                        limits=Limits(max_total_bytes=1))
     failure(codec, b"\x02\x01a\x02\xff", "limit", "$[1]: 3 bytes exceed the byte budget of 1")
+
+
+@pytest.mark.parametrize("bad_index", [0, 15, 63])
+def test_uniform_length_column_keeps_utf8_and_budget_order(bad_index):
+    ir = {"kind": "array", "element": {"kind": "struct", "fields": [
+        dict(name="s", type={"kind": "string"}),
+    ]}}
+    codec = compile_ir(ir, plan="columnar", limits=Limits(max_total_bytes=63))
+    body = bytearray(b"\x40\x00" + b"\x01a" * 64)
+    body[3 + 2 * bad_index] = 0xFF
+    code = "limit" if bad_index == 63 else "utf8"
+    with pytest.raises(DecodeError) as error:
+        codec.decode_body(body)
+    assert error.value.code == code
+    assert str(error.value).startswith(f"$[].s[{bad_index}]:")
+
+
+def test_two_byte_varint_batches_preserve_values_and_first_error():
+    from hyperfly._wire import Reader, read_ulebs, write_uleb
+
+    values = [128, 255, 256, 16383] * 32
+    body = bytearray()
+    for value in values:
+        write_uleb(body, value)
+    reader = Reader(bytes(body), Limits())
+    decoded, error = read_ulebs(reader, len(values))
+    assert list(decoded) == values
+    assert error is None
+    assert reader.remaining() == 0
+    for index in (0, 63, 127):
+        malformed = body.copy()
+        malformed[2 * index + 1] = 0
+        decoded, error = read_ulebs(Reader(bytes(malformed), Limits()), len(values))
+        assert list(decoded) == values[:index]
+        assert error.code == "varint"

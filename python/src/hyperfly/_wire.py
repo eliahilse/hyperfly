@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass
+import sys
 from typing import Any, Callable, Iterable
 
 INT_MIN = -(2**53 - 1)
 INT_MAX = 2**53 - 1
 _ULEB_DOMAIN_MAX = (1 << 56) - 1
 _MAX_ULEB_BYTES = 8
+_CONTINUED_BYTES = bytes(range(128, 256))
 
 
 class HyperflyError(Exception):
@@ -223,6 +225,22 @@ def read_ulebs(r: Reader, count: int) -> tuple[array[int], DecodeError | None]:
     if len(window) == count and window.isascii():
         r.pos = pos + count
         return array("B", window), None
+    # Length columns commonly consist entirely of two-byte varints. Only take
+    # this path when every group is complete and minimal; otherwise the scalar
+    # reader retains the precise first malformed value for the caller to order.
+    if count >= 64 and pos + 2 * count <= len(buf) and buf[pos] >= 128 and 0 < buf[pos + 1] < 128:
+        pairs = buf[pos : pos + 2 * count]
+        high = pairs[1::2]
+        if high.isascii() and 0 not in high and not pairs[::2].translate(None, _CONTINUED_BYTES):
+            bits = int.from_bytes(pairs, "little")
+            low_mask = int.from_bytes(b"\x7f\x00" * count, "little")
+            decoded = (bits & low_mask) | ((bits >> 1) & (low_mask << 7))
+            values = array("H")
+            values.frombytes(decoded.to_bytes(2 * count, "little"))
+            if sys.byteorder == "big":
+                values.byteswap()
+            r.pos = pos + 2 * count
+            return values, None
     out = array("Q")
     append = out.append
     end = len(buf)
