@@ -303,6 +303,8 @@ async function getEvents(url: string) {
             <li><a href={`${GITHUB}/blob/main/spec/plan-columnar-v5.md`}>plan-columnar-v5</a>: column layouts and profiles.</li>
             <li><a href={`${GITHUB}/blob/main/spec/negotiation-v1.md`}>negotiation-v1</a>: HTTP headers, discovery, and rotation.</li>
             <li><a href={`${GITHUB}/tree/main/spec/vectors`}>Golden vectors</a>: shared conformance fixtures.</li>
+            <li><a href={`${GITHUB}/blob/main/STABILITY.md`}>Stability and versioning</a>: what 1.x keeps stable, and the <a href={`${GITHUB}/blob/main/spec/wire-v0.md#stability`}>spec&apos;s stability contract</a>.</li>
+            <li><a href={`${GITHUB}/blob/main/SECURITY.md`}>Security policy</a>: how to report a vulnerability.</li>
           </ul>
         </section>
       </main>

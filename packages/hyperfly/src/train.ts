@@ -15,10 +15,14 @@ import {
   type ProfileColumn,
 } from "./profile.js";
 
+/**
+ * Dictionary training thresholds; both default when omitted or undefined.
+ * Options must be a plain or null-prototype object with only these keys; invalid or unreadable options fail with `options`.
+ */
 export interface TrainOptions {
   /** Minimum occurrences across samples; a non-negative integer, with 0 clamped to 1. Defaults to 2. */
   minOccurrences?: number;
-  /** Maximum dictionary entries; a non-negative integer, with values above 16383 clamped to 16383. Defaults to 16383. */
+  /** Maximum dictionary entries; a non-negative integer, with values above 16383 clamped to 16383. Zero disables dictionaries. Default: 16383. */
   maxEntries?: number;
 }
 
@@ -488,11 +492,10 @@ function detectDerivation(
 }
 
 /**
- * Deterministic reference trainer. Explicitly non-normative (spec §6.7): the
- * artifact pins its output, but other trainers may make different valid choices.
- *
- * Dictionary prefix costing, grammar induction, and functional-dependency
- * detection are intentionally separated here so none is mistaken for wire logic.
+ * Deterministically trains string dictionaries, grammars and derivations for eligible arrays (plan-columnar-v5 §6.7).
+ * Returns undefined when no model is selected; dictionaries alone use profile version 1, other models use version 2.
+ * Requires a samples array and valid IR. Samples contribute usable string leaves without full schema validation.
+ * Training is non-normative; the artifact fixes the selected models, and other trainers may choose differently.
  */
 export function train(ir: IRNode, samples: readonly unknown[], options: TrainOptions = {}): Profile | undefined {
   if (!Array.isArray(samples)) throw new HyperflyError("options", "samples: must be an array");

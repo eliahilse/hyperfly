@@ -8,11 +8,17 @@ import type { CodecRegistry } from "./registry.js";
 import { byteLengthOf, isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
+/** The media type of a binary body (negotiation-v1 §1). */
 export const HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly";
+/** The request header listing the fingerprints a client holds, in preference order (negotiation-v1 §1). */
 export const ACCEPT_HEADER = "hyperfly-accept";
+/** The header naming the fingerprint a binary body was encoded with (negotiation-v1 §1). */
 export const CODEC_HEADER = "hyperfly-codec";
+/** The advisory header naming an artifact the server can encode with (negotiation-v1 §2). */
 export const OFFER_HEADER = "hyperfly-offer";
+/** The path prefix artifacts are served under, followed by the fingerprint (negotiation-v1 §3). */
 export const WELL_KNOWN_PREFIX = "/.well-known/hyperfly/";
+/** The default bound on a request body or a fetched artifact: 1 MiB. */
 export const DEFAULT_MAX_BODY_BYTES = 1 << 20;
 
 /** Negotiation §6: client-controlled input, so parsing is bounded. */
@@ -129,8 +135,11 @@ export function negotiate<T>(
   };
 }
 
+/** An encoded response: the body and the headers to send with it. */
 export interface Encoded {
+  /** Binary bytes, or JSON text on a fallback. */
   body: Uint8Array | string;
+  /** Content-Type, Vary and, when they apply, Hyperfly-Codec or Hyperfly-Offer. */
   headers: Record<string, string>;
 }
 
@@ -471,8 +480,11 @@ export function serveArtifact(pathname: string, registry: CodecRegistry): Artifa
   };
 }
 
+/** Options for compiling a loaded artifact. */
 export interface LoadArtifactOptions {
+  /** Decoder and encoder limits for the compiled codec. Default: `DEFAULT_LIMITS`. */
   limits?: Partial<Limits>;
+  /** Deflate/inflate hooks for packed columns, or `false` for none. Default: `defaultPackHooks()`. */
   pack?: PackHooks | false;
 }
 
@@ -555,10 +567,15 @@ export function loadArtifact<T = unknown>(text: string, fingerprint: string, opt
   return codec;
 }
 
+/** Options for fetching an artifact; the compile options of `LoadArtifactOptions` also apply. */
 export interface FetchArtifactOptions extends LoadArtifactOptions {
+  /** The fetch implementation. Default: `globalThis.fetch`. */
   fetch?: typeof fetch;
+  /** Extra request headers, such as authorization. Default: none. */
   headers?: HeadersInit;
+  /** The bound on the artifact body; a larger body throws code `artifact`. Default: `DEFAULT_MAX_BODY_BYTES`. */
   maxBytes?: number;
+  /** Aborts the request; its reason propagates. Default: none. */
   signal?: AbortSignal;
 }
 
@@ -758,7 +775,9 @@ export function discovery(request: Request, registry: CodecRegistry): Response |
   return new Response(body, { status: served.status, headers: served.headers });
 }
 
+/** Options for reading a request body. */
 export interface ReadBodyOptions {
+  /** The bound on the request body; a larger body is refused with 413 `too-large`. Default: `DEFAULT_MAX_BODY_BYTES`. */
   maxBytes?: number;
 }
 

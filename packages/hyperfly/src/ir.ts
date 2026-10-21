@@ -2,24 +2,41 @@ import { HyperflyError, isInstance } from "./errors.js";
 import { checkIRNesting } from "./nesting.js";
 import { INT_MAX, INT_MIN } from "./varint.js";
 
+/** Constant encoded without payload bytes; numeric literals must be safe integers (wire-v0 §4.2). */
 export type LiteralValue = string | number | boolean | null;
 
+/** Portable schema nodes whose declared order and bounds are part of the artifact (wire-v0 §4). */
 export type IRNode =
+  /** Boolean encoded as one byte, zero or one (wire-v0 §4.1). */
   | { kind: "bool" }
+  /** Safe integer with optional inclusive bounds; a declared minimum selects offset encoding (wire-v0 §4.4). */
   | { kind: "int"; min?: number; max?: number }
+  /** Finite binary64 value; encoding canonicalizes negative zero (wire-v0 §4.5). */
   | { kind: "float64" }
+  /** Strict UTF-8 text with a byte-length prefix (wire-v0 §4.6). */
   | { kind: "string" }
+  /** Raw bytes with a length prefix (wire-v0 §4.7). */
   | { kind: "bytes" }
+  /** Exact schema constant with no body bytes (wire-v0 §4.2). */
   | { kind: "literal"; value: LiteralValue }
+  /** Non-empty, unique string members indexed in declaration order (wire-v0 §4.3). */
   | { kind: "enum"; members: readonly string[] }
+  /** Null marker or an inner value; nullable or null-literal inner nodes are invalid (wire-v0 §4.9). */
   | { kind: "nullable"; inner: IRNode }
+  /** Repeated elements; an optional non-negative safe-integer length fixes the count and omits its prefix (wire-v0 §4.8). */
   | { kind: "array"; element: IRNode; length?: number }
+  /** Named fields in declaration order, with presence and null bitmaps as needed (wire-v0 §4.10). */
   | { kind: "struct"; fields: readonly IRField[] };
 
+/** Ordered struct field with optional presence and null flags (wire-v0 §4.10). */
 export interface IRField {
+  /** Unique, non-empty Unicode name; `__proto__` and decimal array-index keys are invalid. */
   name: string;
+  /** Encoding of a present, non-null field value. */
   type: IRNode;
+  /** Permits an absent or undefined field and adds a presence bit. Default: false. */
   optional?: boolean;
+  /** Permits null and adds a null bit instead of a nullable-node marker. Default: false. */
   nullable?: boolean;
 }
 
@@ -102,6 +119,7 @@ function checkKeys(value: object, allowed: readonly string[], path: string): voi
   }
 }
 
+/** Validates closed IR shapes, portable names, bounds and artifact nesting; throws code `ir` (wire-v0 §4). */
 export function validateIR(node: IRNode, path = "$"): void {
   checkIRNesting(node);
   withinStack(() => checkNode(node, path));

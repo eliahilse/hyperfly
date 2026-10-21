@@ -3,40 +3,61 @@ import { HyperflyError, isInstance } from "./errors.js";
 import { describeValue, hasLoneSurrogate, validateIR, withinStack } from "./ir.js";
 import type { IRNode } from "./ir.js";
 
+/** Letter case of grammar digits; decimal tokens require `lower` (plan-columnar-v5 §6.3). */
 export type GrammarCase = "lower" | "upper";
+/** Radix of a fixed-width numeric grammar token (plan-columnar-v5 §6.3). */
 export type GrammarBase = 10 | 16 | 36;
 
+/** Fixed-width unsigned digit run in a string grammar (plan-columnar-v5 §6.3). */
 export interface GrammarNum {
+  /** Radix used to parse and reconstruct digits. */
   base: GrammarBase;
+  /** Digit count: 1–15 for base 10, 1–13 for base 16, or 1–10 for base 36. */
   len: number;
+  /** Case required for alphabetic digits; base 10 uses `lower`. */
   case: GrammarCase;
 }
 
+/** Non-empty literal text or a numeric run; adjacent literal tokens are invalid (plan-columnar-v5 §6.3). */
 export type GrammarToken = { lit: string } | { num: GrammarNum };
 
+/** String lookup driven by an earlier dictionary column in the same eligible array (plan-columnar-v5 §6.4). */
 export interface Derivation {
+  /** Global leaf ordinal of the earlier string column whose profile contains the source dictionary. */
   source: number;
+  /** Reconstructed target strings in source-dictionary order, one per entry. */
   values: readonly string[];
 }
 
+/** Shared models for one string leaf; version 2 requires at least one model (plan-columnar-v5 §6.2). */
 export interface ProfileColumn {
+  /** Global leaf ordinal across eligible arrays in schema traversal order (plan-columnar-v5 §6.1). */
   leaf: number;
+  /** Ordered, unique strings: 1–16383 entries, with one-based codes and zero reserved for escapes. */
   dict?: readonly string[];
+  /** One to eight tokens with at least one numeric run; requires profile version 2. */
   grammar?: readonly GrammarToken[];
+  /** Mapping from an earlier dictionary column; requires profile version 2. */
   derived?: Derivation;
 }
 
+/** Shared profile content embedded in the artifact and fingerprint (plan-columnar-v5 §6.5). */
 export interface SharedProfile {
+  /** Non-empty string-column models, sorted by ascending leaf ordinal with no duplicates. */
   columns: readonly ProfileColumn[];
 }
 
+/** Training document with fingerprinted shared models and optional advisory hints (plan-columnar-v5 §6.2). */
 export interface Profile {
+  /** Document shape: 1 requires dictionaries only; 2 also permits grammars and derivations. */
   version: 1 | 2;
+  /** Models needed to encode and decode shared column modes. */
   shared: SharedProfile;
   /** Advisory encoder guidance; never part of the artifact or the fingerprint. */
   hints?: Record<string, unknown>;
 }
 
+/** Maximum entries in one shared dictionary (plan-columnar-v5 §6.2). */
 export const MAX_DICT_ENTRIES = 16383;
 
 export interface ColumnRef {
@@ -173,6 +194,7 @@ function snapshotProfile(profile: Profile): Profile {
   }
 }
 
+/** Validates IR and profile structure, ordinals and model constraints; throws code `ir` (wire-v0 §9, plan-columnar-v5 §6). */
 export function validateProfile(ir: IRNode, profile: Profile): void {
   checkedProfile(ir, profile);
 }
