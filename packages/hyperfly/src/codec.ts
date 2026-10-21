@@ -5,7 +5,7 @@ import { decodeNode } from "./decode.js";
 import { checkByteBudget, checkItemBudget, encodeNode, type EncodeCtx } from "./encode.js";
 import { DecodeError, FingerprintMismatchError, HyperflyError, isInstance } from "./errors.js";
 import { validateIR, withinStack, type IRNode } from "./ir.js";
-import { DEFAULT_LIMITS, Reader, type DecodeLimits } from "./reader.js";
+import { DEFAULT_LIMITS, Reader, type Limits } from "./reader.js";
 import { Writer } from "./writer.js";
 
 export const MAGIC = new Uint8Array([0x68, 0x66]);
@@ -18,7 +18,7 @@ export interface PackHooks {
 }
 
 export interface CompileOptions {
-  limits?: Partial<DecodeLimits>;
+  limits?: Partial<Limits>;
   plan?: PlanLayout;
   pack?: PackHooks | false;
   profile?: Profile;
@@ -38,13 +38,17 @@ export interface Codec<T = unknown> {
 
 /** Freezes a fresh clone in place, storing zero unsigned: an IR or profile -0 is the integer 0. */
 function deepFreeze<T>(value: T): T {
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    for (const [key, inner] of Object.entries(record)) {
+  let current: unknown = value;
+  let stack: object[] | undefined;
+  while (current && typeof current === "object") {
+    const record = current as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      const inner = record[key];
       if (Object.is(inner, -0)) record[key] = 0;
-      else deepFreeze(inner);
+      else if (inner && typeof inner === "object") (stack ??= []).push(inner);
     }
-    Object.freeze(value);
+    Object.freeze(current);
+    current = stack?.pop();
   }
   return value;
 }
@@ -64,7 +68,7 @@ function readOption<T>(read: () => T): T {
 }
 
 interface CheckedOptions {
-  limits: DecodeLimits;
+  limits: Limits;
   plan: PlanLayout;
   pack: PackHooks | false | undefined;
   profile: Profile | undefined;
@@ -81,25 +85,25 @@ export function checkedOptions(options: CompileOptions & { validate?: boolean })
     const pack = readOption(() => options.pack);
     const profile = readOption(() => options.profile);
     const validate = readOption(() => options.validate);
-    const checkedLimits: DecodeLimits = { ...DEFAULT_LIMITS };
+    const checkedLimits: Limits = { ...DEFAULT_LIMITS };
     if (limits !== undefined) {
       if (!isPlainObject(limits)) {
         throw new HyperflyError("options", "limits: must be an object");
       }
       const allowed = new Set(Object.keys(DEFAULT_LIMITS));
-      const snapshot: Partial<DecodeLimits> = {};
+      const snapshot: Partial<Limits> = {};
       for (const key of Reflect.ownKeys(limits)) {
         if (typeof key !== "string" || !allowed.has(key)) {
           throw new HyperflyError("options", `limits.${String(key)}: unknown limit`);
         }
-        snapshot[key as keyof DecodeLimits] = readOption(() => limits[key as keyof DecodeLimits]);
+        snapshot[key as keyof Limits] = readOption(() => limits[key as keyof Limits]);
       }
       for (const [key, value] of Object.entries(snapshot)) {
         if (value === undefined) continue;
         if (!Number.isSafeInteger(value) || value < 0) {
           throw new HyperflyError("options", `limits.${key}: must be a non-negative safe integer`);
         }
-        checkedLimits[key as keyof DecodeLimits] = value;
+        checkedLimits[key as keyof Limits] = value;
       }
     }
     if (plan !== undefined && plan !== "row" && plan !== "columnar") {

@@ -1,14 +1,13 @@
 # Hyperfly plan `columnar` — v5
 
-Status: draft. Extends `spec/wire-v0.md`; everything there (envelope, varints,
-bitmaps, scalar encodings, limits, canonical serialization) applies unchanged.
+Status: stable. The contract is frozen for hyperfly 1.x; see
+[Stability](wire-v0.md#stability). Extends `spec/wire-v0.md`; everything there
+(envelope, varints, bitmaps, scalar encodings, limits, canonical
+serialization) applies unchanged.
 The artifact is
 `{"wire":1,"plan":{"layout":"columnar","version":5},"ir":…,"profile":…}` — a
 different fingerprint than the row plan for the same IR, so the two never mix
-on the wire. (v1 through v3 were never released; columnar@4 shipped, and a
-registry that retains a v4 codec keeps decoding v4 artifacts — the plan
-version is inside the fingerprint, so the two versions never mix on the
-wire.)
+on the wire. The 1.x contract covers columnar version 5 only.
 
 ## 1. Scope
 
@@ -16,6 +15,9 @@ Under this plan, every **eligible** `array` node is encoded column-wise.
 Eligible: the element is a `struct` whose fields are primitives (`bool`,
 `int`, `float64`, `string`, `bytes`, `enum`, `literal`) or required,
 non-nullable structs of the same shape, recursively, with at least one leaf.
+Every struct reached while flattening the element MUST have at least one
+field; an empty struct at any depth makes the whole array ineligible. It
+uses row encoding and follows the ineligible-array ordinal walk (§6.1).
 Nested structs flatten into leaf columns, depth-first in declared order, so a
 leaf's participation is exactly its row's; leaf-level `optional`/`nullable`
 flags keep their bitmaps. Anything else — arrays or nullable/optional structs
@@ -32,6 +34,14 @@ always agree.
       presence; the bit for an absent row MUST be zero.
    c. The column payload over **participating** rows (present and not
       bitmap-null), in row order.
+
+For each column, a decoder MUST read its presence bitmap and then its null
+bitmap, validating padding and rejecting null bits for absent rows with
+`bitmap`, before the enclosing-struct and leaf depth checks below; the
+array node's own depth was checked on entry (wire-v0 §6). When `n > 0`,
+the depths of the enclosing structs are checked; when any row participates,
+the leaf's depth is checked as well. These depth checks MUST precede reading
+the column payload.
 
 The row count is bounded by `maxItems`, the `maxAmplification` policy and the
 item budget of wire-v0 §6 — deliberately not by the one-bit floor: a
@@ -93,7 +103,11 @@ Several column modes pack `k` unsigned values of a fixed width `w` bits.
     concatenated UTF-8 bytes. The inflated size MUST equal the sum of the
     declared lengths; each slice MUST be strict UTF-8; per-value and total
     lengths obey the decoder byte limits, and the declared total is charged
-    against the byte budget before inflating (wire-v0 §6). A decoder without
+    against the byte budget before inflating (wire-v0 §6). The blob length
+    MUST also obey `maxByteLength`: after charging the declared inflated
+    total, a decoder with inflate MUST reject an excessive blob length with
+    `limit` before reading any blob byte. An encoder MUST NOT emit a deflate
+    column whose blob exceeds `maxByteLength`. A decoder without
     an inflate capability MUST reject deflate columns as unsupported (and the
     protocol layer falls back to JSON) rather than guess.
   - `0x03` grammar: requires a grammar for this column in the profile (§6.3);
@@ -207,10 +221,13 @@ which MUST be `0x00`; other columns emit nothing.
 ## 4. Encoder mode choice
 
 Encoders MUST pick the mode with the smallest encoded size; on a tie they MUST
-pick the lowest mode or flags byte (`0x00` < `0x01` < … < `0x04`), so a
-decode → encode round trip is byte-identical and two conforming encoders agree.
-Decoders accept any valid mode — canonicality is an encoder obligation, checked
-by the re-encode property, not a decode-time recomputation.
+pick the lowest mode or flags byte (`0x00` < `0x01` < … < `0x04`). For
+canonical encoder output, a decode → encode round trip is byte-identical
+within the capabilities below. Decoders MUST accept any valid mode,
+subject to the profile and inflate requirements of §3, including grammar
+escapes whose values match the grammar; such input may re-encode
+differently. Canonicality is an encoder obligation, not a decode-time
+recomputation.
 
 Inner choices are pinned the same way. The dictionary width is
 `bitWidth(highest code emitted)`. An int `0x04` candidate considers every low
@@ -227,13 +244,16 @@ is then a pure function of schema, profile, and values.
 Two capabilities scope that obligation:
 
 - **Packing.** Deflate output is not canonical across libraries, so
-  byte-identical re-encode holds within an implementation+version; any
-  spec-valid stream decodes everywhere. Encoding and decoding capabilities
-  are separate: an encoder without deflate emits string columns in plain
-  mode (`0x00`), and its output is canonical *for that capability*; a decoder
-  rejects packed input as unsupported (§3) only if it lacks inflate. The fingerprint identifies the schema and
-  plan, not the packing capability; peers with different packing capabilities
-  interoperate because every decoder accepts both string modes.
+  byte-identical re-encode holds within an implementation+version; a decoder
+  with inflate accepts any spec-valid stream. Encoding and decoding
+  capabilities are separate: an encoder without deflate excludes that mode
+  from the comparison, and its output is canonical *for that capability*.
+  A decoder rejects packed input as unsupported (§3) only if it lacks
+  inflate. The fingerprint identifies the schema and plan, not the packing
+  capability.
+  Every decoder MUST accept plain string columns; accepting deflate columns
+  requires inflate, and a decoder without it MUST reject them as
+  `unsupported` after the checks and byte-budget charge in wire-v0 §6.
 - **Inflater strictness.** A decoder's inflater MUST require the declared blob
   to be exactly one complete DEFLATE stream: reject truncation, output longer
   than the declared total, and any trailing bytes after the final block.
@@ -244,8 +264,8 @@ Column layout groups same-typed bytes, which helps both this plan's own
 transforms and any generic compressor stacked on top. Delta turns monotonic
 series (timestamps, counters) into small varints. XOR captures the high-bit
 locality of slowly-moving float series while staying byte-aligned — the
-bit-granular Gorilla-style windows belong to a future plan, alongside
-profile-trained dictionaries and entropy coding.
+bit-granular Gorilla-style windows and entropy coding belong to a future
+plan.
 
 ## 6. Profiles
 
@@ -385,7 +405,7 @@ exists:
 {"wire":1,"plan":{"layout":"columnar","version":5},"ir":<node>,"profile":<shared>}
 ```
 
-serialized with the §5 rules and these fixed key orders, absent keys omitted:
+serialized with the wire-v0 §5 rules and these fixed key orders, absent keys omitted:
 
 ```
 shared    {"columns":[<column>,…]}
@@ -441,3 +461,10 @@ Two operational cautions:
   a profiled route leaks a coarse membership signal about its own dictionary.
   This is a persistent, cross-request variant of the compression-oracle
   problem, and it is why dictionary coding is opt-in per route.
+
+## 7. Stability
+
+Columnar@5 is frozen for hyperfly 1.x under wire-v0
+[Stability](wire-v0.md#stability). New columnar versions or profile column
+kinds are new artifacts with new fingerprints; they MUST NOT change an
+existing artifact's bytes or fingerprint.

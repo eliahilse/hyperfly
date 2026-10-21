@@ -1,9 +1,10 @@
 import { decodeNode, enterArray, type Inflate } from "./decode.js";
 import { chargeBytes, checkAmplification, chargeItems, encodeNode, typeAcceptsNull, utf8Bytes, writeBitmap, type EncodeCtx } from "./encode.js";
-import { DecodeError, EncodeError, isInstance } from "./errors.js";
+import { DecodeError, EncodeError } from "./errors.js";
 import { literalBytes, utf8Length, utf8Lengths, type IRField, type IRNode } from "./ir.js";
 import type { GrammarToken, ProfileIndex } from "./profile.js";
 import type { Reader } from "./reader.js";
+import { isUint8Array } from "./typed-array.js";
 import { INT_MAX, INT_MIN, readUleb, ulebLen, unzigzag, writeUleb, zigzag } from "./varint.js";
 import { Writer } from "./writer.js";
 
@@ -742,7 +743,7 @@ function encodeStringColumn(
   let packed: Uint8Array | null = null;
   let packedCost = Infinity;
   const totalBytes = bytes.reduce((n, value) => n + value.length, 0);
-  // §3: the deflate mode's total length obeys the decoder byte limits, so a
+  // §3: the deflate mode's total length obeys the byte limits, so a
   // column beyond them is not a candidate — the decoder would refuse the stream
   if (ctx.deflate && ctx.canInflate && totalBytes <= ctx.maxByteLength) {
     const total = totalBytes;
@@ -757,7 +758,7 @@ function encodeStringColumn(
     } catch (err) {
       throw new EncodeError("packed", `${path}: string column failed to deflate`, { cause: err });
     }
-    if (!isInstance(packed, Uint8Array)) {
+    if (!isUint8Array(packed)) {
       throw new EncodeError("packed", `${path}: deflate hook must return a Uint8Array`);
     }
     packedCost =

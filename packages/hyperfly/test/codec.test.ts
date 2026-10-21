@@ -124,6 +124,18 @@ describe("serializeArtifact input checks", () => {
     }
   });
 
+  test("reports a throwing profile getter as ir with the cause, as compileIR does", () => {
+    const cause = new Error("cannot read hints");
+    const profile = { version: 1 as const, shared, get hints(): never { throw cause; } };
+    for (const run of [
+      () => serializeArtifact(STRINGS, "columnar", profile),
+      () => compileIR(STRINGS, { plan: "columnar", profile }),
+    ]) {
+      expect(run).toThrow(HyperflyError);
+      expect(run).toThrow(expect.objectContaining({ code: "ir", cause }));
+    }
+  });
+
   test("matches the compiled artifact, with and without a profile", () => {
     expect(serializeArtifact(STRUCT)).toBe(compileIR(STRUCT).artifact);
     const profiled = compileIR(STRINGS, { plan: "columnar", profile: { version: 1, shared } });
@@ -371,7 +383,7 @@ describe("profile JSON data", () => {
   cyclic.self = cyclic;
   const cyclicArray: unknown[] = [];
   cyclicArray.push(cyclicArray);
-  let deep: unknown = {};
+  let deep: unknown = { value: undefined };
   for (let i = 0; i < 10000; i++) deep = { nested: deep };
 
   test.each([

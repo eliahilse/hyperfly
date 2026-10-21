@@ -3,8 +3,9 @@ import { DecodeError, EncodeError, FingerprintMismatchError, HyperflyError, isIn
 import type { IRNode } from "./ir.js";
 import { MAX_ARTIFACT_NESTING } from "./nesting.js";
 import type { Profile, SharedProfile } from "./profile.js";
-import type { DecodeLimits } from "./reader.js";
+import type { Limits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
+import { byteLengthOf, isUint8Array } from "./typed-array.js";
 
 export const HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly";
 export const ACCEPT_HEADER = "hyperfly-accept";
@@ -18,10 +19,6 @@ const MAX_ENTRIES = 32;
 const FINGERPRINT = /^[0-9a-f]{32}$/;
 const VARY = "Hyperfly-Accept, Accept";
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
-/** The intrinsic getters see a chunk's internal slots, so neither a subclass nor another realm can misreport it. */
-const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
-const typedArrayTag = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)!.get!;
-const typedArrayByteLength = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")!.get!;
 
 /** Client fingerprints in preference order, ignoring malformed entries and duplicates. */
 export function parseAccept(header: string | null | undefined): string[] {
@@ -201,7 +198,7 @@ export function serveArtifact(pathname: string, registry: CodecRegistry): Artifa
 }
 
 export interface LoadArtifactOptions {
-  limits?: Partial<DecodeLimits>;
+  limits?: Partial<Limits>;
   pack?: PackHooks | false;
 }
 
@@ -448,10 +445,8 @@ export function respond<T>(
     httpAccept: options.httpAccept === undefined ? request.headers.get("accept") : options.httpAccept,
   });
   const status = options.status ?? 200;
-  const bodyless = request.method === "HEAD" || NULL_BODY_STATUSES.has(status);
-  const { body, headers } = bodyless && value === undefined
-    ? { body: null, headers: decision.headers }
-    : encodeFor(decision, value, options);
+  const nullBody = NULL_BODY_STATUSES.has(status);
+  const { body, headers } = nullBody ? { body: null, headers: decision.headers } : encodeFor(decision, value, options);
   const responseHeaders = new Headers(options.headers);
   for (const name of ["Content-Type", "Content-Length", "Hyperfly-Codec", "Hyperfly-Offer"]) {
     responseHeaders.delete(name);
@@ -463,7 +458,7 @@ export function respond<T>(
   }
   for (const [name, value] of Object.entries(headers)) responseHeaders.set(name, value);
   responseHeaders.set("Vary", [...vary.values()].join(", "));
-  return new Response(bodyless ? null : body as BodyInit, { status, headers: responseHeaders });
+  return new Response(request.method === "HEAD" ? null : body as BodyInit | null, { status, headers: responseHeaders });
 }
 
 /**
@@ -507,6 +502,16 @@ export async function readBody<T>(
   return readBodyWithinLimit(request, registry, bodyLimit(options.maxBytes));
 }
 
+/** Whether a Content-Length of ASCII digits names more than maxBytes, compared as digits so no length rounds. */
+function exceeds(contentLength: string, maxBytes: number): boolean {
+  if (!/^[0-9]+$/.test(contentLength)) return false;
+  let start = 0;
+  while (start < contentLength.length - 1 && contentLength.charCodeAt(start) === 0x30) start++;
+  const digits = contentLength.slice(start);
+  const limit = String(maxBytes);
+  return digits.length > limit.length || (digits.length === limit.length && digits > limit);
+}
+
 function bodyLimit(maxBytes: number | undefined): number {
   if (maxBytes === undefined) return DEFAULT_MAX_BODY_BYTES;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
@@ -529,8 +534,7 @@ async function readBodyWithinLimit<T>(
   const isJson = contentType === "application/json"
     || /^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+\+json(?![\s\S])/.test(contentType);
   if (!isHyperfly && !isJson) return refuse(415, "unsupported-media-type");
-  const contentLength = trimOws(request.headers.get("content-length") ?? "");
-  if (/^[0-9]+$/.test(contentLength) && Number(contentLength) > maxBytes) return refuse(413, "too-large");
+  if (exceeds(trimOws(request.headers.get("content-length") ?? ""), maxBytes)) return refuse(413, "too-large");
   const result = await readLimited(request.body, maxBytes);
   if (!result.ok) return refuse(result.reason === "too-large" ? 413 : 400, result.reason);
   const bytes = result.bytes;
@@ -588,11 +592,11 @@ async function readLimited(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (typedArrayTag.call(value) !== "Uint8Array") {
+        if (!isUint8Array(value)) {
           cancelQuietly(reader);
           return { ok: false, reason: "unreadable" };
         }
-        const size = typedArrayByteLength.call(value) as number;
+        const size = byteLengthOf(value);
         length += size;
         if (length > maxBytes) {
           cancelQuietly(reader);

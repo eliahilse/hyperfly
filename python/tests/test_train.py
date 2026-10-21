@@ -6,7 +6,7 @@ import zlib
 
 import pytest
 
-from hyperfly import compile_ir, train
+from hyperfly import HyperflyError, compile_ir, train
 from hyperfly._ir import MAX_DICT_ENTRIES
 
 ROWS = {
@@ -24,6 +24,47 @@ PAIR = {
     },
 }
 FIXTURES = json.loads((Path(__file__).parent / "fixtures" / "train_parity.json").read_text())
+THRESHOLD_CASES = [
+    ("min_occurrences", True, "error"),
+    ("min_occurrences", False, "error"),
+    ("min_occurrences", "2", "error"),
+    ("min_occurrences", None, "error"),
+    ("min_occurrences", [], "error"),
+    ("min_occurrences", {}, "error"),
+    ("min_occurrences", complex(2, 0), "error"),
+    ("min_occurrences", -1, "error"),
+    ("min_occurrences", 1.5, "error"),
+    ("min_occurrences", 1.9, "error"),
+    ("min_occurrences", 3.9, "error"),
+    ("min_occurrences", math.nan, "error"),
+    ("min_occurrences", math.inf, "error"),
+    ("min_occurrences", -math.inf, "error"),
+    ("min_occurrences", 0, 1),
+    ("min_occurrences", -0.0, 1),
+    ("min_occurrences", 2.0, 2),
+    ("min_occurrences", 16384, 16384),
+    ("min_occurrences", 10**30, 10**30),
+    ("min_occurrences", 1e300, 1e300),
+    ("max_entries", True, "error"),
+    ("max_entries", False, "error"),
+    ("max_entries", "2", "error"),
+    ("max_entries", None, "error"),
+    ("max_entries", [], "error"),
+    ("max_entries", {}, "error"),
+    ("max_entries", complex(2, 0), "error"),
+    ("max_entries", -1, "error"),
+    ("max_entries", 1.5, "error"),
+    ("max_entries", 1.9, "error"),
+    ("max_entries", math.nan, "error"),
+    ("max_entries", math.inf, "error"),
+    ("max_entries", -math.inf, "error"),
+    ("max_entries", 0, 0),
+    ("max_entries", -0.0, 0),
+    ("max_entries", 2.0, 2),
+    ("max_entries", 16384, 16383),
+    ("max_entries", 10**30, 16383),
+    ("max_entries", 1e300, 16383),
+]
 
 
 def samples(values):
@@ -58,9 +99,10 @@ def test_profile_shrinks_held_out_data_and_round_trips():
     assert profiled.decode_body(encoded) == holdout
 
 
-def test_output_compiles_at_entry_ceiling():
+@pytest.mark.parametrize("max_entries", [MAX_DICT_ENTRIES, 16384, 10**30, 1e300])
+def test_output_compiles_at_entry_ceiling(max_entries):
     many = [f"v{i}" for i in range(MAX_DICT_ENTRIES + 50)]
-    profile = train(ROWS, samples([many, many]))
+    profile = train(ROWS, samples([many, many]), max_entries=max_entries)
     assert len(columns(profile)[0]["dict"]) <= MAX_DICT_ENTRIES
     compile_ir(ROWS, plan="columnar", profile=profile)
 
@@ -161,20 +203,25 @@ def test_utf8_frequency_ties():
     assert columns(profile)[0]["dict"] == ["a", "é", "\ue000", "\U00010000"]
 
 
-@pytest.mark.parametrize("options,expected", [
-    ({"max_entries": 1.9}, ["alpha"]),
-    ({"max_entries": -0.0}, None),
-    ({"max_entries": -1}, None),
-    ({"max_entries": math.nan}, None),
-    ({"max_entries": math.inf}, ["alpha", "beta"]),
-    ({"min_occurrences": 3.9}, ["alpha"]),
-    ({"min_occurrences": -math.inf}, ["alpha", "beta"]),
-    ({"min_occurrences": math.inf}, None),
-    ({"min_occurrences": math.nan}, None),
-])
-def test_option_rounding_and_clamping(options, expected):
-    profile = train(ROWS, samples([["alpha", "alpha", "alpha", "beta", "beta"]]), **options)
-    assert (columns(profile)[0]["dict"] if profile else None) == expected
+@pytest.mark.parametrize("name,value,expected", THRESHOLD_CASES)
+def test_option_thresholds_and_clamping(name, value, expected):
+    values = samples([["alpha", "alpha", "alpha", "beta", "beta"]])
+    if expected == "error":
+        for ir in (ROWS, None):
+            with pytest.raises(HyperflyError) as err:
+                train(ir, values, **{name: value})
+            assert (err.value.code, str(err.value)) == ("options", f"{name}: must be a non-negative integer")
+    else:
+        profile = train(ROWS, values, **{name: value})
+        assert profile == train(ROWS, values, **{name: expected})
+        dictionary = columns(profile)[0]["dict"] if profile else None
+        assert dictionary == (
+            None if (name == "max_entries" and expected == 0) or (name == "min_occurrences" and expected > 3)
+            else ["alpha", "beta"]
+        )
+        with pytest.raises(HyperflyError) as err:
+            train(None, values, **{name: value})
+        assert err.value.code == "ir"
 
 
 @pytest.mark.parametrize("ir,values", [
@@ -204,3 +251,30 @@ def test_derivation_chooses_lowest_source_ordinal():
 def test_source_escape_blocks_derivation():
     profile = train(PAIR, [[{"a": "u1", "b": "known"}, {"a": "u1", "b": "known"}, {"a": "u2", "b": "other"}]])
     assert all("derived" not in column for column in columns(profile))
+
+
+@pytest.mark.parametrize("value", [None, {}, "samples", b"samples", {1}, iter([]), 1, True])
+@pytest.mark.parametrize("options", [{}, {"min_occurrences": None}, {"max_entries": -1}])
+def test_samples_container_is_checked_before_ir(value, options):
+    with pytest.raises(HyperflyError) as err:
+        train(None, value, **options)
+    assert (err.value.code, str(err.value)) == ("options", "samples: must be a list or tuple")
+
+
+@pytest.mark.parametrize("name,value,expected", [case for case in THRESHOLD_CASES if case[2] == "error"])
+def test_numeric_training_options_are_checked(name, value, expected):
+    with pytest.raises(HyperflyError) as err:
+        train(ROWS, [], **{name: value})
+    assert (err.value.code, str(err.value)) == ("options", f"{name}: must be a non-negative integer")
+
+
+def test_tuple_samples_match_list_samples():
+    values = samples([["online"] * 20, ["offline"] * 20])
+    assert train(ROWS, tuple(values)) == train(ROWS, values)
+
+
+@pytest.mark.parametrize("name", ["min_occurrences", "max_entries"])
+def test_thresholds_are_checked_before_ir(name):
+    with pytest.raises(HyperflyError) as err:
+        train(None, [], **{name: "invalid"})
+    assert (err.value.code, str(err.value)) == ("options", f"{name}: must be a non-negative integer")
