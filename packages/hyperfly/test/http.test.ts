@@ -58,12 +58,35 @@ describe("negotiate", () => {
 
   test("falls back to JSON and offers an upgrade when nothing matches", () => {
     const decision = negotiate(acceptHeader(["f".repeat(32)]), registry);
-    expect(decision.kind).toBe("json");
+    expect(decision).toMatchObject({ kind: "json", reason: "no-match" });
     expect(decision.headers["Hyperfly-Offer"]).toBe(codecA.fingerprint);
   });
 
   test("a client that says nothing gets JSON", () => {
-    expect(negotiate(undefined, registry).kind).toBe("json");
+    expect(negotiate(undefined, registry)).toMatchObject({ kind: "json", reason: "no-hyperfly-accept" });
+  });
+
+  test.each([
+    ["an absent Hyperfly-Accept", undefined, undefined, "no-hyperfly-accept"],
+    ["a null Hyperfly-Accept", null, undefined, "no-hyperfly-accept"],
+    ["an empty Hyperfly-Accept", "", undefined, "no-hyperfly-accept"],
+    ["an unknown fingerprint", "f".repeat(32), undefined, "no-match"],
+    ["only malformed entries", "not-a-fingerprint", undefined, "no-match"],
+    ["an Accept opt-out", codecA.fingerprint, "application/vnd.hyperfly;q=0", "accept-refused"],
+    ["an Accept opt-out without Hyperfly-Accept", undefined, "*/*;q=0", "accept-refused"],
+  ] as const)("names the fallback reason for %s", (_, hyperflyAccept, httpAccept, reason) => {
+    const decision = negotiate(hyperflyAccept, registry, { httpAccept });
+    expect(decision.kind).toBe("json");
+    if (decision.kind === "json") expect(decision.reason).toBe(reason);
+  });
+
+  test("an empty registry falls back with no-match and no offer", () => {
+    const decision = negotiate(codecA.fingerprint, new CodecRegistry());
+    expect(decision).toEqual({
+      kind: "json",
+      headers: { Vary: "Hyperfly-Accept, Accept", "Content-Type": "application/json" },
+      reason: "no-match",
+    });
   });
 
   test.each([
@@ -83,13 +106,14 @@ describe("negotiate", () => {
     "*/*;q=0, application/vnd.hyperfly;q=0\n",
     "*/*;q=0, application/vnd.hyperfly;version=2;q=1",
   ])("opts out with %s", (accept) => {
-    expect(negotiate(codecA.fingerprint, registry, { accept })).toEqual({
+    expect(negotiate(codecA.fingerprint, registry, { httpAccept: accept })).toEqual({
       kind: "json",
       headers: {
         Vary: "Hyperfly-Accept, Accept",
         "Content-Type": "application/json",
         "Hyperfly-Offer": codecA.fingerprint,
       },
+      reason: "accept-refused",
     });
   });
 
@@ -122,19 +146,19 @@ describe("negotiate", () => {
     null,
     undefined,
   ])("does not opt out with %s", (accept) => {
-    expect(negotiate(codecA.fingerprint, registry, { accept }).kind).toBe("hyperfly");
+    expect(negotiate(codecA.fingerprint, registry, { httpAccept: accept }).kind).toBe("hyperfly");
   });
 
   test("examines at most 32 media ranges, including malformed entries", () => {
     const prefix = Array.from({ length: 31 }, () => "invalid").join(",");
     expect(negotiate(codecA.fingerprint, registry, {
-      accept: `${prefix},application/vnd.hyperfly;q=0`,
+      httpAccept: `${prefix},application/vnd.hyperfly;q=0`,
     }).kind).toBe("json");
     expect(negotiate(codecA.fingerprint, registry, {
-      accept: `${prefix},invalid,application/vnd.hyperfly;q=0`,
+      httpAccept: `${prefix},invalid,application/vnd.hyperfly;q=0`,
     }).kind).toBe("hyperfly");
     expect(negotiate(codecA.fingerprint, registry, {
-      accept: `${",".repeat(31)}application/vnd.hyperfly;q=0`,
+      httpAccept: `${",".repeat(31)}application/vnd.hyperfly;q=0`,
     }).kind).toBe("json");
   });
 
@@ -149,12 +173,12 @@ describe("negotiate", () => {
     [`${'text/html;foo="x,y",'.repeat(31)}application/vnd.hyperfly;q=0`, "json"],
     [`${'text/html;foo="x,y",'.repeat(32)}application/vnd.hyperfly;q=0`, "hyperfly"],
   ] as const)("parses quoted ranges and a single q in %s", (accept, kind) => {
-    expect(negotiate(codecA.fingerprint, registry, { accept }).kind).toBe(kind);
+    expect(negotiate(codecA.fingerprint, registry, { httpAccept: accept }).kind).toBe(kind);
   });
 
   test("an opt-out preserves the configured offer", () => {
     const decision = negotiate(codecA.fingerprint, registry, {
-      accept: "application/vnd.hyperfly;q=0",
+      httpAccept: "application/vnd.hyperfly;q=0",
       offer: codecB.fingerprint,
     });
     expect(decision.headers["Hyperfly-Offer"]).toBe(codecB.fingerprint);
@@ -167,8 +191,15 @@ describe("negotiate", () => {
   });
 
   test("an operator switch falls back without consulting the registry", () => {
-    const decision = negotiate(acceptHeader([codecA.fingerprint]), registry, { enabled: false });
-    expect(decision.kind).toBe("json");
+    const decision = negotiate(acceptHeader([codecA.fingerprint]), registry, {
+      enabled: false,
+      httpAccept: "application/vnd.hyperfly;q=0",
+    });
+    expect(decision).toEqual({
+      kind: "json",
+      headers: { Vary: "Hyperfly-Accept, Accept", "Content-Type": "application/json" },
+      reason: "disabled",
+    });
   });
 
   test("client preference decides, which is what makes rotation work", () => {
@@ -183,7 +214,7 @@ describe("negotiate", () => {
 });
 
 describe("round trip over the protocol", () => {
-  const registry = new CodecRegistry([codecA as never]);
+  const registry = new CodecRegistry([codecA]);
 
   test("binary out, binary in", () => {
     const decision = negotiate<typeof value>(acceptHeader([codecA.fingerprint]), registry);
@@ -339,14 +370,14 @@ describe("fetch adapter", () => {
     expect(response.headers.get("vary")).toBe("Hyperfly-Accept, Accept");
     expect(await response.json()).toEqual(value);
     for (const accept of [null, "application/vnd.hyperfly;q=1"]) {
-      expect(respond(request, value, registry, { accept }).headers.get("content-type")).toBe(HYPERFLY_MEDIA_TYPE);
+      expect(respond(request, value, registry, { httpAccept: accept }).headers.get("content-type")).toBe(HYPERFLY_MEDIA_TYPE);
     }
   });
 
   test("an explicit Accept option can opt out", () => {
     const request = new Request(url, { headers: { "Hyperfly-Accept": codecA.fingerprint } });
     expect(respond(request, value, registry, {
-      accept: "application/vnd.hyperfly;q=0",
+      httpAccept: "application/vnd.hyperfly;q=0",
     }).headers.get("content-type")).toBe("application/json");
   });
 
@@ -377,6 +408,22 @@ describe("fetch adapter", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(EncodeError);
     expect(errors[0]!.code).toBe("limit");
+  });
+
+  test("onFallback receives the error, then encoder-limit", () => {
+    const limited = compileIR<string[]>({ kind: "array", element: { kind: "literal", value: "x" } }, {
+      limits: { maxAmplification: 1 },
+    });
+    const calls: unknown[][] = [];
+    const decision = negotiate(limited.fingerprint, new CodecRegistry([limited]));
+    const { headers } = encodeFor(decision, Array.from({ length: 5 }, () => "x"), {
+      onFallback: (...args) => { calls.push(args); },
+    });
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0]).toBeInstanceOf(EncodeError);
+    expect((calls[0]![0] as EncodeError).code).toBe("limit");
+    expect(calls[0]![1]).toBe("encoder-limit");
   });
 
   test("falls back to JSON on an encoder byte budget refusal", async () => {
@@ -599,7 +646,7 @@ describe("fetch adapter", () => {
 
   test("reads a binary request body, and refuses one it cannot read", async () => {
     const encoded = codecA.encode(value as never);
-    const ok = await readBody<typeof value>(
+    const ok = await readBody(
       new Request(url, { method: "POST", body: encoded as BodyInit, headers: { "Content-Type": HYPERFLY_MEDIA_TYPE } }),
       registry,
     );
@@ -612,12 +659,13 @@ describe("fetch adapter", () => {
     expect(stranger.ok).toBe(false);
     if (!stranger.ok) {
       expect(stranger.response.status).toBe(415);
+      expect(stranger.reason).toBe("unknown-codec");
       expect(stranger.response.headers.get("hyperfly-offer")).toBe(codecA.fingerprint);
     }
   });
 
   test("a JSON request body still works", async () => {
-    const result = await readBody<typeof value>(
+    const result = await readBody(
       new Request(url, { method: "POST", body: JSON.stringify(value), headers: { "Content-Type": "application/json" } }),
       registry,
     );
@@ -646,6 +694,7 @@ describe("request content types", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.response.status).toBe(415);
+      expect(result.reason).toBe("unsupported-media-type");
       expect(result.response.body).toBeNull();
       expect([...result.response.headers]).toEqual([]);
     }
@@ -680,7 +729,10 @@ describe("request content types", () => {
     });
     const result = await readBody(request, registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(415);
+    if (!result.ok) {
+      expect(result.response.status).toBe(415);
+      expect(result.reason).toBe("unsupported-media-type");
+    }
     expect(request.bodyUsed).toBe(false);
   });
 
@@ -702,6 +754,7 @@ describe("request content types", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("malformed-json");
       expect(result.response.body).toBeNull();
     }
   });
@@ -709,7 +762,10 @@ describe("request content types", () => {
   test("a null body is empty and fails JSON parsing", async () => {
     const result = await readBody(new Request(url, { method: "POST" }), registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("malformed-json");
+    }
   });
 });
 
@@ -740,7 +796,10 @@ describe("request body limits", () => {
     try {
       const result = await readBody(request, registry);
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.response.status).toBe(400);
+      if (!result.ok) {
+        expect(result.response.status).toBe(400);
+        expect(result.reason).toBe("unreadable");
+      }
     } finally {
       reader.releaseLock();
     }
@@ -751,7 +810,10 @@ describe("request body limits", () => {
     await request.text();
     const result = await readBody(request, registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("unreadable");
+    }
   });
 
   test.each(["throws", "rejects", "never resolves"])("returns 413 promptly when cancel %s", async (mode) => {
@@ -766,7 +828,10 @@ describe("request body limits", () => {
     const request = new Request(url, { method: "POST", body });
     const result = await readBody(request, registry, { maxBytes: 1 });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(413);
+    if (!result.ok) {
+      expect(result.response.status).toBe(413);
+      expect(result.reason).toBe("too-large");
+    }
     expect(body.locked).toBe(false);
   }, 500);
 
@@ -782,7 +847,10 @@ describe("request body limits", () => {
     request.body!.getReader = () => reader;
     const result = await readBody(request, registry, { maxBytes: 1 });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(413);
+    if (!result.ok) {
+      expect(result.response.status).toBe(413);
+      expect(result.reason).toBe("too-large");
+    }
   });
 
   test("returns 400 when reading the stream rejects", async () => {
@@ -791,7 +859,10 @@ describe("request body limits", () => {
     }, { highWaterMark: 0 });
     const result = await readBody(new Request(url, { method: "POST", body }), registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("unreadable");
+    }
     expect(body.locked).toBe(false);
   });
 
@@ -805,7 +876,10 @@ describe("request body limits", () => {
     }, { highWaterMark: 0 });
     const result = await readBody(new Request(url, { method: "POST", body }), registry, { maxBytes: 0 });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("malformed-json");
+    }
     expect(pulls).toBe(100_001);
   });
 
@@ -818,7 +892,10 @@ describe("request body limits", () => {
     try {
       const result = await readBody(request, registry, { maxBytes: 1 });
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.response.status).toBe(413);
+      if (!result.ok) {
+        expect(result.response.status).toBe(413);
+        expect(result.reason).toBe("too-large");
+      }
       expect(clone.bodyUsed).toBe(false);
     } finally {
       await clone.body!.cancel();
@@ -828,7 +905,10 @@ describe("request body limits", () => {
   test("accepts zero maxBytes and a safe integer limit", async () => {
     const result = await readBody(new Request(url, { method: "POST", body: "0" }), registry, { maxBytes: 0 });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(413);
+    if (!result.ok) {
+      expect(result.response.status).toBe(413);
+      expect(result.reason).toBe("too-large");
+    }
     expect(await readBody(new Request(url, { method: "POST", body: "0" }), registry, {
       maxBytes: Number.MAX_SAFE_INTEGER,
     })).toEqual({ ok: true, value: 0 });
@@ -851,6 +931,7 @@ describe("request body limits", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.response.status).toBe(413);
+      expect(result.reason).toBe("too-large");
       expect(result.response.body).toBeNull();
     }
     expect(pulled).toBe(false);
@@ -875,6 +956,7 @@ describe("request body limits", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.response.status).toBe(413);
+      expect(result.reason).toBe("too-large");
       expect(result.response.body).toBeNull();
     }
     expect(cancelled).toBe(true);
@@ -927,7 +1009,10 @@ describe("request body limits", () => {
     });
     const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("unreadable");
+    }
   });
 
   test("cancels the stream when it refuses a chunk that is not bytes", async () => {
@@ -938,7 +1023,10 @@ describe("request body limits", () => {
     }, { highWaterMark: 0 });
     const result = await readBody(new Request(url, { method: "POST", body: body as ReadableStream<Uint8Array> }), registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(400);
+    if (!result.ok) {
+      expect(result.response.status).toBe(400);
+      expect(result.reason).toBe("unreadable");
+    }
     expect(cancelled).toBe(true);
   });
 
@@ -956,7 +1044,10 @@ describe("request body limits", () => {
     const digits = new TextEncoder().encode("12");
     const over = await readBody(new Request(url, { method: "POST", body: chunk(digits) }), registry, { maxBytes: 1 });
     expect(over.ok).toBe(false);
-    if (!over.ok) expect(over.response.status).toBe(413);
+    if (!over.ok) {
+      expect(over.response.status).toBe(413);
+      expect(over.reason).toBe("too-large");
+    }
     expect(await readBody(new Request(url, { method: "POST", body: chunk(digits) }), registry)).toEqual({ ok: true, value: 12 });
   });
 
@@ -983,7 +1074,10 @@ describe("request body limits", () => {
     const request = withContentLength(contentLength);
     const result = await readBody(request, registry, { maxBytes: 1 });
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(413);
+    if (!result.ok) {
+      expect(result.response.status).toBe(413);
+      expect(result.reason).toBe("too-large");
+    }
     expect(request.bodyUsed).toBe(false);
   });
 
@@ -1021,10 +1115,10 @@ describe("binary request validation", () => {
   const url = "https://example.test/v1/thing";
 
   test.each([
-    { name: "unsupported content type before malformed body", contentType: "text/plain", maxBytes: DEFAULT_MAX_BODY_BYTES, codecHeader: null, status: 415 },
-    { name: "size limit before unknown fingerprint", contentType: HYPERFLY_MEDIA_TYPE, maxBytes: HEADER_SIZE - 1, codecHeader: null, status: 413 },
-    { name: "codec mismatch before unknown fingerprint", contentType: HYPERFLY_MEDIA_TYPE, maxBytes: DEFAULT_MAX_BODY_BYTES, codecHeader: codecA.fingerprint, status: 400 },
-  ])("prioritizes $name", async ({ contentType, maxBytes, codecHeader, status }) => {
+    { name: "unsupported content type before malformed body", contentType: "text/plain", maxBytes: DEFAULT_MAX_BODY_BYTES, codecHeader: null, status: 415, reason: "unsupported-media-type" },
+    { name: "size limit before unknown fingerprint", contentType: HYPERFLY_MEDIA_TYPE, maxBytes: HEADER_SIZE - 1, codecHeader: null, status: 413, reason: "too-large" },
+    { name: "codec mismatch before unknown fingerprint", contentType: HYPERFLY_MEDIA_TYPE, maxBytes: DEFAULT_MAX_BODY_BYTES, codecHeader: codecA.fingerprint, status: 400, reason: "codec-mismatch" },
+  ] as const)("prioritizes $name", async ({ contentType, maxBytes, codecHeader, status, reason }) => {
     const bytes = codecB.encode(value as never).slice();
     bytes.fill(0xff, 3, HEADER_SIZE);
     const headers = new Headers({ "Content-Type": contentType });
@@ -1037,6 +1131,7 @@ describe("binary request validation", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.response.status).toBe(status);
+      expect(result.reason).toBe(reason);
       expect(result.response.body).toBeNull();
       expect(result.response.headers.get("hyperfly-offer")).toBeNull();
     }
@@ -1065,13 +1160,19 @@ describe("binary request validation", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.response.status).toBe(400);
+        expect(result.reason).toBe("codec-mismatch");
         expect(result.response.body).toBeNull();
         expect(result.response.headers.get("hyperfly-offer")).toBeNull();
       }
     },
   );
 
-  test.each(["short body", "wrong magic", "wrong version", "corrupted body"])("rejects %s", async (kind) => {
+  test.each([
+    ["short body", "malformed-envelope"],
+    ["wrong magic", "malformed-envelope"],
+    ["wrong version", "malformed-envelope"],
+    ["corrupted body", "undecodable"],
+  ] as const)("rejects %s as %s", async (kind, reason) => {
     let bytes = codecA.encode(value as never).slice();
     if (kind === "short body") bytes = bytes.subarray(0, HEADER_SIZE - 1);
     if (kind === "wrong magic") bytes[0] = 0;
@@ -1085,6 +1186,7 @@ describe("binary request validation", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.response.status).toBe(400);
+      expect(result.reason).toBe(reason);
       expect(result.response.body).toBeNull();
       expect(result.response.headers.get("hyperfly-offer")).toBeNull();
     }
@@ -1102,6 +1204,7 @@ describe("binary request validation", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.response.status).toBe(415);
+        expect(result.reason).toBe("unknown-codec");
         expect(result.response.body).toBeNull();
         expect(result.response.headers.get("hyperfly-offer")).toBe(codecs.fingerprints[0] ?? null);
       }
@@ -1126,7 +1229,10 @@ describe("binary request validation", () => {
       headers: { "Content-Type": `${HYPERFLY_MEDIA_TYPE}-x` },
     }), registry);
     expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.response.status).toBe(415);
+    if (!result.ok) {
+      expect(result.response.status).toBe(415);
+      expect(result.reason).toBe("unsupported-media-type");
+    }
   });
 
   test("rethrows unexpected codec errors", async () => {
@@ -1246,7 +1352,7 @@ describe("hostile header performance", () => {
     `application/vnd.hyperfly;q=0${spaces}x`,
   ])("Accept OWS parsing completes within 50 ms (%#)", (accept) => {
     const start = performance.now();
-    const decision = negotiate(codecA.fingerprint, registry, { accept });
+    const decision = negotiate(codecA.fingerprint, registry, { httpAccept: accept });
     const elapsed = performance.now() - start;
     expect(decision.kind).toBe("hyperfly");
     expect(elapsed).toBeLessThan(50);
