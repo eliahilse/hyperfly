@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib.util
 import json
 import platform
 import random
 import statistics
 import sys
 from pathlib import Path
-from time import perf_counter_ns
+from time import perf_counter_ns, process_time_ns
 
 
 def struct(**fields):
@@ -77,16 +78,33 @@ def cases(rows):
     yield "profile/columnar", array(struct(actor=text, email=text, event=text)), profiled, dict(plan="columnar", profile=profile, pack=False)
 
 
-def median_ms(operation, runs):
-    samples = []
-    for _ in range(runs):
-        start = perf_counter_ns()
-        result = operation()
-        samples.append((perf_counter_ns() - start) / 1_000_000)
-        # Release the previous result outside the timed region, with ordinary GC
-        # enabled so allocation-heavy cases reflect serving actual responses.
-        del result
-    return statistics.median(samples)
+def medians(operations, runs):
+    samples = [([], []) for _ in operations]
+    for run in range(runs):
+        # Alternate revisions to distribute host load and thermal drift evenly.
+        order = range(len(operations)) if run % 2 else reversed(range(len(operations)))
+        for i in order:
+            start_cpu = process_time_ns()
+            start = perf_counter_ns()
+            result = operations[i]()
+            elapsed = perf_counter_ns() - start
+            cpu = process_time_ns() - start_cpu
+            samples[i][0].append(elapsed / 1_000_000)
+            samples[i][1].append(cpu / 1_000_000)
+            # Release results outside timing; GC remains enabled during decode.
+            del result
+    return [dict(wall_ms=statistics.median(wall), cpu_ms=statistics.median(cpu)) for wall, cpu in samples]
+
+
+def load_baseline(source):
+    package = source.resolve() / "hyperfly"
+    spec = importlib.util.spec_from_file_location(
+        "_hyperfly_bench_baseline", package / "__init__.py", submodule_search_locations=[str(package)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def main():
@@ -95,6 +113,7 @@ def main():
     parser.add_argument("--rows", type=int, default=10000)
     parser.add_argument("--case", action="append", help="case name (repeatable)")
     parser.add_argument("--source", type=Path, help="override the hyperfly source directory")
+    parser.add_argument("--compare-source", type=Path, help="alternate measurements with this baseline python/src")
     parser.add_argument("--json", type=Path, help="write machine-readable results")
     args = parser.parse_args()
     if args.runs < 15:
@@ -102,9 +121,12 @@ def main():
     if args.source:
         sys.path.insert(0, str(args.source.resolve()))
     from hyperfly import compile_ir
+    baseline = load_baseline(args.compare_source) if args.compare_source else None
 
     print(f"Python {platform.python_version()} / {platform.platform()}; {args.rows} rows; median of {args.runs}; GC enabled")
     print(f"{'case':24} {'body bytes':>12} {'decode ms':>12} {'encode ms':>12}")
+    if baseline:
+        print("Baseline/current pairs below use alternating runs; JSON includes CPU medians as well.")
     results = []
     for name, ir, value, options in cases(args.rows):
         if args.case and name not in args.case:
@@ -112,14 +134,27 @@ def main():
         codec = compile_ir(ir, **options)
         body = codec.encode_body(value)
         assert codec.decode_body(body) == value, name
+        codecs = [codec]
+        if baseline:
+            old = baseline.compile_ir(ir, **options)
+            assert old.encode_body(value) == body, name
+            assert old.decode_body(body) == value, name
+            codecs.insert(0, old)
         for _ in range(3):
-            codec.decode_body(body)
-            codec.encode_body(value)
+            for instance in codecs:
+                instance.decode_body(body)
+                instance.encode_body(value)
         gc.collect()
-        decoded = median_ms(lambda: codec.decode_body(body), args.runs)
-        encoded = median_ms(lambda: codec.encode_body(value), args.runs)
-        results.append(dict(case=name, bytes=len(body), decode_ms=decoded, encode_ms=encoded))
-        print(f"{name:24} {len(body):12d} {decoded:12.3f} {encoded:12.3f}", flush=True)
+        decoded = medians([lambda c=c: c.decode_body(body) for c in codecs], args.runs)
+        encoded = medians([lambda c=c: c.encode_body(value) for c in codecs], args.runs)
+        result = dict(case=name, bytes=len(body), decode_ms=decoded[-1]["wall_ms"], encode_ms=encoded[-1]["wall_ms"],
+                      decode_cpu_ms=decoded[-1]["cpu_ms"], encode_cpu_ms=encoded[-1]["cpu_ms"])
+        if baseline:
+            result["baseline"] = dict(decode_ms=decoded[0]["wall_ms"], encode_ms=encoded[0]["wall_ms"],
+                                      decode_cpu_ms=decoded[0]["cpu_ms"], encode_cpu_ms=encoded[0]["cpu_ms"])
+            print(f"{name + ' baseline':24} {len(body):12d} {decoded[0]['wall_ms']:12.3f} {encoded[0]['wall_ms']:12.3f}", flush=True)
+        results.append(result)
+        print(f"{name:24} {len(body):12d} {decoded[-1]['wall_ms']:12.3f} {encoded[-1]['wall_ms']:12.3f}", flush=True)
     if args.json:
         args.json.write_text(json.dumps(dict(python=platform.python_version(), rows=args.rows, runs=args.runs, results=results), indent=2) + "\n")
 
