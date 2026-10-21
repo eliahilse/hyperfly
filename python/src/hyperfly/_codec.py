@@ -1835,7 +1835,7 @@ def _read_slices(
         stop = pos + count * stride
         if size < 0x80 and size <= limit and stop <= end and buf[pos:stop:stride].count(size) == count:
             r.pos = stop
-            return array(offset, range(pos + 1, stop, stride)), array(offset, range(pos + stride, stop + 1, stride)), None, 0
+            return array(offset, range(pos + 1, stop + 1, stride)), array(offset, range(pos + stride, stop + 1, stride)), None, 0
     starts = array(offset)
     ends = array(offset)
     for j in range(count):

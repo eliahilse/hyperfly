@@ -88,3 +88,20 @@ def test_two_byte_varint_batches_preserve_values_and_first_error():
         decoded, error = read_ulebs(Reader(bytes(malformed), Limits()), len(values))
         assert list(decoded) == values[:index]
         assert error.code == "varint"
+
+
+@pytest.mark.parametrize("kind,empty", [("string", ""), ("bytes", b"")])
+@pytest.mark.parametrize("flagged", [False, True])
+@pytest.mark.parametrize("count", [16, 17, 64])
+def test_uniform_empty_column_preserves_every_row(kind, empty, flagged, count):
+    field = dict(name="value", type={"kind": kind})
+    if flagged:
+        field.update(optional=True, nullable=True)
+    codec = compile_ir({"kind": "array", "element": {"kind": "struct", "fields": [field]}},
+                       plan="columnar", pack=False)
+    rows = [{"value": empty} for _ in range(count)]
+    if flagged:
+        rows[2] = {"value": None}
+        rows[7] = {}
+    body = codec.encode_body(rows)
+    assert codec.decode_body(body) == rows
