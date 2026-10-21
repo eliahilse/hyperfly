@@ -1,7 +1,9 @@
 import type { Codec } from "./codec.js";
 
 /**
- * Codecs keyed by fingerprint. Rotation is why this exists: retraining a profile
+ * Versions of one payload type, keyed by fingerprint. JSON bodies use the first
+ * registered codec as their value model; an empty registry leaves JSON unchanged.
+ * Rotation is why this exists: retraining a profile
  * produces a new fingerprint, so a deployment that holds only one codec per route
  * turns every rollout into a cutover in which in-flight clients fall back to JSON.
  * Holding the outgoing codec alongside the incoming one makes that a transition.

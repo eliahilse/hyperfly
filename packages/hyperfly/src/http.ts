@@ -6,6 +6,7 @@ import type { Profile, SharedProfile } from "./profile.js";
 import type { Limits } from "./reader.js";
 import type { CodecRegistry } from "./registry.js";
 import { byteLengthOf, isUint8Array } from "./typed-array.js";
+import { INT_MAX, INT_MIN } from "./varint.js";
 
 export const HYPERFLY_MEDIA_TYPE = "application/vnd.hyperfly";
 export const ACCEPT_HEADER = "hyperfly-accept";
@@ -133,18 +134,291 @@ export interface Encoded {
   headers: Record<string, string>;
 }
 
+type JsonDecoder = (value: unknown) => unknown;
+
+// Codec IR is immutable. Cache JSON decoders separately so binary operations do no JSON work.
+const jsonDecoders = new WeakMap<Codec, JsonDecoder>();
+
+function jsonFailure(path: string, message: string): never {
+  throw new DecodeError("json", `${path}: ${message}`);
+}
+
+/** Build paths only for failures, keeping successful validation free of path strings. */
+function jsonAt(cause: unknown, key: string): never {
+  if (isInstance(cause, DecodeError) && cause.code === "json") {
+    throw new DecodeError("json", `$${key}${cause.message.slice(1)}`, { cause: cause.cause });
+  }
+  throw cause;
+}
+
+function base64(bytes: Uint8Array): string {
+  const chunks: string[] = [];
+  for (let start = 0; start < bytes.length; start += 0x8000) {
+    chunks.push(String.fromCharCode(...bytes.subarray(start, start + 0x8000)));
+  }
+  return btoa(chunks.join(""));
+}
+
+/** Inline common scalar validation in struct loops without a polymorphic decoder call per field. */
+function jsonScalarUnchanged(node: IRNode, value: unknown): boolean {
+  switch (node.kind) {
+    case "bool": return typeof value === "boolean";
+    case "string": return typeof value === "string";
+    case "float64": return typeof value === "number" && Number.isFinite(value);
+    case "int":
+      return typeof value === "number" && Number.isSafeInteger(value) && value >= INT_MIN && value <= INT_MAX
+        && (node.min === undefined || value >= node.min) && (node.max === undefined || value <= node.max)
+        && !Object.is(value, -0);
+    default: return false;
+  }
+}
+
+function jsonDecoder(codec: Codec): JsonDecoder {
+  const cached = jsonDecoders.get(codec);
+  if (cached) return cached;
+  function decoder(node: IRNode): JsonDecoder {
+    switch (node.kind) {
+      case "bytes":
+        return (value) => {
+          if (typeof value !== "string") return jsonFailure("$", "expected a base64 string");
+          let raw: string;
+          try {
+            raw = atob(value);
+          } catch (cause) {
+            throw new DecodeError("json", "$: expected canonical padded base64", { cause });
+          }
+          if (btoa(raw) !== value) return jsonFailure("$", "expected canonical padded base64");
+          return Uint8Array.from(raw, (char) => char.charCodeAt(0));
+        };
+      case "nullable": {
+        const inner = decoder(node.inner);
+        return (value) => value === null ? null : inner(value);
+      }
+      case "array": {
+        const element = decoder(node.element);
+        return (value) => {
+          if (!Array.isArray(value)) return jsonFailure("$", "expected array");
+          if (node.length !== undefined && value.length !== node.length) return jsonFailure("$", "array length does not match declared length");
+          let output = value;
+          let i = 0;
+          try {
+            for (; i < value.length; i++) {
+              const item: unknown = value[i];
+              const converted = element(item);
+              if (item !== converted || (item === 0 && !Object.is(item, converted))) {
+                if (output === value) output = value.slice();
+                output[i] = converted;
+              }
+            }
+          } catch (cause) {
+            jsonAt(cause, `[${i}]`);
+          }
+          return output;
+        };
+      }
+      case "struct": {
+        const fields = node.fields.map((field) => ({ ...field, decode: decoder(field.type) }));
+        const names = new Set(fields.map((field) => field.name));
+        const decodeStruct: JsonDecoder = (value) => {
+          if (typeof value !== "object" || value === null || Array.isArray(value)) return jsonFailure("$", "expected object");
+          const input = value as Record<string, unknown>;
+          let output = input;
+          const keys = Object.keys(input);
+          let present = 0;
+          for (let i = 0; i < fields.length; i++) {
+            const field = fields[i]!;
+            if (keys[i] !== field.name && !Object.hasOwn(input, field.name)) {
+              if (!field.optional) return jsonFailure(`$.${field.name}`, "missing required field");
+              continue;
+            }
+            present++;
+            const item = input[field.name];
+            if ((field.nullable && item === null) || jsonScalarUnchanged(field.type, item)) continue;
+            let converted: unknown;
+            try {
+              converted = field.nullable && item === null ? null : field.decode(item);
+            } catch (cause) {
+              jsonAt(cause, `.${field.name}`);
+            }
+            if (item !== converted || (item === 0 && !Object.is(item, converted))) {
+              if (output === input) output = { ...input };
+              output[field.name] = converted;
+            }
+          }
+          if (keys.length !== present) {
+            if (output === input) output = { ...input };
+            for (const key of keys) if (!names.has(key)) delete output[key];
+          }
+          return output;
+        };
+        if (!fields.every((field) => ["bool", "string", "float64", "int"].includes(field.type.kind))) return decodeStruct;
+        const scalars = fields.map((field) => ({
+          name: field.name,
+          nullable: field.nullable,
+          type: field.type.kind === "bool" ? "boolean" : field.type.kind === "string" ? "string" : "number",
+          integer: field.type.kind === "int",
+          bounded: field.type.kind === "int" && (field.type.min !== undefined || field.type.max !== undefined),
+          min: field.type.kind === "int" ? field.type.min ?? INT_MIN : -Infinity,
+          max: field.type.kind === "int" ? field.type.max ?? INT_MAX : Infinity,
+        }));
+        // Scalar records usually already have the expected shape. Keep that loop small
+        // and leave missing fields, reordered keys and conversions to the general path.
+        return (value) => {
+          if (typeof value !== "object" || value === null || Array.isArray(value)) return decodeStruct(value);
+          const input = value as Record<string, unknown>;
+          const keys = Object.keys(input);
+          if (keys.length !== scalars.length) return decodeStruct(value);
+          for (let i = 0; i < scalars.length; i++) {
+            const field = scalars[i]!;
+            if (keys[i] !== field.name) return decodeStruct(value);
+            const item = input[field.name];
+            if (field.nullable && item === null) continue;
+            if (typeof item !== field.type) return decodeStruct(value);
+            if (field.integer) {
+              if (!Number.isSafeInteger(item) || (field.bounded && ((item as number) < field.min || (item as number) > field.max))
+                || (item === 0 && Object.is(item, -0))) return decodeStruct(value);
+            } else if (typeof item === "number" && !Number.isFinite(item)) return decodeStruct(value);
+          }
+          return input;
+        };
+      }
+      case "enum": {
+        const members = new Set(node.members);
+        return (value) => {
+          if (typeof value !== "string") return jsonFailure("$", "expected string");
+          if (!members.has(value)) return jsonFailure("$", "unknown enum member");
+          return value;
+        };
+      }
+      case "bool":
+        return (value) => typeof value === "boolean" ? value : jsonFailure("$", "expected boolean");
+      case "int":
+        return (value) => {
+          if (typeof value !== "number" || !Number.isSafeInteger(value) || value < INT_MIN || value > INT_MAX) {
+            return jsonFailure("$", "expected integral number in the safe integer domain");
+          }
+          if ((node.min !== undefined && value < node.min) || (node.max !== undefined && value > node.max)) {
+            return jsonFailure("$", "integer outside declared bounds");
+          }
+          return value === 0 ? 0 : value;
+        };
+      case "float64":
+        return (value) => typeof value === "number" && Number.isFinite(value) ? value : jsonFailure("$", "expected finite float64");
+      case "string":
+        return (value) => typeof value === "string" ? value : jsonFailure("$", "expected string");
+      case "literal":
+        return (value) => {
+          if (value !== node.value) return jsonFailure("$", "literal mismatch");
+          return value === 0 ? 0 : value;
+        };
+    }
+  }
+  const decode = decoder(codec.ir);
+  jsonDecoders.set(codec, decode);
+  return decode;
+}
+
+const bufferByteLengths = [ArrayBuffer, globalThis.SharedArrayBuffer]
+  .filter((type) => typeof type === "function")
+  .map((type) => Object.getOwnPropertyDescriptor(type.prototype, "byteLength")!.get!);
+
+/** The intrinsic getters recognize raw storage, shared or not, from other realms without trusting its tag. */
+function isRawArrayBuffer(value: object): boolean {
+  if (!("byteLength" in value)) return false;
+  for (const byteLength of bufferByteLengths) {
+    try {
+      byteLength.call(value);
+      return true;
+    } catch {
+      // Not this kind of buffer.
+    }
+  }
+  return false;
+}
+
+/** A bounded preflight keeps ordinary data on the native JSON.stringify fast path. */
+function mayContainBytes(value: object, depth = 0): boolean {
+  if (depth === 128 || ArrayBuffer.isView(value) || "toJSON" in value || isRawArrayBuffer(value)) return true;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const item: unknown = value[i];
+      if (typeof item === "object" && item !== null) {
+        if (mayContainBytes(item, depth + 1)) return true;
+      } else if (typeof item === "function" || typeof item === "bigint") return true;
+    }
+  } else {
+    for (const key in value) {
+      if (!Object.hasOwn(value, key)) continue;
+      const item: unknown = (value as Record<string, unknown>)[key];
+      if (typeof item === "object" && item !== null) {
+        if (mayContainBytes(item, depth + 1)) return true;
+      } else if (typeof item === "function" || typeof item === "bigint") return true;
+    }
+  }
+  return false;
+}
+
+/** JSON.stringify owns traversal and toJSON behavior; bytes convert independently of the schema. */
+function jsonReplacer() {
+  const parents = new WeakMap<object, { holder: object; key: string }>();
+  function unsupported(holder: object, key: string): never {
+    let path = "";
+    for (let parent = parents.get(holder); parent; parent = parents.get(holder)) {
+      path = (Array.isArray(holder) ? `[${key}]` : `.${key}`) + path;
+      holder = parent.holder;
+      key = parent.key;
+    }
+    throw new EncodeError("json", `$${path}: unsupported byte storage or view; use Uint8Array`);
+  }
+  return function (this: object, key: string, value: unknown): unknown {
+    // toJSON runs first, so inspect the original as well to recognize Buffer and byte subclasses.
+    const original: unknown = Reflect.get(this, key);
+    if (typeof original === "object" && original !== null && original !== value) {
+      if (ArrayBuffer.isView(original)) {
+        if (isUint8Array(original)) return base64(original);
+        unsupported(this, key);
+      }
+      if (isRawArrayBuffer(original)) unsupported(this, key);
+    }
+    if (typeof value === "object" && value !== null) {
+      if (ArrayBuffer.isView(value)) {
+        if (isUint8Array(value)) return base64(value);
+        unsupported(this, key);
+      }
+      if (isRawArrayBuffer(value)) unsupported(this, key);
+      parents.set(value, { holder: this, key });
+    }
+    return value;
+  };
+}
+
+function parseJson<T>(text: string, registry: CodecRegistry<T>): T {
+  const value: unknown = JSON.parse(text);
+  const codec = registry.get(registry.fingerprints[0] ?? "");
+  if (!codec) return value as T;
+  try {
+    return jsonDecoder(codec)(value) as T;
+  } catch (cause) {
+    if (isInstance(cause, DecodeError) && cause.code === "json") throw cause;
+    throw new DecodeError("json", "$: JSON value could not be converted under the codec", { cause });
+  }
+}
+
 function jsonBody(value: unknown): string {
   let body: string | undefined;
   try {
-    body = JSON.stringify(value);
+    const needsReplacer = typeof value === "object" && value !== null
+      ? mayContainBytes(value) : typeof value === "function" || typeof value === "bigint";
+    body = needsReplacer ? JSON.stringify(value, jsonReplacer()) : JSON.stringify(value);
   } catch (cause) {
+    if (isInstance(cause, EncodeError) && cause.code === "json") throw cause;
     throw new EncodeError("json", `$: ${messageOf(cause, "value could not be encoded as JSON")}`, { cause });
   }
   if (body === undefined) throw new EncodeError("json", "$: value has no JSON representation");
   return body;
 }
 
-/** Encode one value according to a negotiation decision. */
+/** Encode one value according to a negotiation decision; JSON bytes are schema-independent. */
 export function encodeFor<T>(decision: Negotiation<T>, value: NoInfer<T>, options: EncodeOptions = {}): Encoded {
   if (decision.kind === "hyperfly") {
     try {
@@ -237,14 +511,17 @@ function artifactRecord(
   return value as Record<string, unknown>;
 }
 
-/** Compile parsed artifact content and verify its fingerprint (negotiation §3). */
+/**
+ * Parse artifact text, compile its content and verify its fingerprint (negotiation §3).
+ * Malformed JSON throws `artifact`; invalid parsed content throws `ir`.
+ */
 export function loadArtifact<T = unknown>(text: string, fingerprint: string, options: LoadArtifactOptions = {}): Codec<T> {
   const expected = checkedFingerprint(fingerprint);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    if (error instanceof SyntaxError) throw new HyperflyError("json", `artifact is not JSON: ${error.message}`, { cause: error });
+    if (error instanceof SyntaxError) throw new HyperflyError("artifact", `artifact is not JSON: ${error.message}`, { cause: error });
     throw error;
   }
   checkNesting(parsed);
@@ -285,7 +562,12 @@ export interface FetchArtifactOptions extends LoadArtifactOptions {
   signal?: AbortSignal;
 }
 
-/** Fetch and verify an offered artifact. 404 is a miss; another non-2xx status throws code "fingerprint"; network errors and aborts propagate. */
+/**
+ * Fetch and verify an offered artifact. 404 is a miss; other non-2xx statuses and
+ * unreadable, oversized, non-UTF-8 or malformed JSON bodies throw `artifact`.
+ * Invalid artifact/IR/profile content throws `ir`; identity mismatches throw
+ * `fingerprint`. Network errors and aborts propagate.
+ */
 export async function fetchArtifact<T = unknown>(
   base: string | URL,
   fingerprint: string,
@@ -301,19 +583,19 @@ export async function fetchArtifact<T = unknown>(
   if (!response.ok) {
     response.body?.cancel().catch(() => {});
     if (response.status === 404) return undefined;
-    throw new HyperflyError("fingerprint", `artifact fetch failed with status ${response.status}`);
+    throw new HyperflyError("artifact", `artifact fetch failed with status ${response.status}`);
   }
   const result = await readLimited(response.body, maxBytes);
   if (!result.ok) {
     if (options.signal?.aborted) throw options.signal.reason;
-    if (result.reason === "too-large") throw new HyperflyError("limit", `artifact exceeds maxBytes ${maxBytes}`);
-    throw new HyperflyError("ir", "artifact body could not be read");
+    if (result.reason === "too-large") throw new HyperflyError("artifact", `artifact exceeds maxBytes ${maxBytes}`);
+    throw new HyperflyError("artifact", "artifact body could not be read");
   }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(result.bytes);
   } catch {
-    throw new HyperflyError("ir", "artifact is not valid UTF-8");
+    throw new HyperflyError("artifact", "artifact is not valid UTF-8");
   }
   return loadArtifact<T>(text, fp, options);
 }
@@ -394,6 +676,9 @@ export type DecodedResponse<T> =
  * Decode a response body according to what the server said it sent. A codec the
  * client does not hold is not an error the client can recover from by guessing,
  * so it is reported as a miss and the caller re-requests as JSON.
+ * JSON uses strict UTF-8 and the first registered codec's value model, converting
+ * canonical base64 to bytes and dropping unknown struct keys. An empty registry
+ * leaves parsed JSON unchanged; conversion failures throw code `json`.
  */
 export function decodeResponse<T>(
   contentType: string | null | undefined,
@@ -408,7 +693,7 @@ export function decodeResponse<T>(
       throw new DecodeError("json", "$: body is not valid UTF-8", { cause });
     }
     try {
-      return { kind: "json", value: JSON.parse(text) as T };
+      return { kind: "json", value: parseJson(text, registry) };
     } catch (cause) {
       if (cause instanceof SyntaxError) throw new DecodeError("json", `$: ${cause.message}`, { cause });
       throw cause;
@@ -504,7 +789,7 @@ export async function readBody<T>(
 
 /** Whether a Content-Length of ASCII digits names more than maxBytes, compared as digits so no length rounds. */
 function exceeds(contentLength: string, maxBytes: number): boolean {
-  if (!/^[0-9]+$/.test(contentLength)) return false;
+  if (!/^[0-9]+(?![\s\S])/.test(contentLength)) return false;
   let start = 0;
   while (start < contentLength.length - 1 && contentLength.charCodeAt(start) === 0x30) start++;
   const digits = contentLength.slice(start);
@@ -540,7 +825,7 @@ async function readBodyWithinLimit<T>(
   const bytes = result.bytes;
   if (!isHyperfly) {
     try {
-      return { ok: true, value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as T };
+      return { ok: true, value: parseJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes), registry) };
     } catch {
       return refuse(400, "malformed-json");
     }
