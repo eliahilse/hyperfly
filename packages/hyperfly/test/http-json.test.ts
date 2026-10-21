@@ -189,7 +189,7 @@ test("JSON conversion failures retain nested paths", () => {
 });
 
 test.each([
-  new ArrayBuffer(1), new DataView(new ArrayBuffer(1)), new Int8Array([1]), new Uint8ClampedArray([1]),
+  new ArrayBuffer(1), new SharedArrayBuffer(1), new DataView(new ArrayBuffer(1)), new Int8Array([1]), new Uint8ClampedArray([1]),
   runInNewContext("new ArrayBuffer(1)") as ArrayBuffer,
   runInNewContext("new DataView(new ArrayBuffer(1))") as DataView,
   runInNewContext("new Uint16Array([1])") as Uint16Array,
@@ -199,6 +199,11 @@ test.each([
     .toThrow(expect.objectContaining({ code: "json", message: "$.rows[0].data: unsupported byte storage or view; use Uint8Array" }));
   expect(() => encodeFor(decision, value))
     .toThrow(expect.objectContaining({ code: "json", message: "$: unsupported byte storage or view; use Uint8Array" }));
+});
+
+test("JSON rejects shared storage beside bytes on the replacer path", () => {
+  expect(() => encodeFor(negotiate(null, new CodecRegistry()), { s: new SharedArrayBuffer(2), b: new Uint8Array([255]) }))
+    .toThrow(expect.objectContaining({ code: "json", message: "$.s: unsupported byte storage or view; use Uint8Array" }));
 });
 
 test("JSON preflight ignores inherited enumerable getters like JSON.stringify", () => {

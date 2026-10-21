@@ -318,17 +318,22 @@ function jsonDecoder(codec: Codec): JsonDecoder {
   return decode;
 }
 
-const arrayBufferByteLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")!.get!;
+const bufferByteLengths = [ArrayBuffer, globalThis.SharedArrayBuffer]
+  .filter((type) => typeof type === "function")
+  .map((type) => Object.getOwnPropertyDescriptor(type.prototype, "byteLength")!.get!);
 
-/** The intrinsic getter recognizes raw storage from other realms without trusting its tag. */
+/** The intrinsic getters recognize raw storage, shared or not, from other realms without trusting its tag. */
 function isRawArrayBuffer(value: object): boolean {
   if (!("byteLength" in value)) return false;
-  try {
-    arrayBufferByteLength.call(value);
-    return true;
-  } catch {
-    return false;
+  for (const byteLength of bufferByteLengths) {
+    try {
+      byteLength.call(value);
+      return true;
+    } catch {
+      // Not this kind of buffer.
+    }
   }
+  return false;
 }
 
 /** A bounded preflight keeps ordinary data on the native JSON.stringify fast path. */
