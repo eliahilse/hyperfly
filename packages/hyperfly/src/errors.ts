@@ -17,7 +17,7 @@
  * `ir`: IR or a profile is invalid, or an artifact names an unimplemented wire, layout or plan version.
  * `packed`: DEFLATE is invalid, has trailing bytes or produces the wrong inflated length.
  * `unsupported`: inflate capability, a required profile entry or a schema construct is unsupported.
- * `artifact`: discovery has a non-2xx status other than a 404 miss, or its body is unreadable, oversized, non-UTF-8 or invalid JSON; wire-v0 §9 defines this code, but this union omits it.
+ * `artifact`: a discovery response or artifact text cannot be read: a non-2xx status other than a 404 miss, or a body that is unreadable, oversized, non-UTF-8 or not well-formed JSON; parsed content that is not a valid artifact is `ir`.
  * `json`: JSON parsing or JSON-body UTF-8 decoding fails in an adapter.
  * `validation`: schema parsing fails when Zod validation is enabled.
  * `options`: compile, training or adapter options are invalid or cannot be read.
@@ -37,6 +37,7 @@ export type ErrorCode =
   | "limit"
   | "header"
   | "fingerprint"
+  | "artifact"
   | "ir"
   | "packed"
   | "unsupported"

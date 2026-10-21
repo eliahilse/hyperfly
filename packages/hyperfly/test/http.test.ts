@@ -260,7 +260,7 @@ describe("round trip over the protocol", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(HyperflyError);
       expect(error).not.toBeInstanceOf(DecodeError);
-      expect((error as HyperflyError).code).toBe("json");
+      expect((error as HyperflyError).code).toBe("artifact");
       expect((error as HyperflyError).cause).toBeInstanceOf(SyntaxError);
       expect((error as HyperflyError).message).toContain("artifact is not JSON");
     }
@@ -770,7 +770,7 @@ describe("request content types", () => {
 });
 
 describe("request body limits", () => {
-  const registry = new CodecRegistry([codecA as never]);
+  const registry = new CodecRegistry([compileIR({ kind: "int" })]);
   const url = "https://example.test/v1/thing";
 
   test.each([NaN, Infinity, -Infinity, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, null, "1024", true])(
@@ -972,7 +972,7 @@ describe("request body limits", () => {
         controller.close();
       },
     });
-    expect(await readBody(new Request(url, { method: "POST", body }), registry, {
+    expect(await readBody(new Request(url, { method: "POST", body }), new CodecRegistry([compileIR({ kind: "string" })]), {
       maxBytes: bytes.byteLength,
     })).toEqual({ ok: true, value: "é" });
   });

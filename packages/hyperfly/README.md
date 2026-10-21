@@ -99,6 +99,17 @@ export default {
 };
 ```
 
+A `CodecRegistry` holds versions of one payload type. JSON decoding uses its first registered codec;
+an empty registry leaves parsed JSON unchanged. JSON uses canonical padded standard base64 for `bytes`
+at any depth. Decoding converts base64 back to `Uint8Array`, checks the codec value model, accepts integral
+JSON numbers for integers, and drops unknown struct keys. Conversion failures are code `json` for responses
+and `400` with reason `malformed-json` for requests.
+
+JSON encoding converts every `Uint8Array` to base64 regardless of the schema or how the JSON decision
+was created, including `Buffer` and values from other realms. Raw `ArrayBuffer` and non-`Uint8Array`
+views (including `DataView`) raise code `json` with their path, like Python's unsupported `memoryview`;
+wrap the desired range in a `Uint8Array` to send it as bytes.
+
 A client that holds nothing gets JSON plus a `Hyperfly-Offer` naming an artifact it could fetch; once it has it, the
 same route can answer in binary. Responses carry `Vary: Hyperfly-Accept, Accept`.
 `respond` answers HEAD with the headers GET would get and no body, and status 204, 205 or 304 with the negotiated
@@ -137,7 +148,7 @@ The first applicable rule in negotiation v1 §4 wins:
 | 415 | `unsupported-media-type` | Unsupported media type; absent Content-Type means JSON, and `+json` is accepted. |
 | 413 | `too-large` | Body exceeds `maxBytes`, checked as bytes arrive; Content-Length can reject early. |
 | 400 | `unreadable` | The body stream cannot be read. |
-| 400 | `malformed-json` | A JSON body is malformed UTF-8 or JSON. |
+| 400 | `malformed-json` | Malformed UTF-8/JSON or conversion under the first codec fails. |
 | 400 | `malformed-envelope` | Invalid binary envelope header. |
 | 400 | `codec-mismatch` | `Hyperfly-Codec` disagrees with the envelope fingerprint. |
 | 415 + Hyperfly-Offer | `unknown-codec` | Envelope fingerprint is unknown; an offer is included when a codec is registered. |
@@ -338,7 +349,7 @@ through the [JSON fallback](#json-fallback).
 
 Separately, `readBody`'s `maxBytes` bounds incoming request bytes, JSON included, and answers 413 past it; it
 defaults to `DEFAULT_MAX_BODY_BYTES` from `hyperfly/http`, 1 MiB (1,048,576 bytes). `fetchArtifact` applies the same
-default to artifact downloads and throws code `limit` past it.
+default to artifact downloads and throws code `artifact` past it.
 
 ## Errors
 
@@ -348,7 +359,7 @@ with `expected` and `actual`, and `UnsupportedSchemaError` carries the schema `p
 it, such as the `SyntaxError` of malformed JSON, a `ZodError` or a failed inflate or deflate hook, that error is the standard
 `cause`; an error that describes the input itself has none. A `maxBytes` that is not a non-negative safe integer is
 code `options`. In `fetchArtifact`, a rejected `fetch` and an abort propagate unchanged; a failure while reading the
-artifact body is code `ir`.
+artifact body is code `artifact`.
 
 ```ts
 import { HyperflyError } from "hyperfly";
@@ -375,13 +386,14 @@ try {
 | `trailing` | Bytes remain after a complete body. |
 | `truncated` | Input ends before a required byte or value. |
 | `depth` | Nesting exceeds `maxDepth`. |
-| `limit` | `maxItems`, `maxByteLength`, an amplification bound, the item or byte budget, or a `maxBytes` download bound. |
+| `limit` | `maxItems`, `maxByteLength`, an amplification bound, the item or byte budget. |
 | `header` | Envelope is too short, has bad magic or an unsupported wire major. |
-| `fingerprint` | Fingerprint mismatch, invalid artifact fingerprint or failed artifact HTTP status other than 404. |
-| `ir` | Invalid IR, profile or artifact structure/plan, or unreadable artifact content. |
+| `fingerprint` | Fingerprint mismatch or invalid artifact fingerprint. |
+| `ir` | Invalid IR, profile or parsed artifact structure/plan. |
 | `packed` | Invalid compressed stream, decompressed length mismatch, or a failing or invalid deflate hook. |
 | `unsupported` | Schema construct or required profile/packing capability is unsupported. |
-| `json` | Malformed JSON or UTF-8 in `decodeResponse`, malformed artifact text, or a value the JSON fallback cannot encode; the underlying error, when there is one, is `cause`. |
+| `artifact` | Non-2xx discovery status other than 404, unreadable/oversized/non-UTF-8 body, or malformed artifact JSON. |
+| `json` | Malformed JSON/UTF-8 or codec conversion in `decodeResponse`, or a value the JSON fallback cannot encode; the underlying error, when there is one, is `cause`. |
 | `validation` | Zod `validate: true` failed on encode or decode; the `ZodError` is `cause`. |
 | `options` | Invalid compile, artifact, `train` or HTTP options, such as an unknown limit or an invalid `maxBytes`. |
 
